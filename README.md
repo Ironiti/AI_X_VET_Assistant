@@ -1,7 +1,7 @@
-TSUM Recommender System
+AI VET Assistant
 ==============================
 
-A recommender system for TSUM e-commerce platform to improve product recommendations.
+AI Assistant for VET doctors.
 
 Project Organization
 ------------
