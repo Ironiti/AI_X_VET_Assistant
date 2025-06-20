@@ -27,11 +27,11 @@ aiohttp==3.11.18
 transformers==4.51.3
 asyncio=3.4.3
 aiogram
-# qwen-vl-utils==0.0.11
-# accelerate==1.6.0
-# hf_xet==1.1.1
-# einops==0.8.1
 openpyxl==3.1.5
-# wandb==0.19.11
-# replay-rec==0.18.1
-# lightning
+langchain-community==0.3.25
+sentence-transformers==4.1.0
+chromadb==1.0.12
+langchain-huggingface==0.3.0
+email-validator==2.2.0
+aiosmtplib==3.0.1
+aiosqlite==0.21.0

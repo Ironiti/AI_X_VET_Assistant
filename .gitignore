@@ -19,7 +19,7 @@ venv/
 .jupyter_kernel/
 
 # Other
-/models/
+# /models/
 downloads/
 lib/
 # /data/

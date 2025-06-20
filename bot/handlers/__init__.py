@@ -1,23 +1,21 @@
-import os
-from pathlib import Path
 from aiogram import Bot, Dispatcher
 from aiogram.types import DefaultBotProperties
 from aiogram.enums.parse_mode import ParseMode
-from bot.handlers import start_router, analysis_router
+from aiogram.fsm.storage.memory import MemoryStorage
 
-from dotenv import load_dotenv
-ENV_PATH = Path(__file__).parent.parent / ".env"
-load_dotenv(dotenv_path=ENV_PATH)
+from bot.handlers.default import default_router
+from bot.handlers.get_phone import get_phone_router
+from bot.handlers.registration import registration_router
+from config import BOT_API_KEY
 
-BOT_API_KEY = os.getenv("BOT_API_KEY")
 if not BOT_API_KEY:
-    raise RuntimeError(f"BOT_API_KEY not found in {ENV_PATH}")
-
+    raise RuntimeError('BOT_API_KEY not found.')
 
 bot = Bot(
     token=BOT_API_KEY, 
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
 )
-dp = Dispatcher()
-dp.include_router(start_router)
-dp.include_router(analysis_router)
+dp = Dispatcher(storage=MemoryStorage())
+dp.include_router(default_router)
+dp.include_router(get_phone_router)
+dp.include_router(registration_router)
