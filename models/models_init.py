@@ -12,137 +12,35 @@ TOP_P = 1.0
 if not OPENROUTER_API_KEY:
     raise RuntimeError('OPENROUTER_API_KEY not found.')
 
-# FREE
-qwen_coder_32b_instruct_free = ChatOpenAI(
-    model="qwen/qwen-2.5-coder-32b-instruct:free",
-    openai_api_key=OPENROUTER_API_KEY,
-    openai_api_base="https://openrouter.ai/api/v1",
-    temperature=TEMPERATURE,
-    top_p=TOP_P,
-    seed=SEED,
-    streaming=True,
-)
+def make_chat(model_name: str, streaming: bool = True) -> ChatOpenAI:
+    """
+    Helper to instantiate ChatOpenAI with correct kwargs
+    """
+    return ChatOpenAI(
+        model=model_name,
+        openai_api_key=OPENROUTER_API_KEY,
+        openai_api_base="https://openrouter.ai/api/v1",
+        temperature=TEMPERATURE,
+        streaming=streaming,
+        model_kwargs={"top_p": TOP_P, "seed": SEED},
+    )
 
-gemma3_27b_instruct_free = ChatOpenAI(
-    model="google/gemma-3-27b-it:free",
-    openai_api_key=OPENROUTER_API_KEY,
-    openai_api_base="https://openrouter.ai/api/v1",
-    temperature=TEMPERATURE,
-    top_p=TOP_P,
-    seed=SEED,
-    streaming=True,
-)
+# FREE models
+qwen_coder_32b_instruct_free = make_chat("qwen/qwen-2.5-coder-32b-instruct:free")
+gemma3_27b_instruct_free = make_chat("google/gemma-3-27b-it:free")
+qwq_32b_instruct_free = make_chat("qwen/qwq-32b:free")
+deepseek_r1_instruct_free = make_chat("deepseek/deepseek-r1:free")
+gemini_2_5_pro_exp_free = make_chat("google/gemini-2.5-pro-exp-03-25:free")
 
-qwq_32b_instruct_free = ChatOpenAI(
-    model="qwen/qwq-32b:free",
-    openai_api_key=OPENROUTER_API_KEY,
-    openai_api_base="https://openrouter.ai/api/v1",
-    temperature=TEMPERATURE,
-    top_p=TOP_P,
-    seed=SEED,
-    streaming=True,
-)
-
-deepseek_r1_instruct_free = ChatOpenAI(
-    model="deepseek/deepseek-r1:free",
-    openai_api_key=OPENROUTER_API_KEY,
-    openai_api_base="https://openrouter.ai/api/v1",
-    temperature=TEMPERATURE,
-    top_p=TOP_P,
-    seed=SEED,
-    streaming=True,
-)
-
-gemini_2_5_pro_exp_free = ChatOpenAI(
-    model="google/gemini-2.5-pro-exp-03-25:free",
-    openai_api_key=OPENROUTER_API_KEY,
-    openai_api_base="https://openrouter.ai/api/v1",
-    temperature=TEMPERATURE,
-    top_p=TOP_P,
-    seed=SEED,
-    streaming=True,
-)
-
-# PAYABLE
-gpt_4o = ChatOpenAI(
-    model="openai/gpt-4o",
-    openai_api_key=OPENROUTER_API_KEY,
-    openai_api_base="https://openrouter.ai/api/v1",
-    temperature=TEMPERATURE,
-    top_p=TOP_P,
-    seed=SEED,
-    streaming=True,
-)
-
-openai_o1 = ChatOpenAI(
-    model="openai/o1",
-    openai_api_key=OPENROUTER_API_KEY,
-    openai_api_base="https://openrouter.ai/api/v1",
-    temperature=TEMPERATURE,
-    top_p=TOP_P,
-    seed=SEED,
-    streaming=True,
-)
-
-openai_o3_mini_high = ChatOpenAI(
-    model="openai/o3-mini-high",
-    openai_api_key=OPENROUTER_API_KEY,
-    openai_api_base="https://openrouter.ai/api/v1",
-    temperature=TEMPERATURE,
-    top_p=TOP_P,
-    seed=SEED,
-    streaming=True,
-)
-
-openai_o3_mini = ChatOpenAI(
-    model="openai/o3-mini",
-    openai_api_key=OPENROUTER_API_KEY,
-    openai_api_base="https://openrouter.ai/api/v1",
-    temperature=TEMPERATURE,
-    top_p=TOP_P,
-    seed=SEED,
-    streaming=True,
-)
-
-openai_o3 = ChatOpenAI(
-    model="openai/o3",
-    openai_api_key=OPENROUTER_API_KEY,
-    openai_api_base="https://openrouter.ai/api/v1",
-    temperature=TEMPERATURE,
-    top_p=TOP_P,
-    seed=SEED,
-    streaming=True,
-)
-
-openai_o1_pro = ChatOpenAI(
-    model="openai/o1-pro",
-    openai_api_key=OPENROUTER_API_KEY,
-    openai_api_base="https://openrouter.ai/api/v1",
-    temperature=TEMPERATURE,
-    top_p=TOP_P,
-    seed=SEED,
-    streaming=True,
-)
-
-openai_o1_mini = ChatOpenAI(
-    model="openai/o1-mini",
-    openai_api_key=OPENROUTER_API_KEY,
-    openai_api_base="https://openrouter.ai/api/v1",
-    temperature=TEMPERATURE,
-    top_p=TOP_P,
-    seed=SEED,
-    streaming=True,
-)
-
-openai_gpt_4o_search_preview = ChatOpenAI(
-    model="openai/gpt-4o-search-preview",
-    openai_api_key=OPENROUTER_API_KEY,
-    openai_api_base="https://openrouter.ai/api/v1",
-    temperature=TEMPERATURE,
-    top_p=TOP_P,
-    seed=SEED,
-    streaming=True,
-)
+# PAYABLE models
+gpt_4o = make_chat("openai/gpt-4o", streaming=False)
+openai_o1 = make_chat("openai/o1", streaming=False)
+openai_o3_mini_high = make_chat("openai/o3-mini-high", streaming=False)
+openai_o3_mini = make_chat("openai/o3-mini", streaming=False)
+openai_o3 = make_chat("openai/o3", streaming=False)
+openai_o1_pro = make_chat("openai/o1-pro", streaming=False)
+openai_o1_mini = make_chat("openai/o1-mini", streaming=False)
+openai_gpt_4o_search_preview = make_chat("openai/gpt-4o-search-preview", streaming=False)
 
 
 # additional interesting params (for LLMs)

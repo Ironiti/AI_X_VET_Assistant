@@ -1,10 +1,8 @@
-import pandas as pd
-from pathlib import Path
-from typing import Optional
-from langchain_community.vectorstores import Chroma
-
+import shutil
 import sys
 from pathlib import Path
+import pandas as pd
+from langchain_community.vectorstores import Chroma
 
 project_root = Path(__file__).resolve().parents[1]
 if str(project_root) not in sys.path:
@@ -29,9 +27,13 @@ class DataProcessor:
         print(f'[INFO] Loaded {len(self.df)} rows')
         return self.df
 
-    def create_vector_store(self, persist_path: str = "data/chroma_db") -> Chroma:
+    def create_vector_store(self, persist_path: str = "data/chroma_db", reset: bool = False) -> Chroma:
         if self.df is None:
             self.load_data()
+
+        if reset and Path(persist_path).exists():
+            print(f'[INFO] Resetting vector store at {persist_path}')
+            shutil.rmtree(persist_path)
 
         print('[INFO] Creating vector store...')
         records = self.df.dropna(subset=["test_name"]).copy()
@@ -74,6 +76,6 @@ class DataProcessor:
 
 
 if __name__ == "__main__":
-    processor = DataProcessor()
-    processor.create_vector_store(persist_path="data/chroma_db")
+    processor = DataProcessor(file_path='data/processed/data.xlsx')
+    processor.create_vector_store(persist_path="data/chroma_db", reset=True)
     print("[INFO] Vector store successfully created and saved.")

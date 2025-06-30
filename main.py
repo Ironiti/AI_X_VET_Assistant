@@ -1,11 +1,10 @@
 import asyncio
-from bot import bot, dp
-from src.database.models import Database
-from config import DATABASE_PATH
+from bot.handlers import bot, dp
+from src.database.db_init import db
 
 async def main():
-    db = Database(DATABASE_PATH)
     await db.create_tables()
+    print("[INFO] Starting bot polling…")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
