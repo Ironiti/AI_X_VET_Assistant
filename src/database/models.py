@@ -1,35 +1,36 @@
+# src/database/models.py
 import aiosqlite
 from datetime import datetime
 
 class Database:
     def __init__(self, db_path: str):
-        """Initialize Database class with provided database path"""
         self.db_path = db_path
-        print(f"[INFO] Initialized Database with path: {self.db_path}")
-
+    
     async def create_tables(self):
-        """Create all necessary tables in the database if they do not exist"""
         async with aiosqlite.connect(self.db_path) as db:
-            # Create users table with extended metadata
+            # Обновленная таблица пользователей
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     telegram_id INTEGER PRIMARY KEY,
-                    username TEXT,
-                    first_name TEXT,
-                    last_name TEXT,
-                    language_code TEXT,
-                    is_bot BOOLEAN,
-                    chat_type TEXT,
-                    client_code TEXT UNIQUE,
-                    pet_name TEXT,
-                    pet_type TEXT,
+                    user_type TEXT CHECK(user_type IN ('client', 'employee')),
+                    
+                    -- Общие поля
+                    name TEXT,
                     registration_date TIMESTAMP,
-                    is_active BOOLEAN DEFAULT TRUE
+                    role TEXT DEFAULT 'user',
+                    is_active BOOLEAN DEFAULT TRUE,
+                    
+                    -- Поля для клиентов (ветеринарные клиники)
+                    client_code TEXT UNIQUE,
+                    specialization TEXT,
+                    
+                    -- Поля для сотрудников
+                    region TEXT,
+                    department_function TEXT CHECK(department_function IN ('laboratory', 'sales', 'support', NULL))
                 )
             ''')
-            print("[INFO] users table ensured")
-
-            # Create feedback table for complaints and suggestions
+            
+            # Таблица для жалоб и предложений
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS feedback (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,22 +42,20 @@ class Database:
                     FOREIGN KEY (user_id) REFERENCES users (telegram_id)
                 )
             ''')
-            print("[INFO] feedback table ensured")
-
-            # Create activation_codes table (simplified without expiration date)
+            
+            # Упрощенная таблица для кодов активации (только для админов)
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS activation_codes (
                     code TEXT PRIMARY KEY,
-                    role TEXT,
+                    role TEXT DEFAULT 'admin',
                     is_used BOOLEAN DEFAULT FALSE,
                     used_by INTEGER,
                     used_at TIMESTAMP,
                     created_at TIMESTAMP
                 )
             ''')
-            print("[INFO] activation_codes table ensured")
             
-            # Create request_statistics table for logging user requests
+            # Таблица для статистики запросов
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS request_statistics (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -67,9 +66,8 @@ class Database:
                     FOREIGN KEY (user_id) REFERENCES users (telegram_id)
                 )
             ''')
-            print("[INFO] request_statistics table ensured")
-
-            # New table for conversation memory (buffer + summaries)
+            
+            # Таблица для памяти разговоров
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS conversation_memory (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -79,101 +77,113 @@ class Database:
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
-            print("[INFO] conversation_memory table ensured")
-
+            
             await db.commit()
-            print("[INFO] Database schema created/updated successfully")
-
-    async def add_user(self, telegram_id: int, username: str, first_name: str, last_name: str,
-                       language_code: str, is_bot: bool, chat_type: str,
-                       client_code: str = None, pet_name: str = None, pet_type: str = None):
-        """Add a user to the database, or ignore if user already exists"""
-        print(f"[INFO] Attempting to add user {telegram_id} to database")
+            await self._migrate_database(db)
+    
+    async def _migrate_database(self, db):
+        """Миграция старой структуры БД на новую"""
+        try:
+            # Проверяем существование старой таблицы
+            cursor = await db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+            if await cursor.fetchone():
+                # Создаем временную таблицу с новой структурой
+                await db.execute('''
+                    CREATE TABLE IF NOT EXISTS users_new (
+                        telegram_id INTEGER PRIMARY KEY,
+                        user_type TEXT CHECK(user_type IN ('client', 'employee')),
+                        name TEXT,
+                        registration_date TIMESTAMP,
+                        role TEXT DEFAULT 'user',
+                        is_active BOOLEAN DEFAULT TRUE,
+                        client_code TEXT UNIQUE,
+                        specialization TEXT,
+                        region TEXT,
+                        department_function TEXT CHECK(department_function IN ('laboratory', 'sales', 'support', NULL))
+                    )
+                ''')
+                
+                # Мигрируем данные
+                await db.execute('''
+                    INSERT OR IGNORE INTO users_new (telegram_id, user_type, name, registration_date, role, is_active, client_code)
+                    SELECT telegram_id, 'client', username, registration_date, 
+                           CASE WHEN role IN ('staff', 'moderator', 'vip') THEN 'user' ELSE role END, 
+                           is_active, client_code
+                    FROM users
+                ''')
+                
+                # Удаляем старую таблицу и переименовываем новую
+                await db.execute("DROP TABLE users")
+                await db.execute("ALTER TABLE users_new RENAME TO users")
+            
+            await db.commit()
+        except Exception as e:
+            print(f"Migration error: {e}")
+    
+    async def add_client(self, telegram_id: int, name: str, client_code: str, specialization: str):
+        """Добавление клиента (ветеринарной клиники)"""
         async with aiosqlite.connect(self.db_path) as db:
             try:
                 await db.execute('''
-                    INSERT OR IGNORE INTO users 
-                    (telegram_id, username, first_name, last_name, language_code, is_bot, chat_type, client_code, pet_name, pet_type, registration_date)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    telegram_id, username, first_name, last_name,
-                    language_code, is_bot, chat_type,
-                    client_code, pet_name, pet_type, datetime.now()
-                ))
+                    INSERT INTO users (telegram_id, user_type, name, client_code, 
+                                     specialization, registration_date, role)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (telegram_id, 'client', name, client_code, specialization, 
+                     datetime.now(), 'user'))
                 await db.commit()
-                print(f"[INFO] User {telegram_id} added or already exists")
                 return True
-            except aiosqlite.IntegrityError as e:
-                print(f"[ERROR] IntegrityError adding user {telegram_id}: {e}")
+            except aiosqlite.IntegrityError:
                 return False
-
+    
+    async def add_employee(self, telegram_id: int, name: str, region: str, department_function: str):
+        """Добавление сотрудника"""
+        async with aiosqlite.connect(self.db_path) as db:
+            try:
+                await db.execute('''
+                    INSERT INTO users (telegram_id, user_type, name, region, 
+                                     department_function, registration_date, role)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (telegram_id, 'employee', name, region, department_function, 
+                     datetime.now(), 'user'))
+                await db.commit()
+                return True
+            except aiosqlite.IntegrityError:
+                return False
+    
     async def get_user(self, telegram_id: int):
-        """Retrieve a user record from the database by telegram_id"""
-        print(f"[INFO] Fetching user {telegram_id} from database")
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                'SELECT * FROM users WHERE telegram_id = ?',
+                'SELECT * FROM users WHERE telegram_id = ?', 
                 (telegram_id,)
             )
-            row = await cursor.fetchone()
-            print(f"[INFO] Retrieved user: {dict(row) if row else None}")
-            return row
-
-    async def user_exists(self, telegram_id: int):
-        """Check if a user exists in the database by telegram_id"""
-        exists = await self.get_user(telegram_id) is not None
-        print(f"[INFO] user_exists({telegram_id}) -> {exists}")
-        return exists
-
-    async def check_client_code_exists(self, client_code: str):
-        """Check if a client code already exists in the database"""
-        print(f"[INFO] Checking if client code exists: {client_code}")
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute(
-                'SELECT telegram_id FROM users WHERE client_code = ?', 
-                (client_code,)
-            )
-            result = await cursor.fetchone()
-            exists = result is not None
-            print(f"[INFO] client_code_exists({client_code}) -> {exists}")
-            return exists
-
+            return await cursor.fetchone()
+    
     async def get_user_role(self, telegram_id: int):
-        """Retrieve user's role from the database by telegram_id"""
-        print(f"[INFO] Fetching role for user {telegram_id}")
         user = await self.get_user(telegram_id)
-        role = user['role'] if user else None
-        print(f"[INFO] Role for user {telegram_id}: {role}")
-        return role
-
+        return user['role'] if user else None
+    
     async def update_user_role(self, telegram_id: int, role: str):
-        """Update user's role permanently"""
-        print(f"[INFO] Updating role for user {telegram_id} to {role}")
+        """Обновление роли пользователя (только для админа)"""
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 'UPDATE users SET role = ? WHERE telegram_id = ?',
                 (role, telegram_id)
             )
             await db.commit()
-            print(f"[INFO] Role updated for user {telegram_id}")
-
+    
     async def check_activation_code(self, code: str):
-        """Check if an activation code is valid and unused"""
-        print(f"[INFO] Checking activation code: {code}")
+        """Проверка кода активации администратора"""
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute('''
                 SELECT * FROM activation_codes 
                 WHERE code = ? AND is_used = FALSE
             ''', (code.upper(),))
-            result = await cursor.fetchone()
-            print(f"[INFO] Activation code {code} valid: {bool(result)}")
-            return result
-
+            return await cursor.fetchone()
+    
     async def use_activation_code(self, code: str, user_id: int):
-        """Mark an activation code as used by a specific user"""
-        print(f"[INFO] Using activation code {code} for user {user_id}")
+        """Использование кода активации"""
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute('''
                 UPDATE activation_codes 
@@ -181,65 +191,71 @@ class Database:
                 WHERE code = ?
             ''', (user_id, datetime.now(), code.upper()))
             await db.commit()
-            print(f"[INFO] Activation code {code} marked as used by user {user_id}")
-
-    async def create_activation_code(self, code: str, role: str):
-        """Create a new one-time activation code for a specific role"""
-        print(f"[INFO] Creating activation code {code} for role {role}")
+    
+    async def create_admin_code(self, code: str):
+        """Создание одноразового кода активации администратора"""
         async with aiosqlite.connect(self.db_path) as db:
             try:
                 await db.execute('''
                     INSERT INTO activation_codes (code, role, created_at)
-                    VALUES (?, ?, ?)
-                ''', (code.upper(), role, datetime.now()))
+                    VALUES (?, 'admin', ?)
+                ''', (code.upper(), datetime.now()))
                 await db.commit()
-                print(f"[INFO] Activation code {code} created for role {role}")
                 return True
-            except aiosqlite.IntegrityError as e:
-                print(f"[ERROR] Failed to create activation code {code}: {e}")
+            except aiosqlite.IntegrityError:
                 return False
-
+    
+    async def user_exists(self, telegram_id: int):
+        user = await self.get_user(telegram_id)
+        return user is not None
+    
+    async def check_client_code_exists(self, client_code: str):
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                'SELECT telegram_id FROM users WHERE client_code = ?', 
+                (client_code,)
+            )
+            result = await cursor.fetchone()
+            return result is not None
+    
     async def add_request_stat(self, user_id: int, request_type: str, request_text: str):
-        """Log a user request statistic to the database"""
-        print(f"[INFO] Logging request stat for user {user_id}: {request_type} - {request_text}")
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute('''
-                INSERT INTO request_statistics (user_id, request_type, request_text, timestamp)
+                INSERT INTO request_statistics (user_id, request_type, 
+                                              request_text, timestamp)
                 VALUES (?, ?, ?, ?)
             ''', (user_id, request_type, request_text, datetime.now()))
             await db.commit()
-            print(f"[INFO] Request stat logged for user {user_id}")
-
+    
     async def add_feedback(self, user_id: int, feedback_type: str, message: str):
-        """Add feedback (suggestion or complaint) from user"""
-        print(f"[INFO] Adding feedback from user {user_id}: {feedback_type}")
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute('''
                 INSERT INTO feedback (user_id, feedback_type, message, timestamp)
                 VALUES (?, ?, ?, ?)
             ''', (user_id, feedback_type, message, datetime.now()))
             await db.commit()
-            print(f"[INFO] Feedback added for user {user_id}")
 
     async def get_statistics(self):
-        """Retrieve overall statistics for admin dashboard"""
-        print("[INFO] Fetching system statistics")
+        """Получение статистики для администратора"""
         async with aiosqlite.connect(self.db_path) as db:
-            # Users statistics
-            cursor = await db.execute("SELECT role, COUNT(*) FROM users GROUP BY role")
-            role_stats = await cursor.fetchall()
+            # Статистика пользователей
+            cursor = await db.execute("SELECT user_type, COUNT(*) FROM users GROUP BY user_type")
+            type_stats = await cursor.fetchall()
 
-            stats = {'total_users': 0, 'clients': 0, 'staff': 0, 'admins': 0}
-            for role, count in role_stats:
+            stats = {'total_users': 0, 'clients': 0, 'employees': 0, 'admins': 0}
+            for user_type, count in type_stats:
                 stats['total_users'] += count
-                if role == 'client':
+                if user_type == 'client':
                     stats['clients'] = count
-                elif role == 'staff':
-                    stats['staff'] = count
-                elif role == 'admin':
-                    stats['admins'] = count
+                elif user_type == 'employee':
+                    stats['employees'] = count
 
-            # Request statistics
+            # Считаем админов отдельно
+            cursor = await db.execute("SELECT COUNT(*) FROM users WHERE role = 'admin'")
+            admin_count = await cursor.fetchone()
+            stats['admins'] = admin_count[0] if admin_count else 0
+
+            # Статистика запросов
             cursor = await db.execute("SELECT request_type, COUNT(*) FROM request_statistics GROUP BY request_type")
             request_stats = await cursor.fetchall()
 
@@ -253,7 +269,7 @@ class Database:
                 elif req_type == 'callback_request':
                     stats['callbacks'] = count
 
-            # Feedback statistics
+            # Статистика обратной связи
             cursor = await db.execute("SELECT feedback_type, COUNT(*) FROM feedback GROUP BY feedback_type")
             feedback_stats = await cursor.fetchall()
 
@@ -265,23 +281,19 @@ class Database:
                 elif fb_type == 'complaint':
                     stats['complaints'] = count
 
-            print(f"[INFO] Statistics fetched: {stats}")
             return stats
         
     async def add_memory(self, user_id: int, type: str, content: str):
-        """Store one memory item (either 'buffer' or 'summary') for a user."""
-        print(f"[INFO] Adding memory [{type}] for user {user_id}")
+        """Сохранение памяти разговора"""
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute('''
                 INSERT INTO conversation_memory (user_id, type, content)
                 VALUES (?, ?, ?)
             ''', (user_id, type, content))
             await db.commit()
-            print(f"[INFO] Memory [{type}] saved for user {user_id}")
 
     async def get_buffer(self, user_id: int) -> list[str]:
-        """Return all 'buffer' entries for a user, ordered by insertion."""
-        print(f"[INFO] Retrieving buffer for user {user_id}")
+        """Получение буфера сообщений"""
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute('''
                 SELECT content FROM conversation_memory
@@ -289,24 +301,19 @@ class Database:
                 ORDER BY timestamp
             ''', (user_id,))
             rows = await cursor.fetchall()
-            buffer = [r[0] for r in rows]
-            print(f"[INFO] Retrieved {len(buffer)} buffer items for user {user_id}")
-            return buffer
+            return [r[0] for r in rows]
 
     async def clear_buffer(self, user_id: int):
-        """Delete all 'buffer' entries for a user (leaving summaries intact)."""
-        print(f"[INFO] Clearing buffer for user {user_id}")
+        """Очистка буфера сообщений"""
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute('''
                 DELETE FROM conversation_memory
                 WHERE user_id = ? AND type = 'buffer'
             ''', (user_id,))
             await db.commit()
-            print(f"[INFO] Buffer cleared for user {user_id}")
 
     async def get_latest_summary(self, user_id: int) -> str | None:
-        """Return the most recent 'summary' for a user, or None if none exists."""
-        print(f"[INFO] Retrieving latest summary for user {user_id}")
+        """Получение последней сводки разговора"""
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute('''
                 SELECT content FROM conversation_memory
@@ -315,6 +322,4 @@ class Database:
                 LIMIT 1
             ''', (user_id,))
             row = await cursor.fetchone()
-            summary = row[0] if row else None
-            print(f"[INFO] Latest summary for user {user_id}: {bool(summary)}")
-            return summary
+            return row[0] if row else None
