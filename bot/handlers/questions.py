@@ -5,7 +5,7 @@ from aiogram.fsm.state import State, StatesGroup
 from bot.keyboards import get_cancel_kb, get_menu_by_role, get_dialog_kb
 from src.database.db_init import db
 from src.data_vectorization import DataProcessor
-from models.models_init import gemma3_27b_instruct_free as llm
+from models.models_init import qwen3_32b_instruct_free as llm
 from langchain.schema import SystemMessage, HumanMessage
 import json
 import re

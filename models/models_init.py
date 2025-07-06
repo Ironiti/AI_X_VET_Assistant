@@ -5,7 +5,7 @@ from config import OPENROUTER_API_KEY
 MAX_URLS = 5
 
 SEED = 0
-TEMPERATURE = 0.1
+TEMPERATURE = 0.7
 TOP_P = 1.0
 
 
@@ -27,6 +27,7 @@ def make_chat(model_name: str, streaming: bool = True) -> ChatOpenAI:
 
 # FREE models
 qwen_coder_32b_instruct_free = make_chat("qwen/qwen-2.5-coder-32b-instruct:free")
+qwen3_32b_instruct_free = make_chat("qwen/qwen3-32b:free")
 gemma3_27b_instruct_free = make_chat("google/gemma-3-27b-it:free")
 qwq_32b_instruct_free = make_chat("qwen/qwq-32b:free")
 deepseek_r1_instruct_free = make_chat("deepseek/deepseek-r1:free")
