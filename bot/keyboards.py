@@ -93,6 +93,18 @@ def get_menu_by_role(role: str):
         return get_admin_menu_kb()
     else:
         return get_main_menu_kb()
+    
+def get_dialog_kb():
+    """Клавиатура для режима диалога с ботом."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="❓ Задать еще вопрос")],  # Более понятная формулировка
+            [KeyboardButton(text="🔄 Новый вопрос")],
+            [KeyboardButton(text="❌ Завершить диалог")]
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False
+    )
 
 # Для совместимости
 get_client_menu_kb = get_main_menu_kb

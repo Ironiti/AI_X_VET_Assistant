@@ -33,7 +33,7 @@ task_prompt = (
 class QwenEmbeddings(Embeddings):
     def __init__(
         self,
-        model_name: str = 'Qwen/Qwen3-Embedding-0.6B',
+        model_name: str = 'Qwen/Qwen3-Embedding-4B',
         task_prompt: str = task_prompt,
         max_length: int = 8192,
         batch_size: int = 8,

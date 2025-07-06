@@ -12,7 +12,7 @@ from models.vector_models_init import embedding_model
 
 
 class DataProcessor:
-    def __init__(self, file_path: str = 'data/processed/preanalytics_data.xlsx'):
+    def __init__(self, file_path: str = 'data/processed/data.xlsx'):
         self.file_path = Path(file_path)
         self.df = None
         self.vector_store = None
@@ -73,6 +73,15 @@ class DataProcessor:
         print(f'[INFO] Searching for: "{query}"')
         results = self.vector_store.similarity_search_with_score(query, k=top_k)
         return results
+    
+    def get_metadata_columns(self) -> list:
+        """Get list of metadata columns stored in vector database."""
+        if self.vector_store is None:
+            self.load_vector_store()
+        
+        # Get sample document to extract metadata keys
+        sample = self.vector_store.get()['metadatas'][0] if self.vector_store.get()['metadatas'] else {}
+        return list(sample.keys())
 
 
 if __name__ == "__main__":
