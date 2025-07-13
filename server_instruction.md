@@ -40,12 +40,12 @@ cd ~
 ```
 
 ```bash
-git clone https://dimi3tru:ghp_XXXXXXXXXXXXXXXXXXXXXXX@github.com/dimi3tru/SBER_bot_cases_rag_lite_version.git
+git clone git@github.com:dimi3tru-other-projects/AI_VET_Assistant.git
 
 ```
 
 ```bash
-cd AI_VET_UNION_BOT
+cd AI_VET_Assistant
 ```
 
 ```bash
@@ -54,7 +54,7 @@ source venv/bin/activate
 ```
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements-unix.txt
 ```
 
 ### Добавить .env файл с токенами:
