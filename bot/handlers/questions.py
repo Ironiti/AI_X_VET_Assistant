@@ -13,6 +13,7 @@ import asyncio
 import json
 import re
 import base64
+import html
 
 # GIF file_id для анимации загрузки (опционально)
 LOADING_GIF_ID = "CgACAgIAAxkBAAMIaGr_qy1Wxaw2VrBrm3dwOAkYji4AAu54AAKmqHlJAtZWBziZvaA2BA"
@@ -265,7 +266,7 @@ async def process_user_question(user_id: int, text: str, role: str, is_new_quest
     if is_new_question:
         processor = DataProcessor()
         processor.load_vector_store()
-        rag_hits = processor.search_test(text, top_k=5)
+        rag_hits = processor.search_test(text, top_k=10)
 
         rag_blocks = []
         for doc, score in rag_hits:
@@ -281,33 +282,51 @@ async def process_user_question(user_id: int, text: str, role: str, is_new_quest
         memory_section += "Последние сообщения:\n" + "\n".join(buffer) + "\n\n"
 
     system_msg = SystemMessage(
-        content="Ты — ветеринарный помощник. Используй память и преаналитическую информацию для ответа. Если информации нет - честно скажи об этом. Используй форматирование: **жирный** для важного, _курсив_ для терминов. Будь кратким и профессиональным. Делай приятное оформление для телеграмм. Без использования Markdown"
+        content="""Ты — ветеринарный помощник в клинике Vet Union. Отвечай профессионально, используя контекст.
+
+Формат ответа:
+1. Точное совпадение:
+- Название теста (AN123)
+- Параметры (контейнер, объем)
+- Условия
+
+2. Частичное совпадение:
+"Возможно, вы имели в виду:"
+- Похожий тест (AN124)
+- Основные отличия
+"Если это не то, что нужно, уточните запрос"
+
+3. Нет данных (если прямо совсем не подходит ничего):
+"Не нашел точного соответствия. Попробуйте указать:"
+- Полное название теста
+- Цель исследования
+
+Не используй HTML/Markdown разметку - только чистый текст."""
     )
+
     user_msg = HumanMessage(
         content=(
-            f"{memory_section}"
-            f"Контекст преаналитики:\n{rag_context}\n\n"
-            f"Вопрос пользователя: {text}\n\n"
-            "Ответь на русском языке, кратко и по делу."
+            f"Контекст анализов:\n{rag_context}\n\n"
+            f"Запрос: {text}\n\n"
+            "Если нет точного ответа - предложи похожие варианты "
+            "и попроси уточнить детали."
         )
     )
 
     print(f"[INFO] Sending prompt to LLM for user {user_id}")
     response = await llm.agenerate([[system_msg, user_msg]])
 
-    def markdown_to_html(text: str) -> str:
-        """Convert basic Markdown to Telegram-compatible HTML."""
-        # Bold: **text** -> <b>text</b>
-        text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
-        # Italic: _text_ -> <i>text</i>
-        text = re.sub(r'_(.+?)_', r'<i>\1</i>', text)
-        # Code: `text` -> <code>text</code>
-        text = re.sub(r'`(.+?)`', r'<code>\1</code>', text)
-        return text
+    def format_telegram_response(text: str) -> str:
+        """Clean response text without any formatting."""
+        # Remove all formatting artifacts
+        text = re.sub(r'[`*_]', '', text)  # Remove markdown
+        text = re.sub(r'<[^>]+>', '', text)  # Remove HTML tags
+        text = re.sub(r'Ꭵ|Ꭵᴄ', '', text)  # Remove temp markers
+        return text.strip()
 
     answer = response.generations[0][0].text.strip()
     print(f"[INFO] Received LLM answer for user {user_id}")
-    answer = markdown_to_html(answer)  # Convert Markdown to HTML
+    answer = format_telegram_response(answer)  # Convert Markdown to HTML
     print(f"[INFO] Converted Markdown to HTML for user {user_id}")
     await db.add_memory(user_id, 'buffer', f"Bot: {answer}")
     print(f"[INFO] Bot response buffered for user {user_id}")

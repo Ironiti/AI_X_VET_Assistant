@@ -57,6 +57,24 @@ source venv/bin/activate
 pip install -r requirements-unix.txt
 ```
 
+Если процесс killed - скорее всего не хватило ОЗУ. Тогда можно попробовать вот так (создание файла подкачки, swap):
+```bash
+# Создаем файл подкачки
+sudo fallocate -l 2G /swapfile
+
+# Настраиваем права
+sudo chmod 600 /swapfile
+
+# Форматируем как swap
+sudo mkswap /swapfile
+
+# Включаем swap
+sudo swapon /swapfile
+
+# Делаем постоянным (добавляем в fstab)
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+```
+
 ### Добавить .env файл с токенами:
 ```bash
 nano .env
@@ -76,14 +94,14 @@ cat .env
 ### Напрямую:
 
 ```bash
-python bot_main_simple.py
+python main.py
 ```
 
 ### Запуск сессии после пула через `screen`:
 
 ```bash
 screen -S bot_session
-python bot_main_simple.py
+python main.py
 ```
 
 Завершить `screen`:

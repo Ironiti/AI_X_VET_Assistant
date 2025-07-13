@@ -35,3 +35,4 @@ langchain-huggingface==0.3.0
 email-validator==2.2.0
 aiosmtplib==3.0.1
 aiosqlite==0.21.0
+openai==1.95.1
