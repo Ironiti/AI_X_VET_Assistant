@@ -1,4 +1,3 @@
-# utils/email_sender.py
 import aiosmtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -6,7 +5,6 @@ from datetime import datetime
 import logging
 from config import EMAIL_HOST, EMAIL_PORT, EMAIL_LOGIN, EMAIL_PASSWORD, EMAIL_TO
 
-# Настроим более подробное логирование
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -15,20 +13,29 @@ async def send_feedback_email(user_data: dict, feedback_type: str, message: str)
     try:
         type_text = "Предложение" if feedback_type == "suggestion" else "Жалоба"
         
-        # Определяем тип пользователя для отображения
-        user_type_text = "Неизвестно"
-        if user_data.get('user_type') == 'client':
-            user_type_text = f"Клиент ({user_data.get('client_code', 'Не указан')})"
-        elif user_data.get('user_type') == 'employee':
-            dept = user_data.get('department_function', '')
-            dept_map = {'laboratory': 'Лаборатория', 'sales': 'Продажи', 'support': 'Поддержка'}
-            dept_text = dept_map.get(dept, dept)
-            user_type_text = f"Сотрудник ({dept_text})"
-        
         msg = MIMEMultipart('alternative')
         msg['Subject'] = f'{type_text} - {user_data.get("name", "Неизвестный пользователь")}'
         msg['From'] = EMAIL_LOGIN
         msg['To'] = EMAIL_TO
+        
+        # Определяем тип пользователя
+        if user_data.get('user_type') == 'client':
+            user_type = "Ветеринарный врач клиники-партнера"
+            additional_info = f"""
+              <li><strong>Код клиента:</strong> {user_data.get('client_code', 'Не указан')}</li>
+              <li><strong>Специализация:</strong> {user_data.get('specialization', 'Не указана')}</li>
+            """
+        elif user_data.get('user_type') == 'employee':
+            user_type = "Сотрудник VET UNION"
+            dept_map = {'laboratory': 'Лаборатория', 'sales': 'Продажи', 'support': 'Поддержка'}
+            dept = dept_map.get(user_data.get('department_function', ''), user_data.get('department_function', ''))
+            additional_info = f"""
+              <li><strong>Регион:</strong> {user_data.get('region', 'Не указан')}</li>
+              <li><strong>Функция:</strong> {dept}</li>
+            """
+        else:
+            user_type = "Пользователь"
+            additional_info = ""
         
         html = f"""
         <html>
@@ -39,7 +46,8 @@ async def send_feedback_email(user_data: dict, feedback_type: str, message: str)
             <h3>Информация о пользователе:</h3>
             <ul>
               <li><strong>Имя:</strong> {user_data.get('name', 'Не указано')}</li>
-              <li><strong>Тип:</strong> {user_type_text}</li>
+              <li><strong>Тип:</strong> {user_type}</li>
+              {additional_info}
               <li><strong>Telegram ID:</strong> {user_data.get('telegram_id', 'Не указан')}</li>
             </ul>
             
@@ -58,7 +66,7 @@ async def send_feedback_email(user_data: dict, feedback_type: str, message: str)
         
         Информация о пользователе:
         - Имя: {user_data.get('name', 'Не указано')}
-        - Тип: {user_type_text}
+        - Тип: {user_type}
         - Telegram ID: {user_data.get('telegram_id', 'Не указан')}
         
         Текст обращения:
@@ -73,13 +81,12 @@ async def send_feedback_email(user_data: dict, feedback_type: str, message: str)
         
         if EMAIL_LOGIN and EMAIL_PASSWORD:
             logger.info(f"Attempting to send email from {EMAIL_LOGIN} to {EMAIL_TO}")
-            logger.info(f"Using SMTP server: smtp.yandex.ru:465")
             
             response = await aiosmtplib.send(
                 msg,
-                hostname='smtp.yandex.ru',
-                port=465,
-                use_tls=True,
+                hostname=EMAIL_HOST,
+                port=EMAIL_PORT,
+                start_tls=True,
                 username=EMAIL_LOGIN,
                 password=EMAIL_PASSWORD,
             )
@@ -97,36 +104,39 @@ async def send_feedback_email(user_data: dict, feedback_type: str, message: str)
 async def send_callback_email(user_data: dict, phone: str, message: str):
     """Отправка email о заказе обратного звонка"""
     try:
-        # Определяем тип пользователя для отображения
-        user_type_text = "Неизвестно"
-        additional_info = ""
-        
-        if user_data.get('user_type') == 'client':
-            user_type_text = "Ветеринарный врач клиники-партнера"
-            additional_info = f"""
-              <li><strong>Код клиента:</strong> {user_data.get('client_code', 'Не указан')}</li>
-              <li><strong>Специализация:</strong> {user_data.get('specialization', 'Не указана')}</li>
-            """
-        elif user_data.get('user_type') == 'employee':
-            dept = user_data.get('department_function', '')
-            dept_map = {'laboratory': 'Лаборатория', 'sales': 'Продажи', 'support': 'Поддержка'}
-            dept_text = dept_map.get(dept, dept)
-            user_type_text = "Сотрудник VET UNION"
-            additional_info = f"""
-              <li><strong>Регион:</strong> {user_data.get('region', 'Не указан')}</li>
-              <li><strong>Функция:</strong> {dept_text}</li>
-            """
-        
-        # Создаем сообщение
         msg = MIMEMultipart('alternative')
         msg['Subject'] = f'Заказ обратного звонка - {user_data.get("name", "Неизвестный пользователь")}'
         msg['From'] = EMAIL_LOGIN
         msg['To'] = EMAIL_TO
-        # Добавим заголовки для лучшей доставляемости
         msg['Reply-To'] = EMAIL_LOGIN
         msg['X-Mailer'] = 'Python/aiosmtplib'
         
-        # HTML версия письма
+        # Определяем тип пользователя и дополнительную информацию
+        if user_data.get('user_type') == 'client':
+            user_type = "Ветеринарный врач клиники-партнера"
+            additional_info = f"""
+              <li><strong>Код клиента:</strong> {user_data.get('client_code', 'Не указан')}</li>
+              <li><strong>Специализация:</strong> {user_data.get('specialization', 'Не указана')}</li>
+            """
+            additional_text = f"""
+        - Код клиента: {user_data.get('client_code', 'Не указан')}
+        - Специализация: {user_data.get('specialization', 'Не указана')}"""
+        elif user_data.get('user_type') == 'employee':
+            user_type = "Сотрудник VET UNION"
+            dept_map = {'laboratory': 'Лаборатория', 'sales': 'Продажи', 'support': 'Поддержка'}
+            dept = dept_map.get(user_data.get('department_function', ''), user_data.get('department_function', ''))
+            additional_info = f"""
+              <li><strong>Регион:</strong> {user_data.get('region', 'Не указан')}</li>
+              <li><strong>Функция:</strong> {dept}</li>
+            """
+            additional_text = f"""
+        - Регион: {user_data.get('region', 'Не указан')}
+        - Функция: {dept}"""
+        else:
+            user_type = "Пользователь"
+            additional_info = ""
+            additional_text = ""
+        
         html = f"""
         <html>
           <head>
@@ -139,7 +149,7 @@ async def send_callback_email(user_data: dict, phone: str, message: str):
             <h3>Информация о пользователе:</h3>
             <ul>
               <li><strong>Имя:</strong> {user_data.get('name', 'Не указано')}</li>
-              <li><strong>Тип:</strong> {user_type_text}</li>
+              <li><strong>Тип:</strong> {user_type}</li>
               {additional_info}
               <li><strong>Telegram ID:</strong> {user_data.get('telegram_id', 'Не указан')}</li>
             </ul>
@@ -162,7 +172,6 @@ async def send_callback_email(user_data: dict, phone: str, message: str):
         </html>
         """
         
-        # Текстовая версия
         text = f"""
         Новый заказ обратного звонка
         
@@ -170,7 +179,7 @@ async def send_callback_email(user_data: dict, phone: str, message: str):
         
         Информация о пользователе:
         - Имя: {user_data.get('name', 'Не указано')}
-        - Тип: {user_type_text}
+        - Тип: {user_type}{additional_text}
         - Telegram ID: {user_data.get('telegram_id', 'Не указан')}
         
         Контактные данные:
@@ -189,17 +198,14 @@ async def send_callback_email(user_data: dict, phone: str, message: str):
         msg.attach(part1)
         msg.attach(part2)
         
-        # Отправляем email
         if EMAIL_LOGIN and EMAIL_PASSWORD:
             logger.info(f"Attempting to send callback email from {EMAIL_LOGIN} to {EMAIL_TO}")
-            logger.info(f"Subject: {msg['Subject']}")
-            logger.info(f"User data: {user_data}")
             
             response = await aiosmtplib.send(
                 msg,
-                hostname='smtp.yandex.ru',
-                port=465,
-                use_tls=True,
+                hostname=EMAIL_HOST,
+                port=EMAIL_PORT,
+                start_tls=True,
                 username=EMAIL_LOGIN,
                 password=EMAIL_PASSWORD,
             )

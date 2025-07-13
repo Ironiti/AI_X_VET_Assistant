@@ -37,7 +37,7 @@ async def start_activation(message: Message, state: FSMContext):
 async def process_activation_code(message: Message, state: FSMContext):
     user_id = message.from_user.id
     
-    if message.text == "❌ Отмена":
+    if message.text == "🔙 Вернуться в главное меню":
         await state.clear()
         await message.answer("Операция отменена.", reply_markup=get_main_menu_kb())
         return

@@ -1,4 +1,11 @@
-@router.message(F.text == "❓ Помощь по функциям")
+# bot/handlers/help.py
+from aiogram import Router, F
+from aiogram.types import Message
+from bot.keyboards import get_dialog_kb
+
+help_router = Router()
+
+@help_router.message(F.text == "❓ Помощь по функциям")
 async def show_function_help(message: Message):
     """Показывает справку по доступным функциям диалога"""
     help_text = """

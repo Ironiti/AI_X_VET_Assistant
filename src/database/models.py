@@ -1,6 +1,5 @@
-# src/database/models.py
 import aiosqlite
-from datetime import datetime
+from datetime import datetime, timedelta
 
 class Database:
     def __init__(self, db_path: str):
@@ -16,12 +15,13 @@ class Database:
                     
                     -- Общие поля
                     name TEXT,
+                    country TEXT DEFAULT 'BY',
                     registration_date TIMESTAMP,
                     role TEXT DEFAULT 'user',
                     is_active BOOLEAN DEFAULT TRUE,
                     
                     -- Поля для клиентов (ветеринарные клиники)
-                    client_code TEXT UNIQUE,
+                    client_code TEXT,  -- Убрали UNIQUE, так как в одной клинике может быть много врачей
                     specialization TEXT,
                     
                     -- Поля для сотрудников
@@ -29,7 +29,7 @@ class Database:
                     department_function TEXT CHECK(department_function IN ('laboratory', 'sales', 'support', NULL))
                 )
             ''')
-            
+        
             # Таблица для жалоб и предложений
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS feedback (
@@ -79,72 +79,34 @@ class Database:
             ''')
             
             await db.commit()
-            await self._migrate_database(db)
     
-    async def _migrate_database(self, db):
-        """Миграция старой структуры БД на новую"""
-        try:
-            # Проверяем существование старой таблицы
-            cursor = await db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
-            if await cursor.fetchone():
-                # Создаем временную таблицу с новой структурой
-                await db.execute('''
-                    CREATE TABLE IF NOT EXISTS users_new (
-                        telegram_id INTEGER PRIMARY KEY,
-                        user_type TEXT CHECK(user_type IN ('client', 'employee')),
-                        name TEXT,
-                        registration_date TIMESTAMP,
-                        role TEXT DEFAULT 'user',
-                        is_active BOOLEAN DEFAULT TRUE,
-                        client_code TEXT UNIQUE,
-                        specialization TEXT,
-                        region TEXT,
-                        department_function TEXT CHECK(department_function IN ('laboratory', 'sales', 'support', NULL))
-                    )
-                ''')
-                
-                # Мигрируем данные
-                await db.execute('''
-                    INSERT OR IGNORE INTO users_new (telegram_id, user_type, name, registration_date, role, is_active, client_code)
-                    SELECT telegram_id, 'client', username, registration_date, 
-                           CASE WHEN role IN ('staff', 'moderator', 'vip') THEN 'user' ELSE role END, 
-                           is_active, client_code
-                    FROM users
-                ''')
-                
-                # Удаляем старую таблицу и переименовываем новую
-                await db.execute("DROP TABLE users")
-                await db.execute("ALTER TABLE users_new RENAME TO users")
-            
-            await db.commit()
-        except Exception as e:
-            print(f"Migration error: {e}")
-    
-    async def add_client(self, telegram_id: int, name: str, client_code: str, specialization: str):
+    async def add_client(self, telegram_id: int, name: str, client_code: str, 
+                        specialization: str, country: str = 'BY'):
         """Добавление клиента (ветеринарной клиники)"""
         async with aiosqlite.connect(self.db_path) as db:
             try:
                 await db.execute('''
                     INSERT INTO users (telegram_id, user_type, name, client_code, 
-                                     specialization, registration_date, role)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                                     specialization, country, registration_date, role)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (telegram_id, 'client', name, client_code, specialization, 
-                     datetime.now(), 'user'))
+                     country, datetime.now(), 'user'))
                 await db.commit()
                 return True
             except aiosqlite.IntegrityError:
                 return False
     
-    async def add_employee(self, telegram_id: int, name: str, region: str, department_function: str):
+    async def add_employee(self, telegram_id: int, name: str, region: str, 
+                          department_function: str, country: str = 'BY'):
         """Добавление сотрудника"""
         async with aiosqlite.connect(self.db_path) as db:
             try:
                 await db.execute('''
                     INSERT INTO users (telegram_id, user_type, name, region, 
-                                     department_function, registration_date, role)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                                     department_function, country, registration_date, role)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (telegram_id, 'employee', name, region, department_function, 
-                     datetime.now(), 'user'))
+                     country, datetime.now(), 'user'))
                 await db.commit()
                 return True
             except aiosqlite.IntegrityError:
@@ -208,15 +170,6 @@ class Database:
     async def user_exists(self, telegram_id: int):
         user = await self.get_user(telegram_id)
         return user is not None
-    
-    async def check_client_code_exists(self, client_code: str):
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute(
-                'SELECT telegram_id FROM users WHERE client_code = ?', 
-                (client_code,)
-            )
-            result = await cursor.fetchone()
-            return result is not None
     
     async def add_request_stat(self, user_id: int, request_type: str, request_text: str):
         async with aiosqlite.connect(self.db_path) as db:
@@ -323,3 +276,88 @@ class Database:
             ''', (user_id,))
             row = await cursor.fetchone()
             return row[0] if row else None
+
+    # Новые методы для администраторов
+    async def get_broadcast_recipients(self, broadcast_type: str) -> list:
+        """Получить список ID получателей для рассылки"""
+        async with aiosqlite.connect(self.db_path) as db:
+            if broadcast_type == 'all':
+                query = "SELECT telegram_id FROM users WHERE is_active = TRUE"
+            elif broadcast_type == 'clients':
+                query = "SELECT telegram_id FROM users WHERE user_type = 'client' AND is_active = TRUE"
+            elif broadcast_type == 'employees':
+                query = "SELECT telegram_id FROM users WHERE user_type = 'employee' AND is_active = TRUE"
+            else:
+                return []
+            
+            cursor = await db.execute(query)
+            rows = await cursor.fetchall()
+            return [row[0] for row in rows]
+
+    async def get_recent_users(self, limit: int = 10) -> list:
+        """Получить последних зарегистрированных пользователей"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute('''
+                SELECT * FROM users 
+                ORDER BY registration_date DESC 
+                LIMIT ?
+            ''', (limit,))
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def get_recent_feedback(self, limit: int = 5) -> list:
+        """Получить последние обращения"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute('''
+                SELECT f.*, u.name as user_name 
+                FROM feedback f
+                LEFT JOIN users u ON f.user_id = u.telegram_id
+                ORDER BY f.timestamp DESC 
+                LIMIT ?
+            ''', (limit,))
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def clear_old_logs(self, days: int = 30) -> int:
+        """Очистить старые записи логов"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cutoff_date = datetime.now() - timedelta(days=days)
+            
+            cursor = await db.execute('''
+                DELETE FROM conversation_memory 
+                WHERE timestamp < ?
+            ''', (cutoff_date,))
+            
+            deleted_count = cursor.rowcount
+            
+            cursor = await db.execute('''
+                DELETE FROM request_statistics 
+                WHERE timestamp < ?
+            ''', (cutoff_date,))
+            
+            deleted_count += cursor.rowcount
+            
+            await db.commit()
+            return deleted_count
+
+    async def get_uptime(self) -> str:
+        """Получить время работы системы"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                SELECT MIN(registration_date) FROM users
+            ''')
+            first_registration = await cursor.fetchone()
+            
+            if first_registration and first_registration[0]:
+                first_date = datetime.fromisoformat(first_registration[0])
+                uptime = datetime.now() - first_date
+                
+                days = uptime.days
+                hours = uptime.seconds // 3600
+                minutes = (uptime.seconds % 3600) // 60
+                
+                return f"{days} дней, {hours} часов, {minutes} минут"
+            
+            return "Нет данных"

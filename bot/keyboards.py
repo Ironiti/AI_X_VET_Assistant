@@ -1,8 +1,22 @@
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
+def get_back_to_menu_kb():
+    kb = [
+        [KeyboardButton(text="🔙 Вернуться в главное меню")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
 def get_cancel_kb():
     kb = [
         [KeyboardButton(text="❌ Отмена")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
+def get_country_kb():
+    """Клавиатура выбора страны"""
+    kb = [
+        [KeyboardButton(text="🇧🇾 Беларусь"), KeyboardButton(text="🇷🇺 Россия")],       
+        [KeyboardButton(text="🇰🇿 Казахстан"), KeyboardButton(text="🇦🇲 Армения")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
@@ -10,55 +24,101 @@ def get_user_type_kb():
     """Клавиатура выбора типа пользователя"""
     kb = [
         [KeyboardButton(text="👨‍⚕️ Ветеринарный врач клиники-партнера")],
-        [KeyboardButton(text="👷 Сотрудник VET UNION")],
-        [KeyboardButton(text="❌ Отмена")]
+        [KeyboardButton(text="🔬 Сотрудник VET UNION")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
 def get_specialization_kb():
     """Клавиатура выбора специализации для ветеринарных врачей"""
     kb = [
-        [KeyboardButton(text="🏥 Общая практика")],
-        [KeyboardButton(text="💊 Терапевт"), KeyboardButton(text="🔪 Хирург")],
-        [KeyboardButton(text="🔬 Лаборант"), KeyboardButton(text="🦷 Стоматолог")],
-        [KeyboardButton(text="👁 Офтальмолог"), KeyboardButton(text="🧠 Невролог")],
-        [KeyboardButton(text="🦴 Ортопед"), KeyboardButton(text="❤️ Кардиолог")],
-        [KeyboardButton(text="✏️ Ввести свою специализацию")],
-        [KeyboardButton(text="❌ Отмена")]
+        [KeyboardButton(text="🏥 Общая практика"), KeyboardButton(text="🔪 Хирургия"), KeyboardButton(text="💊 Терапия")],
+        [KeyboardButton(text="🦴 Ортопедия"), KeyboardButton(text="🎗️ Онкология"), KeyboardButton(text="👨‍⚕️ Дерматология")], 
+        [KeyboardButton(text="🦷 Стоматология"), KeyboardButton(text="👁️ Офтальмология")],
+        [KeyboardButton(text="✏️ Ввести свою специализацию")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
-def get_region_kb():
-    """Клавиатура выбора региона для сотрудников"""
+def get_region_kb_belarus():
+    """Клавиатура выбора региона для Беларуси"""
     kb = [
         [KeyboardButton(text="📍 Минск"), KeyboardButton(text="📍 Минская область")],
         [KeyboardButton(text="📍 Брест"), KeyboardButton(text="📍 Брестская область")],
-        [KeyboardButton(text="📍 Витебск"), KeyboardButton(text="📍 Витебская область")],
         [KeyboardButton(text="📍 Гомель"), KeyboardButton(text="📍 Гомельская область")],
         [KeyboardButton(text="📍 Гродно"), KeyboardButton(text="📍 Гродненская область")],
-        [KeyboardButton(text="📍 Могилёв"), KeyboardButton(text="📍 Могилёвская область")],
-        [KeyboardButton(text="✏️ Ввести свой регион")],
-        [KeyboardButton(text="❌ Отмена")]
+        [KeyboardButton(text="📍 Могилев"), KeyboardButton(text="📍 Могилевская область")],
+        [KeyboardButton(text="📍 Витебск"), KeyboardButton(text="📍 Витебская область")],
+        [KeyboardButton(text="✏️ Ввести свой регион")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
+def get_region_kb_russia():
+    """Клавиатура выбора региона для России"""
+    kb = [
+        [KeyboardButton(text="📍 Москва"), KeyboardButton(text="📍 Московская область")],
+        [KeyboardButton(text="📍 Санкт-Петербург"), KeyboardButton(text="📍 Ленинградская область")],
+        [KeyboardButton(text="📍 Новосибирск"), KeyboardButton(text="📍 Екатеринбург")],
+        [KeyboardButton(text="📍 Нижний Новгород"), KeyboardButton(text="📍 Казань")],
+        [KeyboardButton(text="📍 Челябинск"), KeyboardButton(text="📍 Омск")],
+        [KeyboardButton(text="📍 Самара"), KeyboardButton(text="📍 Ростов-на-Дону")],
+        [KeyboardButton(text="📍 Уфа"), KeyboardButton(text="📍 Красноярск")],
+        [KeyboardButton(text="✏️ Ввести свой регион")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
+def get_region_kb_kazakhstan():
+    """Клавиатура выбора региона для Казахстана"""
+    kb = [
+        [KeyboardButton(text="📍 Алматы"), KeyboardButton(text="📍 Астана (Нур-Султан)")],
+        [KeyboardButton(text="📍 Шымкент"), KeyboardButton(text="📍 Караганда")],
+        [KeyboardButton(text="📍 Актобе"), KeyboardButton(text="📍 Павлодар")],
+        [KeyboardButton(text="📍 Тараз"), KeyboardButton(text="📍 Усть-Каменогорск")],
+        [KeyboardButton(text="📍 Семей"), KeyboardButton(text="📍 Атырау")],
+        [KeyboardButton(text="📍 Костанай"), KeyboardButton(text="📍 Кызылорда")],
+        [KeyboardButton(text="✏️ Ввести свой регион")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
+def get_region_kb_armenia():
+    """Клавиатура выбора региона для Армении"""
+    kb = [
+        [KeyboardButton(text="📍 Ереван"), KeyboardButton(text="📍 Гюмри")],
+        [KeyboardButton(text="📍 Ванадзор"), KeyboardButton(text="📍 Вагаршапат")],
+        [KeyboardButton(text="📍 Абовян"), KeyboardButton(text="📍 Капан")],
+        [KeyboardButton(text="📍 Раздан"), KeyboardButton(text="📍 Армавир")],
+        [KeyboardButton(text="📍 Арташат"), KeyboardButton(text="📍 Севан")],
+        [KeyboardButton(text="📍 Горис"), KeyboardButton(text="📍 Аштарак")],
+        [KeyboardButton(text="✏️ Ввести свой регион")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
+def get_region_kb(country: str = 'BY'):
+    """Получить клавиатуру региона по коду страны"""
+    if country == 'BY':
+        return get_region_kb_belarus()
+    elif country == 'RU':
+        return get_region_kb_russia()
+    elif country == 'KZ':
+        return get_region_kb_kazakhstan()
+    elif country == 'AM':
+        return get_region_kb_armenia()
+    else:
+        return get_region_kb_belarus()  # По умолчанию
 
 def get_department_function_kb():
     """Клавиатура выбора функции сотрудника"""
     kb = [
         [KeyboardButton(text="🔬 Лаборатория")],
         [KeyboardButton(text="💰 Продажи")],
-        [KeyboardButton(text="🤝 Поддержка")],
-        [KeyboardButton(text="❌ Отмена")]
+        [KeyboardButton(text="🤝 Поддержка")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
 def get_main_menu_kb():
     """Единое меню для всех пользователей (кроме админа)"""
     kb = [
-        [KeyboardButton(text="❓ Задать вопрос")],
-        [KeyboardButton(text="📞 Обратная связь")],
-        [KeyboardButton(text="💡 Предложения и пожелания")],
-        [KeyboardButton(text="🔑 Активировать код")]
+        [KeyboardButton(text="🤖 Задать вопрос ассистенту")],
+        [KeyboardButton(text="📞 Заказать звонок")],
+        [KeyboardButton(text="💡 Предложения и пожелания")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
@@ -67,7 +127,8 @@ def get_admin_menu_kb():
     kb = [
         [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="👥 Пользователи")],
         [KeyboardButton(text="📋 Все обращения"), KeyboardButton(text="🔐 Создать код")],
-        [KeyboardButton(text="❓ Задать вопрос"), KeyboardButton(text="📞 Обратная связь")],
+        [KeyboardButton(text="📥 Выгрузка в Excel"), KeyboardButton(text="📢 Рассылка")],
+        [KeyboardButton(text="🤖 Задать вопрос ассистенту"), KeyboardButton(text="📞 Заказать звонок")],
         [KeyboardButton(text="💡 Предложения и пожелания")],
         [KeyboardButton(text="🔧 Управление системой")]
     ]
@@ -76,14 +137,14 @@ def get_admin_menu_kb():
 def get_phone_kb():
     kb = [
         [KeyboardButton(text="📱 Поделиться номером", request_contact=True)],
-        [KeyboardButton(text="❌ Отмена")]
+        [KeyboardButton(text="🔙 Вернуться в главное меню")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
 def get_feedback_type_kb():
     kb = [
         [KeyboardButton(text="💡 Предложение"), KeyboardButton(text="⚠️ Жалоба")],
-        [KeyboardButton(text="❌ Отмена")]
+        [KeyboardButton(text="🔙 Вернуться в главное меню")]      
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
@@ -98,13 +159,44 @@ def get_dialog_kb():
     """Клавиатура для режима диалога с ботом."""
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="❓ Задать еще вопрос")],  # Более понятная формулировка
             [KeyboardButton(text="🔄 Новый вопрос")],
             [KeyboardButton(text="❌ Завершить диалог")]
         ],
         resize_keyboard=True,
         one_time_keyboard=False
     )
+
+def get_excel_export_kb():
+    """Клавиатура для выбора типа выгрузки"""
+    kb = [
+        [KeyboardButton(text="📊 Полная выгрузка")],
+        [KeyboardButton(text="👥 Только пользователи")],
+        [KeyboardButton(text="❓ Только вопросы")],
+        [KeyboardButton(text="📞 Только звонки")],
+        [KeyboardButton(text="💡 Только обратная связь")],
+        [KeyboardButton(text="🔙 Вернуться в главное меню")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
+def get_broadcast_type_kb():
+    """Клавиатура для выбора типа рассылки"""
+    kb = [
+        [KeyboardButton(text="📢 Всем пользователям")],
+        [KeyboardButton(text="👨‍⚕️ Только клиентам")],
+        [KeyboardButton(text="🔬 Только сотрудникам")],
+        [KeyboardButton(text="🔙 Вернуться в главное меню")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
+def get_system_management_kb():
+    """Клавиатура управления системой"""
+    kb = [
+        [KeyboardButton(text="🔄 Обновить векторную БД")],
+        [KeyboardButton(text="🗑️ Очистить старые логи")],
+        [KeyboardButton(text="📊 Системная информация")],
+        [KeyboardButton(text="🔙 Назад")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
 # Для совместимости
 get_client_menu_kb = get_main_menu_kb

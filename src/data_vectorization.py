@@ -1,3 +1,5 @@
+import os
+os.environ['ANONYMIZED_TELEMETRY'] = 'False'
 import shutil
 import sys
 from pathlib import Path

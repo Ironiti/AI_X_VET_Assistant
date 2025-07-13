@@ -1,4 +1,5 @@
 import re
+import asyncio
 from aiogram import Router, F
 from aiogram.types import Message
 from aiogram.fsm.context import FSMContext
@@ -18,62 +19,104 @@ class FeedbackStates(StatesGroup):
     waiting_for_type = State()
     waiting_for_message = State()
 
-def format_phone_number(phone: str):
-    """Форматирование телефонного номера"""
+def format_phone_number(phone: str, country: str = 'BY'):
+    """Форматирование телефонного номера с учетом страны"""
     digits = re.sub(r'\D', '', phone)
     
-    # Проверяем разные форматы номеров
-    if len(digits) == 10:
-        digits = '7' + digits
-    elif len(digits) == 11 and digits.startswith('8'):
-        digits = '7' + digits[1:]
+    if country == 'BY':
+        # Добавляем код страны если его нет
+        if len(digits) == 9:
+            digits = '375' + digits
+        if len(digits) == 12 and digits.startswith('375'):
+            return f"+{digits[:3]} ({digits[3:5]}) {digits[5:8]}-{digits[8:10]}-{digits[10:12]}"
     
-    # Форматируем номер
-    if len(digits) == 11 and digits.startswith('7'):
-        return f"+{digits[0]} ({digits[1:4]}) {digits[4:7]}-{digits[7:9]}-{digits[9:11]}"
-    elif len(digits) == 12 and digits.startswith('375'):
-        return f"+{digits[:3]} ({digits[3:5]}) {digits[5:8]}-{digits[8:10]}-{digits[10:12]}"
-    else:
-        return '+' + digits
+    elif country == 'RU':
+        # Для России
+        if len(digits) == 10:
+            digits = '7' + digits
+        elif len(digits) == 11 and digits.startswith('8'):
+            digits = '7' + digits[1:]
+        if len(digits) == 11 and digits.startswith('7'):
+            return f"+{digits[0]} ({digits[1:4]}) {digits[4:7]}-{digits[7:9]}-{digits[9:11]}"
+    
+    elif country == 'KZ':
+        # Для Казахстана
+        if len(digits) == 10 and digits.startswith('7'):
+            digits = '7' + digits
+        elif len(digits) == 11 and digits.startswith('8'):
+            digits = '7' + digits[1:]
+        if len(digits) == 11 and digits.startswith('77'):
+            return f"+{digits[0]} ({digits[1:4]}) {digits[4:7]}-{digits[7:9]}-{digits[9:11]}"
+    elif country == 'AM':
+        # Для Армении
+        if len(digits) == 8:
+            digits = '374' + digits
+        if len(digits) == 11 and digits.startswith('374'):
+            return f"+{digits[:3]} ({digits[3:5]}) {digits[5:8]}-{digits[8:11]}" 
+    return phone  
 
-def validate_phone_number(phone: str):
-    """Валидация телефонного номера"""
+def validate_phone_number(phone: str, country: str = 'BY'):
+    """Валидация телефонного номера с учетом страны"""
     digits = re.sub(r'\D', '', phone)
-    # Принимаем номера России, Беларуси, Казахстана
-    return bool(re.match(r'^(7|8|375)\d{9,10}$', digits))
+    
+    if country == 'BY':
+        # Беларусь: +375 XX XXX-XX-XX
+        return bool(re.match(r'^(375)?[0-9]{9}$', digits))
+    elif country == 'RU':
+        # Россия: +7 XXX XXX-XX-XX
+        return bool(re.match(r'^[78]?[0-9]{10}$', digits))
+    elif country == 'KZ':
+        # Казахстан: +7 7XX XXX-XX-XX
+        return bool(re.match(r'^[78]?7[0-9]{9}$', digits))
+    elif country == 'AM':
+        # Армения: +374 XX XXX-XXX
+        return bool(re.match(r'^(374)?[0-9]{8}$', digits))
+    return False
 
-@feedback_router.message(F.text == "📞 Обратная связь")
+@feedback_router.message(F.text == "📞 Заказать звонок")
 async def request_callback(message: Message, state: FSMContext):
     user_id = message.from_user.id
-    print(f"[INFO] User {user_id} requested callback")
-
     user = await db.get_user(user_id)
+    
     if not user:
-        print(f"[WARN] User {user_id} not registered, prompting /start")
         await message.answer("Для использования этой функции необходимо пройти регистрацию.\nИспользуйте команду /start")
         return
 
+    # Получаем страну пользователя
+    country = user['country'] if 'country' in user.keys() else 'BY'
+    await state.update_data(user_country=country)
+    
+    # Формируем подсказку по формату
+    phone_formats = {
+        'BY': "+375 (XX) XXX-XX-XX",
+        'RU': "+7 (XXX) XXX-XX-XX",
+        'KZ': "+7 (7XX) XXX-XX-XX",
+        'AM': "+374 (XX) XXX-XXX"
+    }
+    
+    format_hint = phone_formats.get(country, phone_formats['BY'])
+    
     await message.answer(
         f"📞 Заказ обратного звонка\n\n"
         f"Пожалуйста, отправьте ваш номер телефона или введите вручную.\n"
-        f"Форматы: +7 (XXX) XXX-XX-XX или +375 (XX) XXX-XX-XX",
+        f"Формат для вашей страны: {format_hint}",
         reply_markup=get_phone_kb()
     )
     await state.set_state(CallbackStates.waiting_for_phone)
-    print(f"[INFO] State set to waiting_for_phone for user {user_id}")
 
 @feedback_router.message(CallbackStates.waiting_for_phone)
 async def process_phone(message: Message, state: FSMContext):
     user_id = message.from_user.id
 
-    if message.text == "❌ Отмена":
+    if message.text == "🔙 Вернуться в главное меню":
         await state.clear()
         user = await db.get_user(user_id)
         user_role = user['role'] if user else 'user'
         await message.answer("Операция отменена.", reply_markup=get_menu_by_role(user_role))
-        print(f"[INFO] User {user_id} cancelled phone input")
         return
 
+    data = await state.get_data()
+    country = data.get('user_country', 'BY')
     phone = ""
 
     if message.contact:
@@ -82,34 +125,38 @@ async def process_phone(message: Message, state: FSMContext):
             phone = '+' + phone
     else:
         phone = message.text
-        if not validate_phone_number(phone):
-            print(f"[WARN] User {user_id} entered invalid phone: {phone}")
+        if not validate_phone_number(phone, country):
+            phone_examples = {
+                'BY': "375291234567 или +375 29 123-45-67",
+                'RU': "79123456789 или +7 912 345-67-89",
+                'KZ': "77012345678 или +7 701 234-56-78",
+                'AM': "37477123456 или +374 77 123-456"
+            }
+            example = phone_examples.get(country, phone_examples['BY'])
+            
             await message.answer(
                 f"❌ Неверный формат номера телефона.\n"
                 f"Пожалуйста, введите номер в формате:\n"
-                f"+7 (912) 345-67-89 или 89123456789\n"
-                f"+375 (29) 123-45-67 или 375291234567", 
+                f"{example}",
                 reply_markup=get_phone_kb()
             )
             return
-        phone = format_phone_number(phone)
+        
+        phone = format_phone_number(phone, country)
 
     await state.update_data(phone=phone)
-    print(f"[INFO] User {user_id} phone saved: {phone}")
-
     await message.answer(
         "Отлично! Теперь напишите ваше сообщение.\n"
         "Опишите причину обращения, удобное время для звонка и любую другую важную информацию:",
         reply_markup=get_cancel_kb()
     )
     await state.set_state(CallbackStates.waiting_for_message)
-    print(f"[INFO] State set to waiting_for_message for user {user_id}")
 
 @feedback_router.message(CallbackStates.waiting_for_message)
 async def process_callback_message(message: Message, state: FSMContext):
     user_id = message.from_user.id
 
-    if message.text == "❌ Отмена":
+    if message.text == "🔙 Вернуться в главное меню":
         await state.clear()
         user = await db.get_user(user_id)
         user_role = user['role'] if user else 'user'
@@ -139,7 +186,7 @@ async def process_callback_message(message: Message, state: FSMContext):
     await message.answer(
         "✅ Ваша заявка на обратный звонок успешно отправлена!\n\n"
         f"📞 Телефон: {phone}\n💬 Сообщение: {message.text}\n\n"
-        "Наш администратор свяжется с вами в ближайшее время.",
+        "Наш специалист свяжется с вами в ближайшее время.",
         reply_markup=get_menu_by_role(user_role)
     )
     await state.clear()
@@ -164,7 +211,7 @@ async def start_feedback(message: Message, state: FSMContext):
 async def process_feedback_type(message: Message, state: FSMContext):
     user_id = message.from_user.id
 
-    if message.text == "❌ Отмена":
+    if message.text == "🔙 Вернуться в главное меню":
         await state.clear()
         user = await db.get_user(user_id)
         user_role = user['role'] if user else 'user'
@@ -193,7 +240,7 @@ async def process_feedback_type(message: Message, state: FSMContext):
 async def process_feedback_message(message: Message, state: FSMContext):
     user_id = message.from_user.id
 
-    if message.text == "❌ Отмена":
+    if message.text == "🔙 Вернуться в главное меню":
         await state.clear()
         user = await db.get_user(user_id)
         user_role = user['role'] if user else 'user'

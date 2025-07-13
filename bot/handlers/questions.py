@@ -2,22 +2,42 @@ from aiogram import Router, F
 from aiogram.types import Message, BufferedInputFile
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from bot.keyboards import get_cancel_kb, get_menu_by_role, get_dialog_kb
+from bot.keyboards import get_menu_by_role, get_dialog_kb, get_back_to_menu_kb
+from datetime import datetime
 from src.database.db_init import db
 from src.data_vectorization import DataProcessor
 from models.models_init import qwen3_32b_instruct_free as llm
 from langchain.schema import SystemMessage, HumanMessage
+import pytz
+import asyncio
 import json
 import re
 import base64
+
+# GIF file_id для анимации загрузки (опционально)
+LOADING_GIF_ID = "CgACAgIAAxkBAAMIaGr_qy1Wxaw2VrBrm3dwOAkYji4AAu54AAKmqHlJAtZWBziZvaA2BA"
 
 questions_router = Router()
 
 class QuestionStates(StatesGroup):
     waiting_for_question = State()
     in_dialog = State()
+    
+def get_time_based_farewell():
+    """Возвращает прощание в зависимости от времени суток"""
+    tz = pytz.timezone('Europe/Minsk')
+    current_hour = datetime.now(tz).hour
+    
+    if 4 <= current_hour < 12:
+        return "Рад был помочь и хорошего утра ☀️"
+    elif 12 <= current_hour < 17:
+        return "Рад был помочь и хорошего дня 🤝"
+    elif 17 <= current_hour < 22:
+        return "Рад был помочь и хорошего вечера 🌆"
+    else:
+        return "Рад был помочь и доброй ночи 🌙"
 
-@questions_router.message(F.text.in_(["❓ Задать вопрос", "🤖 Вопрос нейросети"]))
+@questions_router.message(F.text == "🤖 Задать вопрос ассистенту")
 async def start_question(message: Message, state: FSMContext):
     """Begin question flow and reset ephemeral memory buffer."""
     user_id = message.from_user.id
@@ -32,28 +52,16 @@ async def start_question(message: Message, state: FSMContext):
         )
         return
 
-    role = user['role'] if 'role' in user else 'client'
+    role = user['role'] if 'role' in user else 'staff'
+    # Исправляем получение имени
+    user_name = user['name'] if user and 'name' in user else 'друг'
     print(f"[INFO] Resolved role for user {user_id}: {role}")
 
     await db.clear_buffer(user_id)
 
-    prompt = (
-        "🤖 Задайте ваш профессиональный вопрос нейросети.\n\n"
-        "Я могу помочь с:\n"
-        "• Информацией о лечении животных\n"
-        "• Консультациями по симптомам\n"
-        "• Рекомендациями по уходу\n"
-        "• Ветеринарными препаратами"
-        if role == 'staff' else
-        "🤖 Задайте ваш профессиональный вопрос нейросети.\n\n"
-        "Я могу помочь с:\n"
-        "• Информацией о тестах и анализах\n"
-        "• Преаналитическими требованиями\n"
-        "• Интерпретацией результатов\n"
-        "• Общими вопросами по лабораторной диагностике"
-    )
+    prompt = f"Привет, {user_name}, чем могу тебе помочь?"
 
-    await message.answer(prompt, reply_markup=get_cancel_kb())
+    await message.answer(prompt, reply_markup=get_back_to_menu_kb())
     await state.set_state(QuestionStates.waiting_for_question)
     print(f"[INFO] State set to waiting_for_question for user {user_id}")
 
@@ -63,27 +71,59 @@ async def process_question(message: Message, state: FSMContext):
     user_id = message.from_user.id
     text = message.text.strip()
 
-    if text == "❌ Отмена":
+    if text == "🔙 Вернуться в главное меню":
         await state.clear()
         user = await db.get_user(user_id)
-        role = user['role'] if 'role' in user else 'client'
+        role = user['role'] if 'role' in user else 'staff'
         await message.answer("Операция отменена.", reply_markup=get_menu_by_role(role))
         print(f"[INFO] User {user_id} cancelled question")
         return
 
     user = await db.get_user(user_id)
-    role = user['role'] if 'role' in user else 'client'
+    role = user['role'] if 'role' in user else 'staff'
     print(f"[INFO] User {user_id} submitted question: {text} (role={role})")
 
     # Store the original question in the state for follow-ups
     await state.update_data(original_question=text)
 
-    # Process the question with RAG
-    answer = await process_user_question(user_id, text, role, is_new_question=True)
+    # Отправляем анимированное сообщение о загрузке
+    loading_msg = await message.answer_animation(
+        animation=LOADING_GIF_ID,
+        caption="🤖 Обрабатываю ваш запрос...\n⏳ Анализирую данные..."
+    )
     
-    await message.answer(answer, reply_markup=get_dialog_kb())
-    await state.set_state(QuestionStates.in_dialog)
-    print(f"[INFO] State set to in_dialog for user {user_id}")
+    # Создаем задачу для анимации загрузки
+    animation_task = asyncio.create_task(animate_loading(loading_msg))
+    
+    try:
+        # Process the question with RAG
+        answer = await process_user_question(user_id, text, role, is_new_question=True)
+        
+        # Останавливаем анимацию и удаляем сообщение
+        animation_task.cancel()
+        try:
+            await loading_msg.delete()
+        except:
+            pass
+        
+        await message.answer(answer, reply_markup=get_dialog_kb())
+        await state.set_state(QuestionStates.in_dialog)
+        print(f"[INFO] State set to in_dialog for user {user_id}")
+        
+    except Exception as e:
+        print(f"[ERROR] Error processing question for user {user_id}: {e}")
+        animation_task.cancel()
+        try:
+            await loading_msg.delete()
+        except:
+            pass
+        
+        await message.answer(
+            "❌ Произошла ошибка при обработке вашего вопроса.\n"
+            "Пожалуйста, попробуйте еще раз или обратитесь в поддержку.",
+            reply_markup=get_menu_by_role(role)
+        )
+        await state.clear()
 
 # @questions_router.message(
 #     QuestionStates.in_dialog, 
@@ -134,14 +174,15 @@ async def handle_dialog(message: Message, state: FSMContext):
     if text == "❌ Завершить диалог":
         await state.clear()
         user = await db.get_user(user_id)
-        role = user['role'] if 'role' in user else 'client'
-        await message.answer("Диалог завершен.", reply_markup=get_menu_by_role(role))
+        role = user['role'] if 'role' in user else 'staff'
+        farewell_text = get_time_based_farewell()  # Используем функцию для получения прощания
+        await message.answer(farewell_text, reply_markup=get_menu_by_role(role))
         print(f"[INFO] User {user_id} ended dialog")
         return
     
     if text == "🔄 Новый вопрос":
         await db.clear_buffer(user_id)
-        await message.answer("Задайте новый вопрос:", reply_markup=get_cancel_kb())
+        await message.answer("Задайте новый вопрос:", reply_markup=get_back_to_menu_kb())
         await state.set_state(QuestionStates.waiting_for_question)
         print(f"[INFO] User {user_id} started new question")
         return
@@ -151,14 +192,64 @@ async def handle_dialog(message: Message, state: FSMContext):
     original_question = data.get('original_question', '')
 
     user = await db.get_user(user_id)
-    role = user['role'] if 'role' in user else 'client'
+    role = user['role'] if 'role' in user else 'staff'
     print(f"[INFO] User {user_id} asked follow-up: {text} (role={role})")
 
-    # Process follow-up without RAG (reuse original question context)
-    answer = await process_user_question(user_id, text, role, is_new_question=False)
+    # Добавляем анимацию загрузки для follow-up вопросов
+    loading_msg = await message.answer_animation(
+        animation=LOADING_GIF_ID,
+        caption="🤖 Обрабатываю ваш запрос...\n⏳ Анализирую данные..."
+    )
     
-    await message.answer(answer, reply_markup=get_dialog_kb())
-    print(f"[INFO] Follow-up answer sent to user {user_id}")
+    animation_task = asyncio.create_task(animate_loading(loading_msg))
+    
+    try:
+        # Process follow-up without RAG (reuse original question context)
+        answer = await process_user_question(user_id, text, role, is_new_question=False)
+        
+        # Останавливаем анимацию и удаляем сообщение
+        animation_task.cancel()
+        try:
+            await loading_msg.delete()
+        except:
+            pass
+        
+        await message.answer(answer, reply_markup=get_dialog_kb())
+        print(f"[INFO] Follow-up answer sent to user {user_id}")
+        
+    except Exception as e:
+        print(f"[ERROR] Error processing follow-up for user {user_id}: {e}")
+        animation_task.cancel()
+        try:
+            await loading_msg.delete()
+        except:
+            pass
+        
+        await message.answer(
+            "❌ Произошла ошибка при обработке вашего вопроса.\n"
+            "Пожалуйста, попробуйте еще раз.",
+            reply_markup=get_dialog_kb()
+        )
+    
+async def animate_loading(message: Message):
+    """Анимация загрузки через редактирование подписи к GIF"""
+    animations = [
+        "🤖 Обрабатываю ваш запрос...\n⏳ Анализирую данные...",
+        "🤖 Обрабатываю ваш запрос...\n🔍 Поиск в базе знаний...",
+        "🤖 Обрабатываю ваш запрос...\n🧠 Формирую ответ...",
+        "🤖 Обрабатываю ваш запрос...\n📝 Подготавливаю результат..."
+    ]
+    
+    i = 0
+    try:
+        while True:
+            await asyncio.sleep(2)
+            i = (i + 1) % len(animations)
+            await message.edit_caption(caption=animations[i])  # Изменено с edit_text на edit_caption
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        pass
 
 async def process_user_question(user_id: int, text: str, role: str, is_new_question: bool) -> str:
     """Process user question and return AI response."""
@@ -222,4 +313,3 @@ async def process_user_question(user_id: int, text: str, role: str, is_new_quest
     print(f"[INFO] Bot response buffered for user {user_id}")
 
     return answer
-

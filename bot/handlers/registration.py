@@ -5,9 +5,9 @@ from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from bot.keyboards import (
-    get_cancel_kb, get_user_type_kb, get_department_function_kb, 
+    get_user_type_kb, get_department_function_kb, 
     get_main_menu_kb, get_admin_menu_kb, get_specialization_kb,
-    get_region_kb
+    get_region_kb, get_country_kb
 )
 
 from src.database.db_init import db
@@ -16,6 +16,7 @@ registration_router = Router()
 
 class RegistrationStates(StatesGroup):
     waiting_for_user_type = State()
+    waiting_for_country = State()
     # Для клиентов
     waiting_for_client_code = State()
     waiting_for_client_name = State()
@@ -54,45 +55,69 @@ async def cmd_start(message: Message, state: FSMContext):
         )
         await state.set_state(RegistrationStates.waiting_for_user_type)
 
-@registration_router.message(StateFilter(RegistrationStates), F.text == "❌ Отмена")
-async def cancel_registration(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    await state.clear()
-    await message.answer(
-        "Регистрация отменена. Для начала регистрации используйте /start",
-        reply_markup=ReplyKeyboardRemove()
-    )
-    print(f"[INFO] User {user_id} cancelled registration")
-
 @registration_router.message(RegistrationStates.waiting_for_user_type)
 async def process_user_type(message: Message, state: FSMContext):
     user_id = message.from_user.id
     
     if message.text == "👨‍⚕️ Ветеринарный врач клиники-партнера":
         await state.update_data(user_type='client')
-        await message.answer(
-            "📝 Регистрация ветеринарного врача\n\n"
-            "Введите ваш код клиники:\n"
-            "⚠️ Код должен начинаться с 'В+' (например: В+МАКСИМА)\n"
-            "💡 Код клиники вы можете получить у представителя VET UNION",
-            reply_markup=get_cancel_kb()
-        )
-        await state.set_state(RegistrationStates.waiting_for_client_code)
-        
-    elif message.text == "👷 Сотрудник VET UNION":
+    elif message.text == "🔬 Сотрудник VET UNION":
         await state.update_data(user_type='employee')
-        await message.answer(
-            "📝 Регистрация сотрудника VET UNION\n\n"
-            "Выберите ваш регион:",
-            reply_markup=get_region_kb()
-        )
-        await state.set_state(RegistrationStates.waiting_for_region)
-        
     else:
         await message.answer(
             "❌ Пожалуйста, выберите из предложенных вариантов",
             reply_markup=get_user_type_kb()
         )
+        return
+    
+    # Переходим к выбору страны
+    await message.answer(
+        "🌍 В какой стране вы находитесь?",
+        reply_markup=get_country_kb()
+    )
+    await state.set_state(RegistrationStates.waiting_for_country)
+    
+@registration_router.message(RegistrationStates.waiting_for_country)
+async def process_country(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    
+    country_map = {
+        "🇧🇾 Беларусь": "BY",
+        "🇷🇺 Россия": "RU",
+        "🇰🇿 Казахстан": "KZ",
+        "🇦🇲 Армения": "AM"
+    }
+    
+    if message.text not in country_map:
+        await message.answer(
+            "❌ Пожалуйста, выберите страну из предложенных вариантов",
+            reply_markup=get_country_kb()
+        )
+        return
+    
+    country = country_map[message.text]
+    await state.update_data(country=country)
+    
+    # Продолжаем в зависимости от типа пользователя
+    data = await state.get_data()
+    
+    if data['user_type'] == 'client':
+        await message.answer(
+            "📝 Регистрация ветеринарного врача\n\n"
+            "Введите ваш код клиники:\n"
+            "⚠️ Код должен начинаться с 'В+' (например: В+МАКСИМА)\n"
+            "💡 Код клиники вы можете получить у представителя VET UNION",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        await state.set_state(RegistrationStates.waiting_for_client_code)
+    else:
+        # Для сотрудников показываем регионы выбранной страны
+        await message.answer(
+            "📝 Регистрация сотрудника VET UNION\n\n"
+            "Выберите ваш регион:",
+            reply_markup=get_region_kb(country)
+        )
+        await state.set_state(RegistrationStates.waiting_for_region)
 
 # Обработчики для клиентов
 @registration_router.message(RegistrationStates.waiting_for_client_code)
@@ -115,7 +140,7 @@ async def process_client_code(message: Message, state: FSMContext):
     await message.answer(
         f"✅ Код клиники: {code}\n\n"
         "Теперь введите ваше имя:",
-        reply_markup=get_cancel_kb()
+        reply_markup=ReplyKeyboardRemove()
     )
     await state.set_state(RegistrationStates.waiting_for_client_name)
 
@@ -144,21 +169,20 @@ async def process_specialization(message: Message, state: FSMContext):
     if message.text == "✏️ Ввести свою специализацию":
         await message.answer(
             "Введите вашу специализацию:",
-            reply_markup=get_cancel_kb()
+            reply_markup=ReplyKeyboardRemove()
         )
         await state.set_state(RegistrationStates.waiting_for_custom_specialization)
         return
     
     specialization_map = {
         "🏥 Общая практика": "Общая практика",
-        "💊 Терапевт": "Терапевт",
-        "🔪 Хирург": "Хирург",
-        "🔬 Лаборант": "Лаборант",
-        "🦷 Стоматолог": "Стоматолог",
-        "👁 Офтальмолог": "Офтальмолог",
-        "🧠 Невролог": "Невролог",
-        "🦴 Ортопед": "Ортопед",
-        "❤️ Кардиолог": "Кардиолог"
+        "🔪 Хирургия": "Хирургия",
+        "💊 Терапия": "Терапия",
+        "🦴 Ортопедия": "Ортопедия",
+        "🎗️ Онкология": "Онкология",
+        "🦠 Дерматология": "Дерматология",
+        "👁️ Офтальмология": "Офтальмология",
+        "🦷 Стоматология": "Стоматология"
     }
     
     if message.text not in specialization_map:
@@ -175,7 +199,8 @@ async def process_specialization(message: Message, state: FSMContext):
         telegram_id=user_id,
         name=data['name'],
         client_code=data['client_code'],
-        specialization=specialization
+        specialization=specialization,
+        country=data.get('country', 'BY')
     )
 
     if success:
@@ -183,13 +208,14 @@ async def process_specialization(message: Message, state: FSMContext):
             f"✅ Регистрация завершена успешно!\n\n"
             f"👤 Имя: {data['name']}\n"
             f"🏥 Код клиники: {data['client_code']}\n"
-            f"📋 Специализация: {specialization}\n\n"
+            f"📋 Специализация: {specialization}\n"
+            f"🌍 Страна: {message.text.split()[1] if data['country'] == 'BY' else message.text.split()[1]}\n\n"
             "Теперь вы можете пользоваться всеми функциями бота!",
             reply_markup=get_main_menu_kb()
         )
     else:
         await message.answer(
-            "❌ Ошибка регистрации. Попробуйте еще раз: /start",
+            "❌ Ошибка регистрации. Возможно, вы уже зарегистрированы.\nПопробуйте еще раз: /start",
             reply_markup=ReplyKeyboardRemove()
         )
 
@@ -212,7 +238,8 @@ async def process_custom_specialization(message: Message, state: FSMContext):
         telegram_id=user_id,
         name=data['name'],
         client_code=data['client_code'],
-        specialization=specialization
+        specialization=specialization,
+        country=data.get('country', 'BY')
     )
 
     if success:
@@ -226,7 +253,7 @@ async def process_custom_specialization(message: Message, state: FSMContext):
         )
     else:
         await message.answer(
-            "❌ Ошибка регистрации. Попробуйте еще раз: /start",
+            "❌ Ошибка регистрации. Возможно, вы уже зарегистрированы.\nПопробуйте еще раз: /start",
             reply_markup=ReplyKeyboardRemove()
         )
 
@@ -238,39 +265,28 @@ async def process_region(message: Message, state: FSMContext):
     if message.text == "✏️ Ввести свой регион":
         await message.answer(
             "Введите ваш регион:",
-            reply_markup=get_cancel_kb()
+            reply_markup=ReplyKeyboardRemove()
         )
         await state.set_state(RegistrationStates.waiting_for_custom_region)
         return
     
-    region_map = {
-        "📍 Минск": "Минск",
-        "📍 Минская область": "Минская область",
-        "📍 Брест": "Брест",
-        "📍 Брестская область": "Брестская область",
-        "📍 Витебск": "Витебск",
-        "📍 Витебская область": "Витебская область",
-        "📍 Гомель": "Гомель",
-        "📍 Гомельская область": "Гомельская область",
-        "📍 Гродно": "Гродно",
-        "📍 Гродненская область": "Гродненская область",
-        "📍 Могилёв": "Могилёв",
-        "📍 Могилёвская область": "Могилёвская область"
-    }
+    # Получаем данные из state
+    data = await state.get_data()
     
-    if message.text not in region_map:
+    # Проверяем, что выбран регион из клавиатуры
+    if not message.text.startswith("📍"):
         await message.answer(
             "❌ Пожалуйста, выберите регион из списка или введите свой",
-            reply_markup=get_region_kb()
+            reply_markup=get_region_kb(data.get('country', 'BY'))
         )
         return
     
-    region = region_map[message.text]
+    region = message.text.replace("📍 ", "")
     await state.update_data(region=region)
     await message.answer(
         f"📍 Регион: {region}\n\n"
         "Введите вашу фамилию и имя:",
-        reply_markup=get_cancel_kb()
+        reply_markup=ReplyKeyboardRemove()
     )
     await state.set_state(RegistrationStates.waiting_for_employee_name)
 
@@ -288,7 +304,7 @@ async def process_custom_region(message: Message, state: FSMContext):
     await message.answer(
         f"📍 Регион: {region}\n\n"
         "Введите вашу фамилию и имя:",
-        reply_markup=get_cancel_kb()
+        reply_markup=ReplyKeyboardRemove()
     )
     await state.set_state(RegistrationStates.waiting_for_employee_name)
 
@@ -333,7 +349,8 @@ async def process_department(message: Message, state: FSMContext):
         telegram_id=user_id,
         name=data['name'],
         region=data['region'],
-        department_function=department_map[message.text]
+        department_function=department_map[message.text],
+        country=data['country']
     )
 
     if success:
