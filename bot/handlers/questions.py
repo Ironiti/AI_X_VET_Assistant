@@ -6,7 +6,7 @@ from bot.keyboards import get_menu_by_role, get_dialog_kb, get_back_to_menu_kb
 from datetime import datetime
 from src.database.db_init import db
 from src.data_vectorization import DataProcessor
-from models.models_init import qwen3_32b_instruct_free as llm
+from models.models_init import qwen3_32b_instruct as llm
 from langchain.schema import SystemMessage, HumanMessage
 import pytz
 import asyncio

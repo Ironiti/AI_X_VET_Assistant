@@ -5,7 +5,7 @@ from config import OPENROUTER_API_KEY
 MAX_URLS = 5
 
 SEED = 0
-TEMPERATURE = 0.7
+TEMPERATURE = 0.5
 TOP_P = 1.0
 
 
@@ -26,12 +26,12 @@ def make_chat(model_name: str, streaming: bool = True) -> ChatOpenAI:
     )
 
 # FREE models
-qwen_coder_32b_instruct_free = make_chat("qwen/qwen-2.5-coder-32b-instruct:free")
-qwen3_32b_instruct_free = make_chat("qwen/qwen3-32b:free")
-gemma3_27b_instruct_free = make_chat("google/gemma-3-27b-it:free")
-qwq_32b_instruct_free = make_chat("qwen/qwq-32b:free")
-deepseek_r1_instruct_free = make_chat("deepseek/deepseek-r1:free")
-gemini_2_5_pro_exp_free = make_chat("google/gemini-2.5-pro-exp-03-25:free")
+qwen_coder_32b_instruct_free = make_chat("qwen/qwen-2.5-coder-32b-instruct:free", streaming=False)
+qwen3_32b_instruct_free = make_chat("qwen/qwen3-32b:free", streaming=False)
+gemma3_27b_instruct_free = make_chat("google/gemma-3-27b-it:free", streaming=False)
+qwq_32b_instruct_free = make_chat("qwen/qwq-32b:free", streaming=False)
+deepseek_r1_instruct_free = make_chat("deepseek/deepseek-r1:free", streaming=False)
+gemini_2_5_pro_exp_free = make_chat("google/gemini-2.5-pro-exp-03-25:free", streaming=False)
 
 # PAYABLE models
 gpt_4o = make_chat("openai/gpt-4o", streaming=False)
@@ -42,6 +42,7 @@ openai_o3 = make_chat("openai/o3", streaming=False)
 openai_o1_pro = make_chat("openai/o1-pro", streaming=False)
 openai_o1_mini = make_chat("openai/o1-mini", streaming=False)
 openai_gpt_4o_search_preview = make_chat("openai/gpt-4o-search-preview", streaming=False)
+qwen3_32b_instruct = make_chat("qwen/qwen3-32b", streaming=False)
 
 
 # additional interesting params (for LLMs)
