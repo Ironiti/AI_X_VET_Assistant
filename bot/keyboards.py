@@ -116,7 +116,7 @@ def get_department_function_kb():
 def get_main_menu_kb():
     """Единое меню для всех пользователей (кроме админа)"""
     kb = [
-        [KeyboardButton(text="🤖 Задать вопрос ассистенту")],
+        [KeyboardButton(text="🔬 Задать вопрос ассистенту")],
         [KeyboardButton(text="📞 Заказать звонок")],
         [KeyboardButton(text="💡 Предложения и пожелания")]
     ]
@@ -128,7 +128,7 @@ def get_admin_menu_kb():
         [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="👥 Пользователи")],
         [KeyboardButton(text="📋 Все обращения"), KeyboardButton(text="🔐 Создать код")],
         [KeyboardButton(text="📥 Выгрузка в Excel"), KeyboardButton(text="📢 Рассылка")],
-        [KeyboardButton(text="🤖 Задать вопрос ассистенту"), KeyboardButton(text="📞 Заказать звонок")],
+        [KeyboardButton(text="🔬 Задать вопрос ассистенту"), KeyboardButton(text="📞 Заказать звонок")],
         [KeyboardButton(text="💡 Предложения и пожелания")],
         [KeyboardButton(text="🔧 Управление системой")]
     ]
