@@ -4,7 +4,7 @@ from aiogram import Router, F
 from aiogram.types import Message
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from bot.keyboards import get_cancel_kb, get_menu_by_role, get_phone_kb, get_feedback_type_kb
+from bot.keyboards import get_cancel_kb, get_menu_by_role, get_phone_kb, get_feedback_type_kb, get_back_to_menu_kb
 from utils.email_sender import send_callback_email, send_feedback_email
 
 from src.database.db_init import db
@@ -148,7 +148,7 @@ async def process_phone(message: Message, state: FSMContext):
     await message.answer(
         "Отлично! Теперь напишите ваше сообщение.\n"
         "Опишите причину обращения, удобное время для звонка и любую другую важную информацию:",
-        reply_markup=get_cancel_kb()
+        reply_markup=get_back_to_menu_kb()
     )
     await state.set_state(CallbackStates.waiting_for_message)
 
@@ -231,7 +231,7 @@ async def process_feedback_type(message: Message, state: FSMContext):
     await message.answer(
         f"Вы выбрали: {message.text}\n\n"
         "Пожалуйста, опишите ваше обращение подробно:",
-        reply_markup=get_cancel_kb()
+        reply_markup=get_back_to_menu_kb()
     )
     await state.set_state(FeedbackStates.waiting_for_message)
     print(f"[INFO] State set to waiting_for_message for user {user_id}")

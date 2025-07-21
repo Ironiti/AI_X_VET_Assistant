@@ -2,7 +2,7 @@ from aiogram import Router, F
 from aiogram.types import Message
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from bot.keyboards import get_cancel_kb, get_admin_menu_kb, get_main_menu_kb
+from bot.keyboards import get_cancel_kb, get_admin_menu_kb, get_main_menu_kb, get_back_to_menu_kb
 
 from src.database.db_init import db
 
@@ -29,7 +29,7 @@ async def start_activation(message: Message, state: FSMContext):
     
     await message.answer(
         "Введите код активации администратора:",
-        reply_markup=get_cancel_kb()
+        reply_markup=get_back_to_menu_kb()
     )
     await state.set_state(ActivationStates.waiting_for_code)
 
@@ -58,7 +58,7 @@ async def process_activation_code(message: Message, state: FSMContext):
         await message.answer(
             "❌ Неверный или уже использованный код.\n"
             "Попробуйте еще раз или нажмите Отмена.",
-            reply_markup=get_cancel_kb()
+            reply_markup=get_back_to_menu_kb()
         )
         return
     
