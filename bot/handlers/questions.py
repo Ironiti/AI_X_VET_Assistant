@@ -42,6 +42,7 @@ TEST_ABBREVIATIONS = {
     "ГЕМАТКА": "общий анализ крови клинический анализ крови оак гемка гематология",
 }
 
+<<<<<<< HEAD
 def normalize_test_code(text: str) -> str:
     """Normalize test code by converting similar cyrillic chars to latin and uppercase."""
     # Маппинг похожих кириллических букв на латинские
@@ -72,6 +73,45 @@ def normalize_test_code(text: str) -> str:
     print(f"[DEBUG] normalize_test_code: '{text}' -> '{result}'")
     
     return result
+=======
+async def safe_delete_message(message):
+    """Безопасное удаление сообщения"""
+    try:
+        if message:
+            await message.delete()
+    except Exception:
+        pass  # Игнорируем ошибки удаления
+    
+def split_long_message(text: str, max_length: int = 4000) -> list[str]:
+    """Разбивает длинное сообщение на части"""
+    if len(text) <= max_length:
+        return [text]
+    
+    parts = []
+    current_part = ""
+    
+    # Разбиваем по строкам
+    lines = text.split('\n')
+    
+    for line in lines:
+        if len(current_part) + len(line) + 1 > max_length:
+            if current_part:
+                parts.append(current_part.strip())
+                current_part = line
+            else:
+                # Если одна строка слишком длинная, режем её
+                while len(line) > max_length:
+                    parts.append(line[:max_length])
+                    line = line[max_length:]
+                current_part = line
+        else:
+            current_part += '\n' + line if current_part else line
+    
+    if current_part:
+        parts.append(current_part.strip())
+    
+    return parts
+>>>>>>> 065adf8d1b509328592054c877b769ca5f0b752d
 
 def expand_query_with_abbreviations(query: str) -> str:
     """Expand query with known test abbreviations."""
@@ -308,6 +348,10 @@ async def handle_name_search(message: Message, state: FSMContext):
     """Handle test name search using RAG."""
     user_id = message.from_user.id
     text = message.text.strip()
+    
+    gif_msg = None
+    loading_msg = None
+    animation_task = None
 
     try:
         if LOADING_GIF_ID:
@@ -315,72 +359,80 @@ async def handle_name_search(message: Message, state: FSMContext):
             loading_msg = await message.answer("Обрабатываю ваш запрос...\n⏳ Анализирую данные...")
             animation_task = asyncio.create_task(animate_loading(loading_msg))
         else:
-            gif_msg = None
             loading_msg = await message.answer("🔍 Ищем тест...")
-            animation_task = None
         
         expanded_query = expand_query_with_abbreviations(text)
         processor = DataProcessor()
         processor.load_vector_store()
         
-        try:
-            rag_hits = processor.search_test(expanded_query, top_k=5)
+        rag_hits = processor.search_test(expanded_query, top_k=5)
+        
+        if not rag_hits:
+            raise ValueError("Тесты не найдены")
             
-            if not rag_hits:
-                raise ValueError("No tests found")
-                
-            selected_docs = await select_best_match(text, rag_hits)
-            
-            if animation_task:
-                animation_task.cancel()
-            await loading_msg.delete()
-            if gif_msg:
-                await gif_msg.delete()
-            
-            if len(selected_docs) > 1:
-                # Show multiple results
-                response = "Найдено несколько подходящих тестов:\n\n"
-                for doc in selected_docs:
-                    test_data = format_test_data(doc.metadata)
-                    response += format_test_info(test_data) + "\n"
-                
-                await message.answer(response, parse_mode="HTML")
-            else:
-                # Single result
-                test_data = format_test_data(selected_docs[0].metadata)
-                await message.answer(
-                    format_test_info(test_data),
-                    reply_markup=get_dialog_kb(),
-                    parse_mode="HTML"
-                )
-            
-            await state.set_state(QuestionStates.in_dialog)
-            await state.update_data(current_test=test_data)
-            
-        except Exception as e:
-            print(f"[ERROR] Vector search failed: {e}")
-            raise ValueError("Search service unavailable")
-            
-    except ValueError as e:
-        if 'animation_task' in locals() and animation_task:
+        selected_docs = await select_best_match(text, rag_hits)
+        
+        # Безопасная очистка
+        if animation_task:
             animation_task.cancel()
-        if 'loading_msg' in locals():
-            await loading_msg.delete()
-        if 'gif_msg' in locals() and gif_msg:
-            await gif_msg.delete()
-        await message.answer(f"❌ {str(e)}", reply_markup=get_search_type_kb())
-        await state.set_state(QuestionStates.waiting_for_search_type)
-    except Exception:
-        if 'animation_task' in locals() and animation_task:
+        await safe_delete_message(loading_msg)
+        await safe_delete_message(gif_msg)
+        
+        if len(selected_docs) > 1:
+            # Show multiple results
+            response = "Найдено несколько подходящих тестов:\n\n"
+            
+            # Ограничиваем количество результатов, чтобы не превысить лимит
+            max_tests = 3
+            for i, doc in enumerate(selected_docs[:max_tests]):
+                test_data = format_test_data(doc.metadata)
+                response += format_test_info(test_data) + "\n"
+            
+            if len(selected_docs) > max_tests:
+                response += f"\n<i>Показаны первые {max_tests} из {len(selected_docs)} найденных тестов.</i>"
+            
+            # Разбиваем длинное сообщение на части
+            message_parts = split_long_message(response)
+            
+            for i, part in enumerate(message_parts):
+                if i == len(message_parts) - 1:
+                    # Последняя часть с клавиатурой
+                    await message.answer(part, parse_mode="HTML", reply_markup=get_dialog_kb())
+                else:
+                    await message.answer(part, parse_mode="HTML")
+        else:
+            # Single result
+            test_data = format_test_data(selected_docs[0].metadata)
+            response = format_test_info(test_data)
+            
+            # Проверяем длину и отправляем
+            if len(response) > 4000:
+                # Если даже один результат слишком длинный, обрезаем преаналитику
+                test_data['preanalytics'] = test_data['preanalytics'][:500] + "..."
+                response = format_test_info(test_data)
+            
+            await message.answer(
+                response,
+                reply_markup=get_dialog_kb(),
+                parse_mode="HTML"
+            )
+        
+        # Сохраняем последний найденный тест для диалога
+        await state.set_state(QuestionStates.in_dialog)
+        if selected_docs:
+            last_test_data = format_test_data(selected_docs[-1].metadata)
+            await state.update_data(current_test=last_test_data)
+            
+    except Exception as e:
+        print(f"[ERROR] Name search failed: {e}")
+        # Безопасная очистка при ошибке
+        if animation_task:
             animation_task.cancel()
-        if 'loading_msg' in locals():
-            await loading_msg.delete()
-        if 'gif_msg' in locals() and gif_msg:
-            await gif_msg.delete()
-        await message.answer(
-            "⚠️ Ошибка поиска. Попробуйте позже.", 
-            reply_markup=get_search_type_kb()
-        )
+        await safe_delete_message(loading_msg)
+        await safe_delete_message(gif_msg)
+        
+        error_msg = "❌ Тесты не найдены" if str(e) == "Тесты не найдены" else "⚠️ Ошибка поиска. Попробуйте позже."
+        await message.answer(error_msg, reply_markup=get_search_type_kb())
         await state.set_state(QuestionStates.waiting_for_search_type)
 
 @questions_router.message(QuestionStates.in_dialog)
@@ -422,9 +474,11 @@ async def handle_dialog(message: Message, state: FSMContext):
         """)
         response = await llm.agenerate([[system_msg, HumanMessage(content=text)]])
         answer = response.generations[0][0].text.strip()
-        await loading_msg.edit_text(answer, reply_markup=get_dialog_kb())
+        await loading_msg.edit_text(answer)
+        await message.answer("Выберите действие:", reply_markup=get_dialog_kb())
     except Exception:
-        await loading_msg.edit_text("Ошибка обработки вопроса.", reply_markup=get_dialog_kb())
+        await loading_msg.edit_text("Ошибка обработки вопроса.")
+        await message.answer("Произошла ошибка. Попробуйте снова или начните новый вопрос.", reply_markup=get_dialog_kb())
     finally:
         animation_task.cancel()
         await gif_msg.delete()
