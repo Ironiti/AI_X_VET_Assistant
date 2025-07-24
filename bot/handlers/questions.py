@@ -42,7 +42,7 @@ TEST_ABBREVIATIONS = {
     "ГЕМАТКА": "общий анализ крови клинический анализ крови оак гемка гематология",
 }
 
-<<<<<<< HEAD
+
 def normalize_test_code(text: str) -> str:
     """Normalize test code by converting similar cyrillic chars to latin and uppercase."""
     # Маппинг похожих кириллических букв на латинские
@@ -73,7 +73,7 @@ def normalize_test_code(text: str) -> str:
     print(f"[DEBUG] normalize_test_code: '{text}' -> '{result}'")
     
     return result
-=======
+
 async def safe_delete_message(message):
     """Безопасное удаление сообщения"""
     try:
@@ -111,7 +111,7 @@ def split_long_message(text: str, max_length: int = 4000) -> list[str]:
         parts.append(current_part.strip())
     
     return parts
->>>>>>> 065adf8d1b509328592054c877b769ca5f0b752d
+
 
 def expand_query_with_abbreviations(query: str) -> str:
     """Expand query with known test abbreviations."""
