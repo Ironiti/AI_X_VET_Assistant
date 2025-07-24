@@ -15,8 +15,8 @@ from src.database.db_init import db
 from src.data_vectorization import DataProcessor
 from models.models_init import qwen3_32b_instruct as llm
 
-LOADING_GIF_ID = "CgACAgIAAxkBAAMIaGr_qy1Wxaw2VrBrm3dwOAkYji4AAu54AAKmqHlJAtZWBziZvaA2BA"
-# LOADING_GIF_ID = "CgACAgIAAxkBAAIBFGiBcXtGY7OZvr3-L1dZIBRNqSztAALueAACpqh5Scn4VmIRb4UjNgQ"
+# LOADING_GIF_ID = "CgACAgIAAxkBAAMIaGr_qy1Wxaw2VrBrm3dwOAkYji4AAu54AAKmqHlJAtZWBziZvaA2BA"
+LOADING_GIF_ID = "CgACAgIAAxkBAAIBFGiBcXtGY7OZvr3-L1dZIBRNqSztAALueAACpqh5Scn4VmIRb4UjNgQ"
 questions_router = Router()
 
 class QuestionStates(StatesGroup):
@@ -71,13 +71,15 @@ def get_time_based_farewell(user_name: str = None):
         return f"Рад был помочь{name_part}! Доброй ночи 🌙"
     
 def get_user_first_name(user):
-    if not user or 'name' not in user:
+    if not user:
         return 'друг'
-    
-    full_name = user['name'].strip()
+    # Совместимость с dict и aiosqlite.Row
+    name = user['name'] if 'name' in user.keys() else None
+    if not name:
+        return 'друг'
+    full_name = name.strip()
     name_parts = full_name.split()
-    
-    if len(name_parts) >= 2 and 'user_type' in user and user['user_type'] == 'employee':
+    if len(name_parts) >= 2 and ('user_type' in user.keys() and user['user_type'] == 'employee'):
         return name_parts[1]  # Для сотрудников: Фамилия Имя
     return name_parts[0]  # Для клиентов или однословных имен
 
@@ -103,8 +105,8 @@ def format_test_info(test_data: Dict) -> str:
     )
 
 
-async def animate_loading(message: Message):
-    """Animate loading message."""
+async def animate_loading(loading_msg: Message):  # Изменить message на loading_msg
+    """Animate loading message (edit text, not caption)."""
     animations = [
         "Обрабатываю ваш запрос...\n⏳ Анализирую данные...",
         "Обрабатываю ваш запрос...\n🔍 Поиск в базе VetUnion...",
@@ -115,7 +117,7 @@ async def animate_loading(message: Message):
         while True:
             await asyncio.sleep(2)
             i = (i + 1) % len(animations)
-            await message.edit_caption(caption=animations[i])
+            await loading_msg.edit_text(animations[i])  # Теперь правильно
     except (asyncio.CancelledError, Exception):
         pass
 
@@ -182,10 +184,20 @@ async def start_question(message: Message, state: FSMContext):
     await state.set_state(QuestionStates.waiting_for_search_type)
 
 
+# Глобальный хендлер для кнопки возврата в меню (работает в любом состоянии)
+@questions_router.message(F.text == "🔙 Вернуться в главное меню")
+async def handle_back_to_menu(message: Message, state: FSMContext):
+    await state.clear()
+    user = await db.get_user(message.from_user.id)
+    role = user['role'] if 'role' in user.keys() else 'staff'
+    await message.answer("Операция отменена.", reply_markup=get_menu_by_role(role))
+    return
+
 @questions_router.message(QuestionStates.waiting_for_search_type)
 async def handle_search_type(message: Message, state: FSMContext):
     """Handle search type selection."""
     text = message.text.strip()
+    user_id = message.from_user.id
     
     if text == "🔢 Поиск по коду теста":
         await message.answer("Введите код теста (например, AN5):", reply_markup=get_back_to_menu_kb())
@@ -193,11 +205,7 @@ async def handle_search_type(message: Message, state: FSMContext):
     elif text == "📝 Поиск по названию":
         await message.answer("Введите название или описание теста:", reply_markup=get_back_to_menu_kb())
         await state.set_state(QuestionStates.waiting_for_name)
-    elif text == "🔙 Вернуться в главное меню":
-        await state.clear()
-        user = await db.get_user(message.from_user.id)
-        role = user['role'] if 'role' in user else 'staff'
-        await message.answer("Операция отменена.", reply_markup=get_menu_by_role(role))
+    # обработка возврата в меню удалена, теперь этим занимается глобальный хендлер
 
 @questions_router.message(QuestionStates.waiting_for_code)
 async def handle_code_search(message: Message, state: FSMContext):
@@ -205,18 +213,15 @@ async def handle_code_search(message: Message, state: FSMContext):
     user_id = message.from_user.id
     text = message.text.strip().upper()
 
-    if text == "🔙 Вернуться в главное меню":
-        await state.clear()
-        user = await db.get_user(user_id)
-        role = user['role'] if 'role' in user else 'staff'
-        await message.answer("Операция отменена.", reply_markup=get_menu_by_role(role))
-        return
-
     try:
         if LOADING_GIF_ID:
-            loading_msg = await message.answer_animation(LOADING_GIF_ID, caption="Ищем тест...")
+            gif_msg = await message.answer_animation(LOADING_GIF_ID, caption="")
+            loading_msg = await message.answer("Обрабатываю ваш запрос...\n⏳ Анализирую данные...")
+            animation_task = asyncio.create_task(animate_loading(loading_msg))
         else:
+            gif_msg = None
             loading_msg = await message.answer("🔍 Ищем тест...")
+            animation_task = None
         
         processor = DataProcessor()
         processor.load_vector_store()
@@ -235,40 +240,51 @@ async def handle_code_search(message: Message, state: FSMContext):
             'department': doc.metadata['department']
         }
         
-        await message.answer(format_test_info(test_data), reply_markup=get_dialog_kb())
+        if animation_task:
+            animation_task.cancel()
+        await loading_msg.delete()
+        if gif_msg:
+            await gif_msg.delete()
+        
+        await message.answer(format_test_info(test_data), reply_markup=get_dialog_kb(), parse_mode="HTML")
         await state.set_state(QuestionStates.in_dialog)
         await state.update_data(current_test=test_data)
         
     except ValueError:
+        if 'animation_task' in locals() and animation_task:
+            animation_task.cancel()
+        if 'loading_msg' in locals():
+            await loading_msg.delete()
+        if 'gif_msg' in locals() and gif_msg:
+            await gif_msg.delete()
         await message.answer("❌ Тест с таким кодом не найден", reply_markup=get_search_type_kb())
         await state.set_state(QuestionStates.waiting_for_search_type)
     except Exception as e:
         print(f"[ERROR] Code search failed: {e}")
-        await message.answer("⚠️ Ошибка при поиске. Попробуйте позже", reply_markup=get_search_type_kb())
-        await state.set_state(QuestionStates.waiting_for_search_type)
-    finally:
+        if 'animation_task' in locals() and animation_task:
+            animation_task.cancel()
         if 'loading_msg' in locals():
             await loading_msg.delete()
+        if 'gif_msg' in locals() and gif_msg:
+            await gif_msg.delete()
+        await message.answer("⚠️ Ошибка при поиске. Попробуйте позже", reply_markup=get_search_type_kb())
+        await state.set_state(QuestionStates.waiting_for_search_type)
 
 @questions_router.message(QuestionStates.waiting_for_name)
 async def handle_name_search(message: Message, state: FSMContext):
     """Handle test name search using RAG."""
     user_id = message.from_user.id
     text = message.text.strip()
-    
-    if text == "🔙 Вернуться в главное меню":
-        await state.clear()
-        user = await db.get_user(user_id)
-        role = user['role'] if 'role' in user else 'staff'
-        await message.answer("Операция отменена.", reply_markup=get_menu_by_role(role))
-        return
 
     try:
-        # Отправляем сообщение о загрузке (с GIF или без)
         if LOADING_GIF_ID:
-            loading_msg = await message.answer_animation(LOADING_GIF_ID, caption="Ищем тест...")
+            gif_msg = await message.answer_animation(LOADING_GIF_ID, caption="")
+            loading_msg = await message.answer("Обрабатываю ваш запрос...\n⏳ Анализирую данные...")
+            animation_task = asyncio.create_task(animate_loading(loading_msg))
         else:
+            gif_msg = None
             loading_msg = await message.answer("🔍 Ищем тест...")
+            animation_task = None
         
         expanded_query = expand_query_with_abbreviations(text)
         processor = DataProcessor()
@@ -281,6 +297,12 @@ async def handle_name_search(message: Message, state: FSMContext):
                 raise ValueError("No tests found")
                 
             selected_docs = await select_best_match(text, rag_hits)
+            
+            if animation_task:
+                animation_task.cancel()
+            await loading_msg.delete()
+            if gif_msg:
+                await gif_msg.delete()
             
             if len(selected_docs) > 1:
                 # Show multiple results
@@ -307,49 +329,54 @@ async def handle_name_search(message: Message, state: FSMContext):
             raise ValueError("Search service unavailable")
             
     except ValueError as e:
+        if 'animation_task' in locals() and animation_task:
+            animation_task.cancel()
+        if 'loading_msg' in locals():
+            await loading_msg.delete()
+        if 'gif_msg' in locals() and gif_msg:
+            await gif_msg.delete()
         await message.answer(f"❌ {str(e)}", reply_markup=get_search_type_kb())
         await state.set_state(QuestionStates.waiting_for_search_type)
     except Exception:
+        if 'animation_task' in locals() and animation_task:
+            animation_task.cancel()
+        if 'loading_msg' in locals():
+            await loading_msg.delete()
+        if 'gif_msg' in locals() and gif_msg:
+            await gif_msg.delete()
         await message.answer(
             "⚠️ Ошибка поиска. Попробуйте позже.", 
             reply_markup=get_search_type_kb()
         )
         await state.set_state(QuestionStates.waiting_for_search_type)
-    finally:
-        if 'loading_msg' in locals():
-            await loading_msg.delete()
 
 @questions_router.message(QuestionStates.in_dialog)
 async def handle_dialog(message: Message, state: FSMContext):
     """Handle follow-up questions using LLM."""
     text = message.text.strip()
     user_id = message.from_user.id
-    
     if text == "❌ Завершить диалог":
         await state.clear()
         user = await db.get_user(user_id)
-        role = user['role'] if 'role' in user else 'staff'
+        role = user['role'] if 'role' in user.keys() else 'staff'
         user_name = get_user_first_name(user)
         farewell = get_time_based_farewell(user_name)
         await message.answer(farewell, reply_markup=get_menu_by_role(role))
         return
-    
     if text == "🔄 Новый вопрос":
         await message.answer("Выберите тип поиска:", reply_markup=get_search_type_kb())
         await state.set_state(QuestionStates.waiting_for_search_type)
         return
-
+    # обработка возврата в меню удалена, теперь этим занимается глобальный хендлер
     data = await state.get_data()
     test_data = data['current_test'] if 'current_test' in data else None
-    
     if not test_data:
         await message.answer("Контекст потерян. Задайте новый вопрос.", reply_markup=get_search_type_kb())
         await state.set_state(QuestionStates.waiting_for_search_type)
         return
-
-    loading_msg = await message.answer_animation(LOADING_GIF_ID, caption="Формирую ответ...")
+    gif_msg = await message.answer_animation(LOADING_GIF_ID, caption="")
+    loading_msg = await message.answer("Обрабатываю ваш запрос...\n⏳ Анализирую данные...")
     animation_task = asyncio.create_task(animate_loading(loading_msg))
-    
     try:
         system_msg = SystemMessage(content=f"""
             You're assisting with questions about lab test:
@@ -360,13 +387,11 @@ async def handle_dialog(message: Message, state: FSMContext):
             
             Answer concisely in Russian using only this information.
         """)
-        
         response = await llm.agenerate([[system_msg, HumanMessage(content=text)]])
         answer = response.generations[0][0].text.strip()
-        
-        await message.answer(answer, reply_markup=get_dialog_kb())
+        await loading_msg.edit_text(answer, reply_markup=get_dialog_kb())
     except Exception:
-        await message.answer("Ошибка обработки вопроса.", reply_markup=get_dialog_kb())
+        await loading_msg.edit_text("Ошибка обработки вопроса.", reply_markup=get_dialog_kb())
     finally:
         animation_task.cancel()
-        await loading_msg.delete()
+        await gif_msg.delete()
