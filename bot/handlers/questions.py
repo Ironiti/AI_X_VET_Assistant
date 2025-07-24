@@ -42,6 +42,37 @@ TEST_ABBREVIATIONS = {
     "ГЕМАТКА": "общий анализ крови клинический анализ крови оак гемка гематология",
 }
 
+def normalize_test_code(text: str) -> str:
+    """Normalize test code by converting similar cyrillic chars to latin and uppercase."""
+    # Маппинг похожих кириллических букв на латинские
+    cyrillic_to_latin = {
+        'А': 'A', 'а': 'A',
+        'В': 'B', 'в': 'B', 
+        'С': 'C', 'с': 'C',
+        'Е': 'E', 'е': 'E',
+        'Н': 'N', 'н': 'N',  
+        'К': 'K', 'к': 'K',
+        'М': 'M', 'м': 'M',
+        'О': 'O', 'о': 'O',
+        'Р': 'P', 'р': 'P',
+        'Т': 'T', 'т': 'T',
+        'Х': 'X', 'х': 'X',
+        'У': 'Y', 'у': 'Y'
+    }
+    
+    # Заменяем кириллические символы на латинские
+    result = ''
+    for char in text:
+        if char in cyrillic_to_latin:
+            result += cyrillic_to_latin[char]
+        else:
+            result += char.upper()
+    
+    # Добавим логирование для отладки
+    print(f"[DEBUG] normalize_test_code: '{text}' -> '{result}'")
+    
+    return result
+
 def expand_query_with_abbreviations(query: str) -> str:
     """Expand query with known test abbreviations."""
     query_upper = query.upper()
@@ -103,7 +134,6 @@ def format_test_info(test_data: Dict) -> str:
         f"<b>Температура:</b> {test_data['storage_temp']}\n"
         f"<b>Вид исследования:</b> {test_data['department']}\n\n"
     )
-
 
 async def animate_loading(loading_msg: Message):  # Изменить message на loading_msg
     """Animate loading message (edit text, not caption)."""
@@ -211,7 +241,8 @@ async def handle_search_type(message: Message, state: FSMContext):
 async def handle_code_search(message: Message, state: FSMContext):
     """Handle test code search."""
     user_id = message.from_user.id
-    text = message.text.strip().upper()
+    # Используем новую функцию нормализации вместо простого upper()
+    text = normalize_test_code(message.text.strip())
 
     try:
         if LOADING_GIF_ID:
@@ -226,6 +257,8 @@ async def handle_code_search(message: Message, state: FSMContext):
         processor = DataProcessor()
         processor.load_vector_store()
         results = processor.search_test(filter_dict={"test_code": text})
+            
+            # ... остальной код остается без изменений
         
         if not results:
             raise ValueError("Test not found")
