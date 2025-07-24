@@ -1,30 +1,55 @@
 from aiogram import Router, F
-from aiogram.types import Message, BufferedInputFile
+from aiogram.types import Message
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from bot.keyboards import get_menu_by_role, get_dialog_kb, get_back_to_menu_kb
+from bot.keyboards import get_menu_by_role, get_dialog_kb, get_back_to_menu_kb, get_search_type_kb
+from langchain.schema import SystemMessage, HumanMessage, Document
+import pytz
+import asyncio
+import html
+import re
+from typing import Optional, Dict
+
 from datetime import datetime
 from src.database.db_init import db
 from src.data_vectorization import DataProcessor
 from models.models_init import qwen3_32b_instruct as llm
-from langchain.schema import SystemMessage, HumanMessage
-import pytz
-import asyncio
-import json
-import re
-import base64
-import html
-import os
 
-# GIF file_id для анимации загрузки (опционально)
 LOADING_GIF_ID = "CgACAgIAAxkBAAMIaGr_qy1Wxaw2VrBrm3dwOAkYji4AAu54AAKmqHlJAtZWBziZvaA2BA"
-
+# LOADING_GIF_ID = "CgACAgIAAxkBAAIBFGiBcXtGY7OZvr3-L1dZIBRNqSztAALueAACpqh5Scn4VmIRb4UjNgQ"
 questions_router = Router()
 
 class QuestionStates(StatesGroup):
-    waiting_for_question = State()
+    waiting_for_search_type = State()
+    waiting_for_code = State()
+    waiting_for_name = State()
     in_dialog = State()
-    
+
+# Словарь аббревиатур для расширения запросов
+TEST_ABBREVIATIONS = {
+    "ОАК": "общий анализ крови клинический анализ крови гемка гематология",
+    "БХ": "биохимический анализ биохимия крови",
+    "ОАМ": "общий анализ мочи",
+    "СОЭ": "скорость оседания эритроцитов",
+    "АЛТ": "аланинаминотрансфераза",
+    "АСТ": "аспартатаминотрансфераза",
+    "ТТГ": "тиреотропный гормон",
+    "Т4": "тироксин",
+    "ПЦР": "полимеразная цепная реакция",
+    "ИФА": "иммуноферментный анализ",
+    "ГЕМКА": "общий анализ крови клинический анализ крови оак гематология",
+    "ГЕМАТОЛОГИЯ": "общий анализ крови клинический анализ крови оак гемка",
+    "ГЕМАТКА": "общий анализ крови клинический анализ крови оак гемка гематология",
+}
+
+def expand_query_with_abbreviations(query: str) -> str:
+    """Expand query with known test abbreviations."""
+    query_upper = query.upper()
+    for abbr, expansion in TEST_ABBREVIATIONS.items():
+        if abbr in query_upper:
+            return f"{query} {expansion}"
+    return query
+
 def safe_html(text: str) -> str:
     """Экранирует HTML символы в тексте"""
     return html.escape(text)
@@ -46,367 +71,302 @@ def get_time_based_farewell(user_name: str = None):
         return f"Рад был помочь{name_part}! Доброй ночи 🌙"
     
 def get_user_first_name(user):
-    """Извлекает имя пользователя из полного имени"""
-    if not user or not user['name']:
+    if not user or 'name' not in user:
         return 'друг'
     
     full_name = user['name'].strip()
     name_parts = full_name.split()
     
-    # Определяем тип пользователя
-    # Используем try-except для безопасного доступа к полю
+    if len(name_parts) >= 2 and 'user_type' in user and user['user_type'] == 'employee':
+        return name_parts[1]  # Для сотрудников: Фамилия Имя
+    return name_parts[0]  # Для клиентов или однословных имен
+
+def format_test_data(metadata: Dict) -> Dict:
+    """Extract and format test metadata into standardized dictionary."""
+    return {
+        'test_code': metadata['test_code'],
+        'test_name': metadata['test_name'],
+        'container_type': metadata['container_type'],
+        'preanalytics': metadata['preanalytics'],
+        'storage_temp': metadata['storage_temp'],
+        'department': metadata['department']
+    }
+
+def format_test_info(test_data: Dict) -> str:
+    """Format test information from metadata using HTML tags."""
+    return (
+        f"<b>Тест: {test_data['test_code']} - {test_data['test_name']}</b>\n\n"
+        f"<b>Тип контейнера:</b> {test_data['container_type']}\n"
+        f"<b>Преаналитика:</b> {test_data['preanalytics']}\n"
+        f"<b>Температура:</b> {test_data['storage_temp']}\n"
+        f"<b>Вид исследования:</b> {test_data['department']}\n\n"
+    )
+
+
+async def animate_loading(message: Message):
+    """Animate loading message."""
+    animations = [
+        "Обрабатываю ваш запрос...\n⏳ Анализирую данные...",
+        "Обрабатываю ваш запрос...\n🔍 Поиск в базе VetUnion...",
+        "Обрабатываю ваш запрос...\n🧠 Формирую ответ...",
+    ]
+    i = 0
     try:
-        user_type = user['user_type']
-    except (KeyError, TypeError):
-        user_type = ''
+        while True:
+            await asyncio.sleep(2)
+            i = (i + 1) % len(animations)
+            await message.edit_caption(caption=animations[i])
+    except (asyncio.CancelledError, Exception):
+        pass
+
+async def select_best_match(query: str, docs: list[tuple[Document, float]]) -> list[Document]:
+    """Select best matching tests using LLM from multiple options."""
+    if len(docs) == 1:
+        return [docs[0][0]]
     
-    if user_type == 'employee' and len(name_parts) >= 2:
-        # Для сотрудников: Фамилия Имя -> берем имя
-        return name_parts[1]
-    elif user_type == 'client' or len(name_parts) == 1:
-        # Для клиентов или если только одно слово
-        return name_parts[0]
-    else:
-        # По умолчанию берем первое слово
-        return name_parts[0]
+    options = "\n".join([
+        f"{i}. {doc.metadata['test_name']} ({doc.metadata['test_code']}) - score: {score:.2f}"
+        for i, (doc, score) in enumerate(docs, 1)
+    ])
+    
+    prompt = f"""
+    Select relevant tests for: "{query}"
+    Return ONLY numbers of matching options (1-{len(docs)}) separated by commas.
+    
+    Options:
+    {options}
+    """
+    
+    try:
+        response = await llm.agenerate([[SystemMessage(content=prompt)]])
+        selected = response.generations[0][0].text.strip()
+        
+        if not selected:
+            return [docs[0][0]]  # Fallback to top result
+            
+        selected_indices = []
+        for num in selected.split(','):
+            num = num.strip()
+            if num.isdigit() and 1 <= int(num) <= len(docs):
+                selected_indices.append(int(num) - 1)
+                
+        if not selected_indices:
+            return [docs[0][0]]
+            
+        return [docs[i][0] for i in selected_indices]
+    except Exception:
+        return [docs[0][0]]  # Fallback on error
 
 @questions_router.message(F.text == "🔬 Задать вопрос ассистенту")
 async def start_question(message: Message, state: FSMContext):
-    """Begin question flow and reset ephemeral memory buffer."""
     user_id = message.from_user.id
-    print(f"[INFO] User {user_id} initiated question flow")
-
     user = await db.get_user(user_id)
+    
     if not user:
-        print(f"[WARN] User {user_id} not registered")
-        await message.answer(
-            "Для использования этой функции необходимо пройти регистрацию.\n"
-            "Используйте команду /start"
-        )
+        await message.answer("Для использования этой функции необходимо пройти регистрацию.\nИспользуйте команду /start")
         return
 
-    role = user['role'] if user else 'staff'
-    user_name = get_user_first_name(user)
+    user_name = get_user_first_name(user)  # Добавить эту функцию
+    role = user['role'] if 'role' in user else 'staff'
     
-    print(f"[INFO] Resolved role for user {user_id}: {role}, name: {user_name}")
-
-    await db.clear_buffer(user_id)
-
     prompt = f"""Привет, {user_name} 👋
     
-    🔬 Я могу помочь с поиском информации по:
-    - всему перечню лабораторных тестов и профилей (комплексов)
-    - преаналитическим требованиям нашей лаборатории
-    - типам пробирок/контейнеров и не только 
+🔬 Я могу помочь с поиском информации по:
+    - всему перечню лабораторных тестов и профилей
+    - преаналитическим требованиям
+    - типам пробирок/контейнеров
     - условиям хранения/транспортировки проб"""
 
-    await message.answer(prompt, reply_markup=get_back_to_menu_kb())
-    await state.set_state(QuestionStates.waiting_for_question)
-    print(f"[INFO] State set to waiting_for_question for user {user_id}")
+    await db.clear_buffer(user_id)
+    await message.answer(prompt, reply_markup=get_search_type_kb())
+    await state.set_state(QuestionStates.waiting_for_search_type)
 
-@questions_router.message(QuestionStates.waiting_for_question)
-async def process_question(message: Message, state: FSMContext):
-    """Handle user question: update memory, fetch RAG context, ask LLM, update memory."""
-    user_id = message.from_user.id
+
+@questions_router.message(QuestionStates.waiting_for_search_type)
+async def handle_search_type(message: Message, state: FSMContext):
+    """Handle search type selection."""
     text = message.text.strip()
+    
+    if text == "🔢 Поиск по коду теста":
+        await message.answer("Введите код теста (например, AN5):", reply_markup=get_back_to_menu_kb())
+        await state.set_state(QuestionStates.waiting_for_code)
+    elif text == "📝 Поиск по названию":
+        await message.answer("Введите название или описание теста:", reply_markup=get_back_to_menu_kb())
+        await state.set_state(QuestionStates.waiting_for_name)
+    elif text == "🔙 Вернуться в главное меню":
+        await state.clear()
+        user = await db.get_user(message.from_user.id)
+        role = user['role'] if 'role' in user else 'staff'
+        await message.answer("Операция отменена.", reply_markup=get_menu_by_role(role))
+
+@questions_router.message(QuestionStates.waiting_for_code)
+async def handle_code_search(message: Message, state: FSMContext):
+    """Handle test code search."""
+    user_id = message.from_user.id
+    text = message.text.strip().upper()
 
     if text == "🔙 Вернуться в главное меню":
         await state.clear()
         user = await db.get_user(user_id)
         role = user['role'] if 'role' in user else 'staff'
         await message.answer("Операция отменена.", reply_markup=get_menu_by_role(role))
-        print(f"[INFO] User {user_id} cancelled question")
         return
 
-    user = await db.get_user(user_id)
-    role = user['role'] if 'role' in user else 'staff'
-    print(f"[INFO] User {user_id} submitted question: {text} (role={role})")
-
-    # Store the original question in the state for follow-ups
-    await state.update_data(original_question=text)
-
-    # Отправляем анимированное сообщение о загрузке
-    loading_msg = await message.answer_animation(
-        animation=LOADING_GIF_ID,
-        caption="Обрабатываю ваш запрос...\n⏳ Анализирую данные..."
-    )
-    
-    # Создаем задачу для анимации загрузки
-    animation_task = asyncio.create_task(animate_loading(loading_msg))
-    
     try:
-        # Process the question with RAG
-        answer = await process_user_question(user_id, text, role, is_new_question=True)
+        if LOADING_GIF_ID:
+            loading_msg = await message.answer_animation(LOADING_GIF_ID, caption="Ищем тест...")
+        else:
+            loading_msg = await message.answer("🔍 Ищем тест...")
         
-        # Останавливаем анимацию и удаляем сообщение
-        animation_task.cancel()
-        try:
-            await loading_msg.delete()
-        except:
-            pass
+        processor = DataProcessor()
+        processor.load_vector_store()
+        results = processor.search_test(filter_dict={"test_code": text})
         
-        await message.answer(answer, reply_markup=get_dialog_kb(), parse_mode="Markdown")
+        if not results:
+            raise ValueError("Test not found")
+            
+        doc = results[0][0]
+        test_data = {
+            'test_code': doc.metadata['test_code'],
+            'test_name': doc.metadata['test_name'],
+            'container_type': doc.metadata['container_type'],
+            'preanalytics': doc.metadata['preanalytics'],
+            'storage_temp': doc.metadata['storage_temp'],
+            'department': doc.metadata['department']
+        }
+        
+        await message.answer(format_test_info(test_data), reply_markup=get_dialog_kb())
         await state.set_state(QuestionStates.in_dialog)
-        print(f"[INFO] State set to in_dialog for user {user_id}")
+        await state.update_data(current_test=test_data)
         
+    except ValueError:
+        await message.answer("❌ Тест с таким кодом не найден", reply_markup=get_search_type_kb())
+        await state.set_state(QuestionStates.waiting_for_search_type)
     except Exception as e:
-        print(f"[ERROR] Error processing question for user {user_id}: {e}")
-        animation_task.cancel()
-        try:
+        print(f"[ERROR] Code search failed: {e}")
+        await message.answer("⚠️ Ошибка при поиске. Попробуйте позже", reply_markup=get_search_type_kb())
+        await state.set_state(QuestionStates.waiting_for_search_type)
+    finally:
+        if 'loading_msg' in locals():
             await loading_msg.delete()
-        except:
-            pass
-        
-        await message.answer(
-            "❌ Произошла ошибка при обработке вашего вопроса.\n"
-            "Пожалуйста, попробуйте еще раз или обратитесь в поддержку.",
-            reply_markup=get_menu_by_role(role)
-        )
-        await state.clear()
 
-# @questions_router.message(
-#     QuestionStates.in_dialog, 
-#     F.text.regexp(r'(?i)(фото|покажи|дай).*(контейнер|пробирк|тест|анализ)'),
-#     flags={"priority": 10}
-# )
-# async def send_container_image(message: Message, state: FSMContext):
-#     """Send container image when specifically requested."""
-#     user_id = message.from_user.id
-#     processor = DataProcessor()
-#     processor.load_vector_store()
+@questions_router.message(QuestionStates.waiting_for_name)
+async def handle_name_search(message: Message, state: FSMContext):
+    """Handle test name search using RAG."""
+    user_id = message.from_user.id
+    text = message.text.strip()
     
-#     # Get last question from state
-#     data = await state.get_data()
-#     question = data.get('original_question', '')
-    
-#     # Search for relevant test
-#     hits = processor.search_test(question, top_k=1)
-#     if not hits:
-#         await message.answer("Не удалось найти информацию о контейнере.")
-#         return
-    
-#     doc = hits[0][0]  # Get the document from search results
-    
-#     if 'container_image_base64' not in doc.metadata:
-#         await message.answer("Изображение контейнера недоступно для этого теста.")
-#         return
-    
-#     try:
-#         image_data = doc.metadata['container_image_base64']
-#         if ';base64,' in image_data:
-#             image_data = image_data.split(';base64,')[-1]
+    if text == "🔙 Вернуться в главное меню":
+        await state.clear()
+        user = await db.get_user(user_id)
+        role = user['role'] if 'role' in user else 'staff'
+        await message.answer("Операция отменена.", reply_markup=get_menu_by_role(role))
+        return
+
+    try:
+        # Отправляем сообщение о загрузке (с GIF или без)
+        if LOADING_GIF_ID:
+            loading_msg = await message.answer_animation(LOADING_GIF_ID, caption="Ищем тест...")
+        else:
+            loading_msg = await message.answer("🔍 Ищем тест...")
         
-#         image_bytes = base64.b64decode(image_data)
-#         await message.answer_photo(
-#             BufferedInputFile(image_bytes, "container.jpg"),
-#             caption=f"Контейнер для теста: {doc.page_content}"
-#         )
-#     except Exception as e:
-#         await message.answer(f"Ошибка при отправке изображения: {str(e)}")
+        expanded_query = expand_query_with_abbreviations(text)
+        processor = DataProcessor()
+        processor.load_vector_store()
+        
+        try:
+            rag_hits = processor.search_test(expanded_query, top_k=5)
+            
+            if not rag_hits:
+                raise ValueError("No tests found")
+                
+            selected_docs = await select_best_match(text, rag_hits)
+            
+            if len(selected_docs) > 1:
+                # Show multiple results
+                response = "Найдено несколько подходящих тестов:\n\n"
+                for doc in selected_docs:
+                    test_data = format_test_data(doc.metadata)
+                    response += format_test_info(test_data) + "\n"
+                
+                await message.answer(response, parse_mode="HTML")
+            else:
+                # Single result
+                test_data = format_test_data(selected_docs[0].metadata)
+                await message.answer(
+                    format_test_info(test_data),
+                    reply_markup=get_dialog_kb(),
+                    parse_mode="HTML"
+                )
+            
+            await state.set_state(QuestionStates.in_dialog)
+            await state.update_data(current_test=test_data)
+            
+        except Exception as e:
+            print(f"[ERROR] Vector search failed: {e}")
+            raise ValueError("Search service unavailable")
+            
+    except ValueError as e:
+        await message.answer(f"❌ {str(e)}", reply_markup=get_search_type_kb())
+        await state.set_state(QuestionStates.waiting_for_search_type)
+    except Exception:
+        await message.answer(
+            "⚠️ Ошибка поиска. Попробуйте позже.", 
+            reply_markup=get_search_type_kb()
+        )
+        await state.set_state(QuestionStates.waiting_for_search_type)
+    finally:
+        if 'loading_msg' in locals():
+            await loading_msg.delete()
 
 @questions_router.message(QuestionStates.in_dialog)
 async def handle_dialog(message: Message, state: FSMContext):
-    """Handle follow-up questions in dialog mode."""
-    user_id = message.from_user.id
+    """Handle follow-up questions using LLM."""
     text = message.text.strip()
-
+    user_id = message.from_user.id
+    
     if text == "❌ Завершить диалог":
         await state.clear()
         user = await db.get_user(user_id)
         role = user['role'] if 'role' in user else 'staff'
         user_name = get_user_first_name(user)
-        farewell_text = get_time_based_farewell(user_name)
-        await message.answer(farewell_text, reply_markup=get_menu_by_role(role))
-        print(f"[INFO] User {user_id} ended dialog")
+        farewell = get_time_based_farewell(user_name)
+        await message.answer(farewell, reply_markup=get_menu_by_role(role))
         return
     
     if text == "🔄 Новый вопрос":
-        await db.clear_buffer(user_id)
-        await message.answer("Задайте новый вопрос:", reply_markup=get_back_to_menu_kb())
-        await state.set_state(QuestionStates.waiting_for_question)
-        print(f"[INFO] User {user_id} started new question")
+        await message.answer("Выберите тип поиска:", reply_markup=get_search_type_kb())
+        await state.set_state(QuestionStates.waiting_for_search_type)
         return
 
-    # Get the original question from the state
     data = await state.get_data()
-    original_question = data.get('original_question', '')
-
-    user = await db.get_user(user_id)
-    role = user['role'] if 'role' in user else 'staff'
-    print(f"[INFO] User {user_id} asked follow-up: {text} (role={role})")
-
-    # Добавляем анимацию загрузки для follow-up вопросов
-    loading_msg = await message.answer_animation(
-        animation=LOADING_GIF_ID,
-        caption="Обрабатываю ваш запрос...\n⏳ Анализирую данные..."
-    )
+    test_data = data['current_test'] if 'current_test' in data else None
     
+    if not test_data:
+        await message.answer("Контекст потерян. Задайте новый вопрос.", reply_markup=get_search_type_kb())
+        await state.set_state(QuestionStates.waiting_for_search_type)
+        return
+
+    loading_msg = await message.answer_animation(LOADING_GIF_ID, caption="Формирую ответ...")
     animation_task = asyncio.create_task(animate_loading(loading_msg))
     
     try:
-        # Process follow-up without RAG (reuse original question context)
-        answer = await process_user_question(user_id, text, role, is_new_question=False)
+        system_msg = SystemMessage(content=f"""
+            You're assisting with questions about lab test:
+            Code: {test_data['test_code']}
+            Name: {test_data['test_name']}
+            Container: {test_data['container_type']}
+            Preanalytics: {test_data['preanalytics']}
+            
+            Answer concisely in Russian using only this information.
+        """)
         
-        # Останавливаем анимацию и удаляем сообщение
-        animation_task.cancel()
-        try:
-            await loading_msg.delete()
-        except:
-            pass
+        response = await llm.agenerate([[system_msg, HumanMessage(content=text)]])
+        answer = response.generations[0][0].text.strip()
         
-        await message.answer(answer, reply_markup=get_dialog_kb(), parse_mode="Markdown")
-        print(f"[INFO] Follow-up answer sent to user {user_id}")
-        
-    except Exception as e:
-        print(f"[ERROR] Error processing follow-up for user {user_id}: {e}")
-        animation_task.cancel()
-        try:
-            await loading_msg.delete()
-        except:
-            pass
-        
-        await message.answer(
-            "❌ Произошла ошибка при обработке вашего вопроса.\n"
-            "Пожалуйста, попробуйте еще раз.",
-            reply_markup=get_dialog_kb()
-        )
-    
-async def animate_loading(message: Message):
-    """Анимация загрузки через редактирование подписи к GIF"""
-    animations = [
-        "Обрабатываю ваш запрос...\n⏳ Анализирую данные...",
-        "Обрабатываю ваш запрос...\n🔍 Поиск в базе VetUnion...",
-        "Обрабатываю ваш запрос...\n🧠 Формирую ответ...",
-        "Обрабатываю ваш запрос...\n📝 Подготавливаю результат...",
-        "Обрабатываю ваш запрос...\n✨ Почти готово..."
-    ]
-    
-    i = 0
-    try:
-        while True:
-            await asyncio.sleep(2)
-            i = (i + 1) % len(animations)
-            await message.edit_caption(caption=animations[i])  # Изменено с edit_text на edit_caption
-    except asyncio.CancelledError:
-        pass
+        await message.answer(answer, reply_markup=get_dialog_kb())
     except Exception:
-        pass
-
-async def process_user_question(user_id: int, text: str, role: str, is_new_question: bool) -> str:
-    """Process user question and return AI response."""
-    
-    # Словарь быстрых замен для популярных аббревиатур
-    quick_expand = {
-        "ОАК": "общий анализ крови клинический анализ крови гемка гематология",
-        "БХ": "биохимический анализ биохимия крови",
-        "ОАМ": "общий анализ мочи",
-        "СОЭ": "скорость оседания эритроцитов",
-        "АЛТ": "аланинаминотрансфераза",
-        "АСТ": "аспартатаминотрансфераза",
-        "ТТГ": "тиреотропный гормон",
-        "Т4": "тироксин",
-        "ПЦР": "полимеразная цепная реакция",
-        "ИФА": "иммуноферментный анализ",
-        "ГЕМКА": "общий анализ крови клинический анализ крови оак гематология",
-        "ГЕМАТОЛОГИЯ": "общий анализ крови клинический анализ крови оак гемка",
-        "ГЕМАТКА": "общий анализ крови клинический анализ крови оак гемка гематология",
-    }
-    
-    # Расширяем запрос если есть известная аббревиатура
-    expanded_query = text
-    text_upper = text.upper()
-    
-    for abbr, expansion in quick_expand.items():
-        if abbr in text_upper:
-            expanded_query = f"{text} {expansion}"
-            print(f"[INFO] Expanded query: {text} -> {expanded_query}")
-            break
-    
-    await db.add_request_stat(user_id, "question", text[:200])
-    await db.add_memory(user_id, 'buffer', f"User: {text}")
-
-    summary = await db.get_latest_summary(user_id) or ""
-    buffer = await db.get_buffer(user_id)
-
-    memory_section = ""
-    if summary:
-        memory_section += f"Сводка предыдущих сообщений: {summary}\n\n"
-    if buffer:
-        memory_section += "Последние сообщения:\n" + "\n".join(buffer) + "\n\n"
-
-    rag_context = ""
-    rag_hits = []
-    
-    if is_new_question:
-        processor = DataProcessor()
-        processor.load_vector_store()
-        rag_hits = processor.search_test(expanded_query, top_k=1)
-        rag_blocks = []
-        for doc, score in rag_hits:
-            clean_meta = {k: v for k, v in doc.metadata.items() if k != 'container_image_base64'}
-            meta_json = json.dumps(clean_meta, ensure_ascii=False, sort_keys=True)
-            rag_blocks.append(f"Тест: {doc.page_content}\nМетаданные: {meta_json}")
-        rag_context = "\n\n---\n\n".join(rag_blocks)
-        # Фильтр: если ищут гемка/гематология/оак, а код теста не AN5, явно пишем что не найден
-        if any(x in text_upper for x in ["ГЕМКА", "ГЕМАТОЛОГИЯ", "ОАК"]) and not any('AN5' in doc.metadata.get('test_code','') for doc, _ in rag_hits):
-            return "Тест AN5 (общий анализ крови) не найден в базе знаний. Проверьте формулировку запроса или обратитесь к поддержке."
-
-    system_msg = SystemMessage(
-        content="""Ты - ассистент ветеринарной лаборатории VetUnion, помогающий клиентам с информацией об анализах для животных.
-
-ВАЖНЫЕ ПРАВИЛА:
-
-1. ОБЯЗАТЕЛЬНЫЙ ФОРМАТ ОТВЕТА:
-- ВСЕГДА начинай ответ с кода теста и полного названия
-- Формат: "**Код теста: [КОД] - [ПОЛНОЕ НАЗВАНИЕ]**"
-- Если пользователь использовал аббревиатуру, укажи её расшифровку
-- Пример: "**Код теста: AN5 - Общий анализ крови с лейкоформулой (ОАК)**"
-
-2. РАСШИФРОВКА АББРЕВИАТУР:
-- Ты знаешь ВСЕ ветеринарные аббревиатуры и их синонимы
-- Всегда указывай расшифровку при первом упоминании
-- Учитывай профессиональный сленг (гематка, биохимия, цита и т.д.)
-
-3. УЧЕТ КОНТЕКСТА:
-- Вид животного (если указан)
-- Тип биоматериала (если указан)
-- Если не указаны - покажи все подходящие варианты
-
-4. СТРУКТУРА ПОЛНОГО ОТВЕТА:
-а) **Код и название теста** (с расшифровкой аббревиатур)
-б) **Вид животного** (если применимо)
-в) **Биоматериал** для исследования
-г) **Преаналитические требования:**
-   - Тип контейнера/пробирки
-   - Условия взятия пробы
-   - Температура хранения и транспортировки
-   - Особые требования (голодание, время взятия и т.д.)
-
-5. ТОЧНОСТЬ ИНФОРМАЦИИ:
-- Используй ТОЛЬКО данные из базы знаний
-- НЕ придумывай коды или названия тестов
-
-6. СРОКИ:
-- Всегда: "Сроки исполнения зависят от региона, уточните у наших сотрудников."
-
-Отвечай полно, чтобы не требовались уточняющие вопросы. Не используй HTML/Markdown разметку - только чистый текст."""
-    )
-
-    user_msg = HumanMessage(
-        content=(
-            f"{memory_section}"
-            f"Контекст преаналитики:\n{rag_context}\n\n"
-            f"Вопрос пользователя: {text}\n\n"
-            "Если в контексте есть информация о запрошенном анализе - предоставь преаналитические требования."
-        )
-    )
-
-    print(f"[INFO] Sending prompt to LLM for user {user_id}")
-    response = await llm.agenerate([[system_msg, user_msg]])
-
-    answer = response.generations[0][0].text.strip()
-    print(f"[INFO] Received LLM answer for user {user_id}")
-    await db.add_memory(user_id, 'buffer', f"Bot: {answer}")
-    print(f"[INFO] Bot response buffered for user {user_id}")
-
-    return answer
+        await message.answer("Ошибка обработки вопроса.", reply_markup=get_dialog_kb())
+    finally:
+        animation_task.cancel()
+        await loading_msg.delete()

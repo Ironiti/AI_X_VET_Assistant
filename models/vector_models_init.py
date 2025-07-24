@@ -135,4 +135,4 @@ class QwenEmbeddings(Embeddings):
 
 
 # Instantiate default embedding model (auto-detect)
-embedding_model = QwenEmbeddings(model_name='Qwen/Qwen3-Embedding-0.6B', task_prompt=task_prompt, use_remote=True)
+embedding_model = QwenEmbeddings(model_name='Qwen/Qwen3-Embedding-4B', task_prompt=task_prompt, use_remote=True)

@@ -9,6 +9,7 @@ from bot.handlers.activation import activation_router
 from bot.handlers.questions import questions_router
 from bot.handlers.admin import admin_router
 from bot.handlers.help import help_router
+from bot.handlers.utils import gif_router
 from config import BOT_API_KEY
 
 if not BOT_API_KEY:
@@ -25,3 +26,4 @@ dp.include_router(activation_router)
 dp.include_router(questions_router)
 dp.include_router(admin_router)
 dp.include_router(help_router)
+dp.include_router(gif_router)

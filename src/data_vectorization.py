@@ -4,13 +4,15 @@ import shutil
 import sys
 from pathlib import Path
 import pandas as pd
+from typing import Optional
 from langchain_community.vectorstores import Chroma
+from langchain.schema import Document
+
+from models.vector_models_init import embedding_model
 
 project_root = Path(__file__).resolve().parents[1]
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
-
-from models.vector_models_init import embedding_model
 
 
 class DataProcessor:
@@ -85,8 +87,58 @@ class DataProcessor:
         sample = self.vector_store.get()['metadatas'][0] if self.vector_store.get()['metadatas'] else {}
         return list(sample.keys())
 
+    def search_test(
+        self, 
+        query: str = "", 
+        filter_dict: Optional[dict] = None,
+        top_k: int = 3
+    ):
+        """
+        Search tests with optional metadata filtering.
+        
+        Args:
+            query: Search query text (empty for pure metadata filtering)
+            filter_dict: Optional metadata filters (e.g. {"test_code": "AN5"})
+            top_k: Number of results to return
+            
+        Returns:
+            List of (Document, score) tuples
+        """
+        if self.vector_store is None:
+            self.load_vector_store()
+        
+        if filter_dict:
+            # Get all tests and filter locally
+            all_tests = self.vector_store.get()
+            
+            # Find matching tests
+            matches = []
+            for i, metadata in enumerate(all_tests['metadatas']):
+                if all(
+                    str(metadata.get(k, "")).upper() == str(v).upper()
+                    for k, v in filter_dict.items()
+                ):
+                    doc = Document(
+                        page_content=all_tests['documents'][i],
+                        metadata=metadata
+                    )
+                    matches.append((doc, 1.0))
+            
+            return matches[:top_k]
+            
+        return self.vector_store.similarity_search_with_score(query, k=top_k)
+    
+    def check_test_codes(self):
+        """Check available test codes in vector store."""
+        if self.vector_store is None:
+            self.load_vector_store()
+        
+        all_tests = self.vector_store.get()
+        test_codes = [m['test_code'] for m in all_tests['metadatas'] if 'test_code' in m]
+        return sorted(set(test_codes))
+
 
 if __name__ == "__main__":
-    processor = DataProcessor(file_path='data/processed/data.xlsx')
+    processor = DataProcessor(file_path='data/processed/data_with_abbreviations.xlsx')
     processor.create_vector_store(persist_path="data/chroma_db", reset=True)
     print("[INFO] Vector store successfully created and saved.")

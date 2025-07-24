@@ -1,9 +1,18 @@
+from typing import Optional
 import aiosqlite
 from datetime import datetime, timedelta
+
+from src.data_vectorization import DataProcessor
 
 class Database:
     def __init__(self, db_path: str):
         self.db_path = db_path
+        self.test_processor = DataProcessor()
+        
+    async def initialize(self):
+        """Initialize database and vector store"""
+        await self.create_tables()
+        self.test_processor.load_vector_store()
     
     async def create_tables(self):
         async with aiosqlite.connect(self.db_path) as db:
@@ -361,3 +370,37 @@ class Database:
                 return f"{days} дней, {hours} часов, {minutes} минут"
             
             return "Нет данных"
+        
+    async def get_test_by_code(self, code: str) -> Optional[dict]:
+        """
+        Find test by exact code match using ChromaDB.
+        
+        Args:
+            code: Test code to search for (case insensitive)
+            
+        Returns:
+            Dictionary with test data or None if not found
+        """
+        try:
+            # Search in ChromaDB with test code filter
+            results = self.test_processor.search_test(
+                query="",
+                filter={"test_code": code.upper()},
+                top_k=1
+            )
+            
+            if not results:
+                return None
+                
+            doc = results[0][0]
+            return {
+                'test_code': doc.metadata['test_code'],
+                'test_name': doc.metadata['test_name'],
+                'container_type': doc.metadata['container_type'],
+                'preanalytics': doc.metadata['preanalytics'],
+                'storage_temp': doc.metadata['storage_temp'],
+                'department': doc.metadata['department']
+            }
+        except Exception as e:
+            print(f"[ERROR] Failed to search test by code: {e}")
+            return None

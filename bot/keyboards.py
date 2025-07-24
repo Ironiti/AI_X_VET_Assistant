@@ -198,6 +198,17 @@ def get_system_management_kb():
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
+def get_search_type_kb():
+    """Клавиатура выбора типа поиска"""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🔢 Поиск по коду теста")],
+            [KeyboardButton(text="📝 Поиск по названию")],
+            [KeyboardButton(text="🔙 Вернуться в главное меню")]
+        ],
+        resize_keyboard=True
+    )
+
 # Для совместимости
 get_client_menu_kb = get_main_menu_kb
 get_staff_menu_kb = get_main_menu_kb
