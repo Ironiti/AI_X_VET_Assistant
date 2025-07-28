@@ -27,6 +27,7 @@ var/
 .cache
 *.log
 # *.db
+data/vet_clinic.db
 *.rdb
 
 # IDE
