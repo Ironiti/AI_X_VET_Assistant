@@ -42,37 +42,317 @@ TEST_ABBREVIATIONS = {
     "ГЕМАТКА": "общий анализ крови клинический анализ крови оак гемка гематология",
 }
 
+def generate_test_code_variants(text: str) -> list[str]:
+    """Генерирует различные варианты написания кода теста."""
+    text = text.upper()
+    variants = [text]  # Оригинал
 
-def normalize_test_code(text: str) -> str:
-    """Normalize test code by converting similar cyrillic chars to latin and uppercase."""
-    # Маппинг похожих кириллических букв на латинские
     cyrillic_to_latin = {
-        'А': 'A', 'а': 'A',
-        'В': 'B', 'в': 'B', 
-        'С': 'C', 'с': 'C',
-        'Е': 'E', 'е': 'E',
-        'Н': 'N', 'н': 'N',  
-        'К': 'K', 'к': 'K',
-        'М': 'M', 'м': 'M',
-        'О': 'O', 'о': 'O',
-        'Р': 'P', 'р': 'P',
-        'Т': 'T', 'т': 'T',
-        'Х': 'X', 'х': 'X',
-        'У': 'Y', 'у': 'Y'
+        'А': 'A',
+        'Б': 'B',
+        'В': ['V', 'W', 'B'],
+        'Г': 'G',
+        'Д': 'D',
+        'Е': ['E', 'I'],
+        'Ё': ['E', 'I'],
+        'Ж': ['J', 'ZH'],
+        'З': ['Z', 'S', 'C'],  
+        'И': ['I', 'E', 'Y'],
+        'Й': ['Y', 'I'],
+        'К': ['K', 'C', 'Q'],
+        'Л': 'L',
+        'М': 'M',
+        'Н': ['N', 'H'],
+        'О': 'O',
+        'П': 'P',
+        'Р': ['R', 'P'],
+        'С': ['S', 'C'],
+        'Т': 'T',
+        'У': ['U', 'Y', 'W'],
+        'Ф': 'F',
+        'Х': ['H', 'X'],
+        'Ц': ['C', 'TS'],
+        'Ч': 'CH',
+        'Ш': 'SH',
+        'Щ': 'SCH',
+        'Ы': ['Y', 'I'],
+        'Э': ['E', 'A'],
+        'Ю': ['U', 'YU'],
+        'Я': ['YA', 'A']
     }
     
-    # Заменяем кириллические символы на латинские
-    result = ''
-    for char in text:
-        if char in cyrillic_to_latin:
-            result += cyrillic_to_latin[char]
+    # Латиница -> кириллица (для обратного преобразования)
+    latin_to_cyrillic = {
+        'A': ['А', 'Я'],
+        'B': ['Б', 'В'],
+        'C': ['С', 'К', 'Ц'],
+        'D': 'Д',
+        'E': ['Е', 'И', 'Э'],
+        'F': 'Ф',
+        'G': 'Г',
+        'H': ['Х', 'Н'],
+        'I': ['И', 'Й'],
+        'J': 'Ж',
+        'K': 'К',
+        'L': 'Л',
+        'M': 'М',
+        'N': 'Н',
+        'O': 'О',
+        'P': ['П', 'Р'],
+        'Q': 'К',
+        'R': 'Р',
+        'S': ['С', 'З'],
+        'T': 'Т',
+        'U': ['У', 'Ю'],
+        'V': 'В',
+        'W': ['В', 'У'],
+        'X': 'Х',
+        'Y': ['У', 'Й', 'Ы'],
+        'Z': 'З'
+    }
+    
+    def convert_string(s, mapping, max_variants=5):
+        """Конвертирует строку используя маппинг, генерируя варианты"""
+        if not s:
+            return ['']
+        
+        result_variants = []
+        
+        # Обрабатываем первый символ
+        char = s[0]
+        rest = s[1:]
+        
+        if char.isdigit() or char in ['-', '_']:
+            # Цифры и спецсимволы оставляем как есть
+            rest_variants = convert_string(rest, mapping, max_variants)
+            for rv in rest_variants:
+                result_variants.append(char + rv)
+        elif char in mapping:
+            replacements = mapping[char]
+            if not isinstance(replacements, list):
+                replacements = [replacements]
+            
+            rest_variants = convert_string(rest, mapping, max_variants)
+            for replacement in replacements:
+                for rv in rest_variants[:max_variants]:  # Ограничиваем комбинаторный взрыв
+                    variant = replacement + rv
+                    if variant not in result_variants:
+                        result_variants.append(variant)
+                        if len(result_variants) >= max_variants:
+                            return result_variants
         else:
-            result += char.upper()
+            # Неизвестный символ - оставляем как есть
+            rest_variants = convert_string(rest, mapping, max_variants)
+            for rv in rest_variants:
+                result_variants.append(char + rv)
+        
+        return result_variants[:max_variants]
     
-    # Добавим логирование для отладки
-    print(f"[DEBUG] normalize_test_code: '{text}' -> '{result}'")
+    # Генерируем основные варианты
+    # 1. Полная конвертация в латиницу (приоритет)
+    if any(char in cyrillic_to_latin for char in text):
+        latin_variants = convert_string(text, cyrillic_to_latin, max_variants=3)
+        for lv in latin_variants:
+            if lv not in variants:
+                variants.append(lv)
     
-    return result
+    # 2. Для смешанных кодов - частичная конвертация
+    match = re.match(r'^([A-ZА-Я]+)(\d+)([A-ZА-Я\-]+)?$', text)
+    if match:
+        prefix, numbers, suffix = match.groups()
+        suffix = suffix or ''
+        
+        # Конвертируем префикс в латиницу
+        if any(char in cyrillic_to_latin for char in prefix):
+            prefix_variants = convert_string(prefix, cyrillic_to_latin, max_variants=2)
+        else:
+            prefix_variants = [prefix]
+        
+        # Обрабатываем суффикс
+        if suffix:
+            # Для суффиксов пробуем оба направления конвертации
+            suffix_variants = []
+            
+            # Если суффикс кириллический - конвертируем в латиницу
+            if any(char in cyrillic_to_latin for char in suffix):
+                suffix_variants.extend(convert_string(suffix, cyrillic_to_latin, max_variants=3))
+            
+            # Если суффикс латинский - пробуем конвертировать в кириллицу
+            if any(char in latin_to_cyrillic for char in suffix):
+                suffix_variants.extend(convert_string(suffix, latin_to_cyrillic, max_variants=2))
+            
+            # Добавляем оригинальный суффикс
+            if suffix not in suffix_variants:
+                suffix_variants.append(suffix)
+            
+            # Комбинируем варианты
+            for pv in prefix_variants[:2]:
+                for sv in suffix_variants[:3]:
+                    variant = pv + numbers + sv
+                    if variant not in variants and len(variants) < 20:
+                        variants.append(variant)
+        else:
+            # Только префикс и числа
+            for pv in prefix_variants[:3]:
+                variant = pv + numbers
+                if variant not in variants:
+                    variants.append(variant)
+    
+    # 3. Специальная обработка для известных паттернов
+    special_suffixes = ['ОБС', 'ГИЭ', 'ГИИ', 'БТК', 'БАЛ', 'КЛЩ', 'ВПТ', 'ГЛЗ', 'ГСК', 'КМ', 'КР', 'ЛИК', 'НОС', 'ПРК', 'РОТ', 'СИН', 'ФК', 'АСП']
+    
+    for suffix in special_suffixes:
+        if text.endswith(suffix):
+            # Получаем префикс без суффикса
+            prefix_part = text[:-len(suffix)]
+            if any(char in cyrillic_to_latin for char in prefix_part):
+                prefix_converted = convert_string(prefix_part, cyrillic_to_latin, max_variants=1)[0]
+                variant = prefix_converted + suffix
+                if variant not in variants:
+                    variants.append(variant)
+    
+    # Убираем дубликаты, сохраняя порядок
+    seen = set()
+    unique_variants = []
+    for v in variants:
+        if v not in seen:
+            seen.add(v)
+            unique_variants.append(v)
+    
+    print(f"[DEBUG] Variants for '{text}': {unique_variants[:10]}")
+    return unique_variants[:20]
+
+def calculate_phonetic_score(query: str, test_code: str) -> float:
+    """Вычисляет фонетическое сходство между строками."""
+    
+    # Сначала проверяем совпадение цифр
+    query_digits = ''.join(c for c in query if c.isdigit())
+    code_digits = ''.join(c for c in test_code if c.isdigit())
+    
+    # Если цифры не совпадают, снижаем оценку
+    digit_penalty = 0
+    if query_digits != code_digits:
+        # Считаем количество несовпадающих цифр
+        diff_count = sum(1 for i in range(min(len(query_digits), len(code_digits))) 
+                        if query_digits[i] != code_digits[i])
+        diff_count += abs(len(query_digits) - len(code_digits))
+        digit_penalty = diff_count * 20  # -20 баллов за каждую неправильную цифру
+    
+    # Фонетический маппинг
+    phonetic_map = {
+        # Латиница
+        'A': 'A', 'B': 'B', 'C': 'K', 'D': 'D', 'E': 'I', 'F': 'F',
+        'G': 'G', 'H': 'H', 'I': 'I', 'J': 'J', 'K': 'K', 'L': 'L',
+        'M': 'M', 'N': 'N', 'O': 'O', 'P': 'P', 'Q': 'K', 'R': 'R',
+        'S': 'S', 'T': 'T', 'U': 'U', 'V': 'V', 'W': 'V', 'X': 'H',
+        'Y': 'U', 'Z': 'Z',
+        # Кириллица
+        'А': 'A', 'Б': 'B', 'В': 'V', 'Г': 'G', 'Д': 'D', 'Е': 'I',
+        'Ё': 'I', 'Ж': 'J', 'З': 'Z', 'И': 'I', 'Й': 'I', 'К': 'K',
+        'Л': 'L', 'М': 'M', 'Н': 'N', 'О': 'O', 'П': 'P', 'Р': 'R',
+        'С': 'S', 'Т': 'T', 'У': 'U', 'Ф': 'F', 'Х': 'H', 'Ц': 'S',
+        'Ч': 'CH', 'Ш': 'SH', 'Щ': 'SCH', 'Ы': 'I', 'Э': 'I', 'Ю': 'U',
+        'Я': 'A'
+    }
+    
+    def to_phonetic(s):
+        result = ''
+        s = s.upper()
+        i = 0
+        while i < len(s):
+            if i < len(s) - 1:
+                two_char = s[i:i+2]
+                if two_char in ['PH', 'TH', 'CH', 'SH']:
+                    if two_char == 'PH':
+                        result += 'F'
+                    elif two_char == 'TH':
+                        result += 'T'
+                    else:
+                        result += two_char
+                    i += 2
+                    continue
+            
+            char = s[i]
+            if char in phonetic_map:
+                result += phonetic_map[char]
+            elif char.isdigit():
+                result += char
+            i += 1
+        
+        return result
+    
+    query_phonetic = to_phonetic(query)
+    code_phonetic = to_phonetic(test_code)
+    
+    # Точное совпадение
+    if query_phonetic == code_phonetic:
+        return max(0, 100.0 - digit_penalty)
+    
+    # Проверка префикса
+    min_len = min(len(query_phonetic), len(code_phonetic))
+    if min_len >= 4:
+        if query_phonetic[:4] == code_phonetic[:4]:
+            return max(0, 85.0 - digit_penalty)
+    
+    # Расчет схожести по символам
+    matches = 0
+    for i in range(min(len(query_phonetic), len(code_phonetic))):
+        if query_phonetic[i] == code_phonetic[i]:
+            matches += 1
+    
+    max_len = max(len(query_phonetic), len(code_phonetic))
+    if max_len == 0:
+        return 0.0
+    
+    base_score = (matches / max_len) * 100
+    return max(0, base_score - digit_penalty)
+
+# Остальной код остается без изменений
+
+async def smart_test_search(processor, original_query: str) -> Optional[tuple]:
+    """Умный поиск с учетом различных вариантов написания."""
+    
+    # Генерируем варианты
+    variants = generate_test_code_variants(original_query)
+    
+    # 1. Точный поиск по всем вариантам
+    for variant in variants:
+        results = processor.search_test(filter_dict={"test_code": variant})
+        if results:
+            print(f"[DEBUG] Found exact match with variant: {variant}")
+            return results[0], variant, "exact"
+    
+    # 2. Текстовый поиск с фильтрацией
+    text_results = processor.search_test(query=original_query.upper(), top_k=50)
+    
+    best_match = None
+    best_score = 0
+    best_variant = None
+    
+    for doc, base_score in text_results:
+        test_code = doc.metadata.get('test_code', '')
+        
+        # Проверяем все варианты
+        for variant in variants:
+            if test_code == variant:
+                return (doc, base_score), variant, "text_exact"
+            
+            # Проверяем префикс
+            if test_code.startswith(variant[:3]):
+                phonetic_score = calculate_phonetic_score(variant, test_code)
+                combined_score = base_score * 0.3 + phonetic_score * 0.7
+                
+                if combined_score > best_score:
+                    best_score = combined_score
+                    best_match = (doc, base_score)
+                    best_variant = test_code
+    
+    # 3. Возвращаем лучшее совпадение, если оно достаточно хорошее
+    if best_match and best_score > 50:
+        print(f"[DEBUG] Found phonetic match: {best_variant} (score: {best_score:.1f})")
+        return best_match, best_variant, "phonetic"
+    
+    return None, None, None
 
 async def safe_delete_message(message):
     """Безопасное удаление сообщения"""
@@ -279,10 +559,9 @@ async def handle_search_type(message: Message, state: FSMContext):
 
 @questions_router.message(QuestionStates.waiting_for_code)
 async def handle_code_search(message: Message, state: FSMContext):
-    """Handle test code search."""
+    """Handle test code search with smart matching."""
     user_id = message.from_user.id
-    # Используем новую функцию нормализации вместо простого upper()
-    text = normalize_test_code(message.text.strip())
+    original_input = message.text.strip()
 
     try:
         if LOADING_GIF_ID:
@@ -296,50 +575,59 @@ async def handle_code_search(message: Message, state: FSMContext):
         
         processor = DataProcessor()
         processor.load_vector_store()
-        results = processor.search_test(filter_dict={"test_code": text})
-            
-            # ... остальной код остается без изменений
         
-        if not results:
+        # Используем умный поиск
+        result, found_variant, match_type = await smart_test_search(processor, original_input)
+        
+        if not result:
             raise ValueError("Test not found")
             
-        doc = results[0][0]
-        test_data = {
-            'test_code': doc.metadata['test_code'],
-            'test_name': doc.metadata['test_name'],
-            'container_type': doc.metadata['container_type'],
-            'preanalytics': doc.metadata['preanalytics'],
-            'storage_temp': doc.metadata['storage_temp'],
-            'department': doc.metadata['department']
-        }
+        doc = result[0]
+        test_data = format_test_data(doc.metadata)
+        
+        # Формируем ответ
+        response = ""
+        if match_type == "phonetic" and found_variant != original_input.upper():
+            response = f"<i>По запросу '{original_input.upper()}' найден похожий тест:</i>\n\n"
+        
+        response += format_test_info(test_data)
+        
+        # Логирование
+        await db.add_request_stat(
+            user_id=user_id,
+            request_type='question',
+            request_text=f"Поиск по коду: {original_input} → {test_data['test_code']} ({match_type})"
+        )
         
         if animation_task:
             animation_task.cancel()
-        await loading_msg.delete()
-        if gif_msg:
-            await gif_msg.delete()
+        await safe_delete_message(loading_msg)
+        await safe_delete_message(gif_msg)
         
-        await message.answer(format_test_info(test_data), reply_markup=get_dialog_kb(), parse_mode="HTML")
+        await message.answer(response, reply_markup=get_dialog_kb(), parse_mode="HTML")
         await state.set_state(QuestionStates.in_dialog)
         await state.update_data(current_test=test_data)
         
     except ValueError:
         if 'animation_task' in locals() and animation_task:
             animation_task.cancel()
-        if 'loading_msg' in locals():
-            await loading_msg.delete()
-        if 'gif_msg' in locals() and gif_msg:
-            await gif_msg.delete()
-        await message.answer("❌ Тест с таким кодом не найден", reply_markup=get_search_type_kb())
+        await safe_delete_message(loading_msg) 
+        await safe_delete_message(gif_msg)
+        
+        # Дополнительная подсказка
+        error_msg = f"❌ Тест с кодом '{original_input.upper()}' не найден.\n"
+        error_msg += "Проверьте правильность ввода кода."
+        
+        await message.answer(error_msg, reply_markup=get_search_type_kb())
         await state.set_state(QuestionStates.waiting_for_search_type)
+        
     except Exception as e:
         print(f"[ERROR] Code search failed: {e}")
         if 'animation_task' in locals() and animation_task:
             animation_task.cancel()
-        if 'loading_msg' in locals():
-            await loading_msg.delete()
-        if 'gif_msg' in locals() and gif_msg:
-            await gif_msg.delete()
+        await safe_delete_message(loading_msg)
+        await safe_delete_message(gif_msg)
+        
         await message.answer("⚠️ Ошибка при поиске. Попробуйте позже", reply_markup=get_search_type_kb())
         await state.set_state(QuestionStates.waiting_for_search_type)
 
@@ -440,6 +728,7 @@ async def handle_dialog(message: Message, state: FSMContext):
     """Handle follow-up questions using LLM."""
     text = message.text.strip()
     user_id = message.from_user.id
+    
     if text == "❌ Завершить диалог":
         await state.clear()
         user = await db.get_user(user_id)
@@ -448,20 +737,25 @@ async def handle_dialog(message: Message, state: FSMContext):
         farewell = get_time_based_farewell(user_name)
         await message.answer(farewell, reply_markup=get_menu_by_role(role))
         return
+        
     if text == "🔄 Новый вопрос":
         await message.answer("Выберите тип поиска:", reply_markup=get_search_type_kb())
         await state.set_state(QuestionStates.waiting_for_search_type)
         return
+    
     # обработка возврата в меню удалена, теперь этим занимается глобальный хендлер
     data = await state.get_data()
     test_data = data['current_test'] if 'current_test' in data else None
+    
     if not test_data:
         await message.answer("Контекст потерян. Задайте новый вопрос.", reply_markup=get_search_type_kb())
         await state.set_state(QuestionStates.waiting_for_search_type)
         return
+        
     gif_msg = await message.answer_animation(LOADING_GIF_ID, caption="")
     loading_msg = await message.answer("Обрабатываю ваш запрос...\n⏳ Анализирую данные...")
     animation_task = asyncio.create_task(animate_loading(loading_msg))
+    
     try:
         system_msg = SystemMessage(content=f"""
             You're assisting with questions about lab test:
@@ -474,11 +768,20 @@ async def handle_dialog(message: Message, state: FSMContext):
         """)
         response = await llm.agenerate([[system_msg, HumanMessage(content=text)]])
         answer = response.generations[0][0].text.strip()
+        
+        await db.add_request_stat(
+            user_id=user_id,
+            request_type='question',
+            request_text=text
+        )
+        
         await loading_msg.edit_text(answer)
         await message.answer("Выберите действие:", reply_markup=get_dialog_kb())
+        
     except Exception:
         await loading_msg.edit_text("Ошибка обработки вопроса.")
         await message.answer("Произошла ошибка. Попробуйте снова или начните новый вопрос.", reply_markup=get_dialog_kb())
     finally:
         animation_task.cancel()
         await gif_msg.delete()
+        
