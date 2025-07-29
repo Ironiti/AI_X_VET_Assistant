@@ -660,6 +660,12 @@ async def handle_name_search(message: Message, state: FSMContext):
             
         selected_docs = await select_best_match(text, rag_hits)
         
+        await db.add_request_stat(
+            user_id=user_id,
+            request_type='question',
+            request_text=f"Поиск по названию: {text}"
+        )
+        
         # Безопасная очистка
         if animation_task:
             animation_task.cancel()
