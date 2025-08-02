@@ -9,6 +9,208 @@ class Database:
         self.db_path = db_path
         self.test_processor = DataProcessor()
         
+    async def add_search_history(self, user_id: int, search_query: str, 
+                           found_test_code: str = None, search_type: str = 'text', 
+                           success: bool = True):
+        """Добавляет запись в историю поиска"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                INSERT INTO search_history (user_id, search_query, found_test_code, 
+                                        search_type, success, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (user_id, search_query, found_test_code, search_type, success, datetime.now()))
+            await db.commit()
+
+    async def update_user_frequent_test(self, user_id: int, test_code: str, test_name: str):
+        """Обновляет частоту использования теста пользователем"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                INSERT INTO user_frequent_tests (user_id, test_code, test_name, frequency, last_accessed)
+                VALUES (?, ?, ?, 1, ?)
+                ON CONFLICT(user_id, test_code) DO UPDATE SET
+                    frequency = frequency + 1,
+                    test_name = excluded.test_name,
+                    last_accessed = excluded.last_accessed
+            ''', (user_id, test_code, test_name, datetime.now()))
+            await db.commit()
+
+    async def get_user_frequent_tests(self, user_id: int, limit: int = 10) -> list:
+        """Получает частые тесты пользователя"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute('''
+                SELECT test_code, test_name, frequency, last_accessed
+                FROM user_frequent_tests
+                WHERE user_id = ?
+                ORDER BY frequency DESC, last_accessed DESC
+                LIMIT ?
+            ''', (user_id, limit))
+            
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def get_recent_searches(self, user_id: int, limit: int = 10) -> list:
+        """Получает последние поиски пользователя"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute('''
+                SELECT search_query, found_test_code, search_type, success, created_at
+                FROM search_history
+                WHERE user_id = ? AND success = TRUE
+                ORDER BY created_at DESC
+                LIMIT ?
+            ''', (user_id, limit))
+            
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def update_related_tests(self, user_id: int, test_code_1: str, test_code_2: str):
+        """Обновляет корреляцию между тестами для пользователя"""
+        # Всегда сохраняем в алфавитном порядке для консистентности
+        if test_code_1 > test_code_2:
+            test_code_1, test_code_2 = test_code_2, test_code_1
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                INSERT INTO related_tests (user_id, test_code_1, test_code_2, 
+                                        correlation_count, last_correlation)
+                VALUES (?, ?, ?, 1, ?)
+                ON CONFLICT(user_id, test_code_1, test_code_2) DO UPDATE SET
+                    correlation_count = correlation_count + 1,
+                    last_correlation = excluded.last_correlation
+            ''', (user_id, test_code_1, test_code_2, datetime.now()))
+            await db.commit()
+
+    async def get_user_related_tests(self, user_id: int, test_code: str, limit: int = 5) -> list:
+        """Получает тесты, которые пользователь часто ищет вместе с данным"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute('''
+                SELECT 
+                    CASE 
+                        WHEN test_code_1 = ? THEN test_code_2 
+                        ELSE test_code_1 
+                    END as related_code,
+                    correlation_count
+                FROM related_tests
+                WHERE user_id = ? AND (test_code_1 = ? OR test_code_2 = ?)
+                ORDER BY correlation_count DESC, last_correlation DESC
+                LIMIT ?
+            ''', (test_code, user_id, test_code, test_code, limit))
+            
+            rows = await cursor.fetchall()
+            related_codes = [dict(row) for row in rows]
+            
+            # Получаем полную информацию о связанных тестах
+            result = []
+            for item in related_codes:
+                test_info = await self.get_test_by_code(item['related_code'])
+                if test_info:
+                    test_info['correlation_count'] = item['correlation_count']
+                    result.append(test_info)
+            
+            return result
+
+    async def get_search_suggestions(self, user_id: int, query: str = "") -> list:
+        """Получает персонализированные подсказки для поиска"""
+        suggestions = []
+        
+        # 1. Частые тесты пользователя
+        frequent_tests = await self.get_user_frequent_tests(user_id, limit=20)
+        
+        # 2. Недавние успешные поиски
+        recent_searches = await self.get_recent_searches(user_id, limit=10)
+        
+        # Фильтруем по запросу если он есть
+        if query:
+            query_upper = query.upper()
+            query_lower = query.lower()
+            
+            # Фильтруем частые тесты
+            for test in frequent_tests:
+                if (query_upper in test['test_code'] or 
+                    query_lower in test['test_name'].lower()):
+                    suggestions.append({
+                        'type': 'frequent',
+                        'code': test['test_code'],
+                        'name': test['test_name'],
+                        'frequency': test['frequency']
+                    })
+            
+            # Фильтруем недавние поиски
+            seen_codes = {s['code'] for s in suggestions}
+            for search in recent_searches:
+                if search['found_test_code'] and search['found_test_code'] not in seen_codes:
+                    if query_lower in search['search_query'].lower():
+                        # Получаем информацию о тесте
+                        test_info = await self.get_test_by_code(search['found_test_code'])
+                        if test_info:
+                            suggestions.append({
+                                'type': 'recent',
+                                'code': test_info['test_code'],
+                                'name': test_info['test_name'],
+                                'original_query': search['search_query']
+                            })
+        else:
+            # Без запроса показываем топ частых
+            for test in frequent_tests[:5]:
+                suggestions.append({
+                    'type': 'frequent',
+                    'code': test['test_code'],
+                    'name': test['test_name'],
+                    'frequency': test['frequency']
+                })
+        
+        return suggestions[:10]  # Максимум 10 подсказок
+
+    async def get_user_search_stats(self, user_id: int) -> dict:
+        """Получает статистику поисков пользователя"""
+        async with aiosqlite.connect(self.db_path) as db:
+            # Общее количество поисков
+            cursor = await db.execute('''
+                SELECT COUNT(*) as total,
+                    SUM(CASE WHEN success = TRUE THEN 1 ELSE 0 END) as successful,
+                    COUNT(DISTINCT found_test_code) as unique_tests
+                FROM search_history
+                WHERE user_id = ?
+            ''', (user_id,))
+            
+            stats = await cursor.fetchone()
+            
+            # Самый частый тест
+            cursor = await db.execute('''
+                SELECT test_code, test_name, frequency
+                FROM user_frequent_tests
+                WHERE user_id = ?
+                ORDER BY frequency DESC
+                LIMIT 1
+            ''', (user_id,))
+            
+            most_frequent = await cursor.fetchone()
+            
+            return {
+                'total_searches': stats[0] or 0,
+                'successful_searches': stats[1] or 0,
+                'unique_tests': stats[2] or 0,
+                'success_rate': (stats[1] / stats[0] * 100) if stats[0] else 0,
+                'most_frequent_test': dict(most_frequent) if most_frequent else None
+            }
+
+    async def cleanup_old_search_history(self, days: int = 90):
+        """Удаляет старую историю поисков"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cutoff_date = datetime.now() - timedelta(days=days)
+            
+            cursor = await db.execute('''
+                DELETE FROM search_history
+                WHERE created_at < ?
+            ''', (cutoff_date,))
+            
+            deleted = cursor.rowcount
+            await db.commit()
+            
+            return deleted
+        
     async def initialize(self):
         """Initialize database and vector store"""
         await self.create_tables()
@@ -16,6 +218,46 @@ class Database:
     
     async def create_tables(self):
         async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS search_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    search_query TEXT,
+                    found_test_code TEXT,
+                    search_type TEXT CHECK(search_type IN ('code', 'text', 'voice')),
+                    success BOOLEAN DEFAULT TRUE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(telegram_id)
+                )
+            ''')
+            
+            # Таблица частых тестов пользователя
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS user_frequent_tests (
+                    user_id INTEGER,
+                    test_code TEXT,
+                    test_name TEXT,
+                    frequency INTEGER DEFAULT 1,
+                    last_accessed TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (user_id, test_code),
+                    FOREIGN KEY (user_id) REFERENCES users(telegram_id)
+                )
+            ''')
+            
+            # Таблица для связанных тестов (часто ищутся вместе)
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS related_tests (
+                    user_id INTEGER,
+                    test_code_1 TEXT,
+                    test_code_2 TEXT,
+                    correlation_count INTEGER DEFAULT 1,
+                    last_correlation TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (user_id, test_code_1, test_code_2),
+                    FOREIGN KEY (user_id) REFERENCES users(telegram_id)
+                )
+            ''')
+            
+            await db.commit()
             # Обновленная таблица пользователей
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS users (
