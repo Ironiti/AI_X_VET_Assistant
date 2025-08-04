@@ -580,9 +580,11 @@ def get_user_first_name(user):
 def format_test_data(metadata: Dict) -> Dict:
     """Extract and format test metadata into standardized dictionary."""
     return {
+        'type': metadata['type'],
         'test_code': metadata['test_code'],
         'test_name': metadata['test_name'],
         'container_type': metadata['container_type'],
+        'container_number': metadata['container_number'],
         'preanalytics': metadata['preanalytics'],
         'storage_temp': metadata['storage_temp'],
         'department': metadata['department']
@@ -590,12 +592,14 @@ def format_test_data(metadata: Dict) -> Dict:
 
 def format_test_info(test_data: Dict) -> str:
     """Format test information from metadata using HTML tags."""
+    t_type = 'Тест' if test_data['type'] == 'Тесты' else 'Профиль'
     return (
-        f"<b>Тест: {test_data['test_code']} - {test_data['test_name']}</b>\n\n"
-        f"<b>Тип контейнера:</b> {test_data['container_type']}\n"
-        f"<b>Преаналитика:</b> {test_data['preanalytics']}\n"
-        f"<b>Температура:</b> {test_data['storage_temp']}\n"
-        f"<b>Вид исследования:</b> {test_data['department']}\n\n"
+        f"<b>{t_type}: {test_data['test_code']} - {test_data['test_name']}</b>\n\n"
+        f"📋 <b>Преаналитика:</b> {test_data['preanalytics']}\n"
+        f"🧪 <b>Тип контейнера:</b> {test_data['container_type']}\n"
+        f"🔢 <b>Номер контейнера:</b> {test_data['container_number']}\n"
+        f"❄️ <b>Температура:</b> {test_data['storage_temp']}\n"
+        f"🧬 <b>Вид исследования:</b> {test_data['department']}\n\n"
     )
     
 async def handle_general_question(message: Message, state: FSMContext, question_text: str):
@@ -775,7 +779,17 @@ async def select_best_match(query: str, docs: list[tuple[Document, float]]) -> l
         if not selected_indices:
             return [docs[0][0]]
             
-        return [docs[i][0] for i in selected_indices]
+        # Получаем выбранные документы с сохранением порядка LLM
+        selected_docs_with_order = [(docs[i][0], idx) for idx, i in enumerate(selected_indices)]
+        
+        # Сортируем: сначала "Тесты", потом "Профили", внутри каждой группы сохраняем порядок LLM
+        sorted_docs = sorted(selected_docs_with_order, key=lambda x: (
+            0 if x[0].metadata.get('type') == 'Тесты' else 1,  # Тесты первыми
+            x[1]  # Сохраняем порядок LLM внутри каждой группы
+        ))
+        
+        return [doc for doc, _ in sorted_docs]
+        
     except Exception:
         return [docs[0][0]]  # Fallback on error
 
@@ -1416,21 +1430,38 @@ async def handle_name_search(message: Message, state: FSMContext):
         await safe_delete_message(gif_msg)
         
         if len(selected_docs) > 1:
-            # Show multiple results
-            response = "Найдено несколько подходящих тестов:\n\n"
+            # Show multiple results with full info, splitting into multiple messages if needed
             
-            # Показываем все найденные тесты
+            # Подготавливаем полные данные для всех тестов
+            full_test_responses = []
             for i, doc in enumerate(selected_docs):
                 test_data = format_test_data(doc.metadata)
-                response += f"<b>{i+1}. {test_data['test_code']} - {test_data['test_name']}</b>\n"
-                response += f"📦 {test_data['container_type']}\n"
-                response += f"🏥 {test_data['department']}\n\n"
+                full_response = f"<b>{i+1}.</b> {format_test_info(test_data)}\n\n"
+                full_test_responses.append(full_response)
             
-            # Разбиваем длинное сообщение на части
-            message_parts = split_long_message(response)
+            # Группируем ответы в сообщения, не превышающие 4000 символов
+            messages_to_send = []
+            current_message = "Найдено несколько подходящих тестов:\n\n"
             
-            for part in message_parts:
-                await message.answer(part, parse_mode="HTML")
+            for test_response in full_test_responses:
+                # Проверяем, поместится ли текущий тест в текущее сообщение
+                if len(current_message + test_response) <= 4000:
+                    current_message += test_response
+                else:
+                    # Если текущее сообщение не пустое, добавляем его в список
+                    if current_message.strip() != "Найдено несколько подходящих тестов:":
+                        messages_to_send.append(current_message)
+                    
+                    # Начинаем новое сообщение с текущим тестом
+                    current_message = test_response
+            
+            # Добавляем последнее сообщение, если оно не пустое
+            if current_message.strip():
+                messages_to_send.append(current_message)
+            
+            # Отправляем все сообщения
+            for message_text in messages_to_send:
+                await message.answer(message_text, parse_mode="HTML")
             
             # Создаем клавиатуру для выбора
             keyboard = InlineKeyboardMarkup(inline_keyboard=[])
@@ -1456,6 +1487,7 @@ async def handle_name_search(message: Message, state: FSMContext):
                 "Выберите интересующий тест:",
                 reply_markup=keyboard
             )
+
         else:
             # Single result
             test_data = format_test_data(selected_docs[0].metadata)
