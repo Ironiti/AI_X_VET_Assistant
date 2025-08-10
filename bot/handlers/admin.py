@@ -292,7 +292,7 @@ async def process_broadcast_message(message: Message, state: FSMContext):
         try:
             await bot.send_message(
                 recipient_id,
-                f"📢 <b>Сообщение от администрации VET UNION</b>\n\n{message.text}",
+                f"📢 <b>Сообщение от группы техподдержки</b>\n\n{message.text}",
                 parse_mode="HTML"
             )
             success_count += 1

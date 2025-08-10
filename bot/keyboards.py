@@ -31,9 +31,9 @@ def get_user_type_kb():
 def get_specialization_kb():
     """Клавиатура выбора специализации для ветеринарных врачей"""
     kb = [
-        [KeyboardButton(text="🏥 Общая практика"), KeyboardButton(text="🔪 Хирургия"), KeyboardButton(text="💊 Терапия")],
-        [KeyboardButton(text="🦴 Ортопедия"), KeyboardButton(text="🎗️ Онкология"), KeyboardButton(text="👨‍⚕️ Дерматология")], 
-        [KeyboardButton(text="🦷 Стоматология"), KeyboardButton(text="👁️ Офтальмология")],
+        [KeyboardButton(text="Нефрология"), KeyboardButton(text="Хирургия"), KeyboardButton(text="Терапия")],
+        [KeyboardButton(text="Ортопедия"), KeyboardButton(text="Онкология"), KeyboardButton(text="Дерматология")], 
+        [KeyboardButton(text="Стоматология"), KeyboardButton(text="Офтальмология")],
         [KeyboardButton(text="✏️ Ввести свою специализацию")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)

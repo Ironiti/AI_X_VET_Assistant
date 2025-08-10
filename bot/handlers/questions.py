@@ -84,13 +84,14 @@ def is_test_code_pattern(text: str) -> bool:
 
 def normalize_test_code(text: str) -> str:
     """Нормализует введенный код теста."""
-    # Убираем пробелы
     text = text.strip().upper().replace(' ', '')
+    
+    # Заменяем кириллицу на латиницу в префиксе AN/АН
+    text = text.replace('АН', 'AN').replace('АN', 'AN').replace('AН', 'AN')
     
     # Если только цифры - добавляем AN
     if text.isdigit():
         text = f"AN{text}"
-    
     # Если начинается с цифр - добавляем AN в начало
     elif re.match(r'^\d', text):
         text = f"AN{text}"
@@ -98,47 +99,58 @@ def normalize_test_code(text: str) -> str:
     return text
 
 def calculate_fuzzy_score(query: str, test_code: str, test_name: str = "") -> float:
-    """Вычисляет fuzzy score для теста."""
-    query = query.upper()
-    test_code = test_code.upper()
+    """Улучшенная функция для точного поиска по коду теста."""
+    # Нормализуем оба значения
+    query = normalize_test_code(query)
+    test_code = test_code.upper().strip()
     
-    # Проверяем точное совпадение
+    # Точное совпадение
     if query == test_code:
         return 100.0
     
-    # Проверяем совпадение цифр
+    # Извлекаем числа из запроса и кода
     query_digits = ''.join(c for c in query if c.isdigit())
     code_digits = ''.join(c for c in test_code if c.isdigit())
     
-    # Базовый fuzzy score для кода
-    code_score = fuzz.ratio(query, test_code)
+    # Если в запросе есть цифры
+    if query_digits:
+        # Проверяем точное совпадение цифр
+        if code_digits == query_digits:
+            return 90.0  # Высокий приоритет для точного совпадения цифр
+        # Проверяем, начинается ли код с этих цифр
+        elif code_digits.startswith(query_digits):
+            # Чем ближе длина, тем выше score
+            length_ratio = len(query_digits) / len(code_digits) if code_digits else 0
+            return 70.0 + (length_ratio * 20)  # От 70 до 90
+        # Если цифры не совпадают - низкий приоритет
+        else:
+            return 0.0
     
-    # Дополнительные баллы за совпадение цифр
-    digit_bonus = 0
-    if query_digits and code_digits and query_digits == code_digits:
-        digit_bonus = 20
+    # Проверяем, начинается ли код теста с запроса (префикс)
+    if test_code.startswith(query):
+        return 85.0
     
-    # Проверяем префикс
-    prefix_bonus = 0
-    if len(query) >= 3 and len(test_code) >= 3:
-        if test_code.startswith(query[:3]):
-            prefix_bonus = 15
+    # Базовый fuzzy score только если нет цифр в запросе
+    if not query_digits:
+        code_score = fuzz.ratio(query, test_code)
+        
+        # Бонус за совпадение префикса AN
+        if query.startswith("AN") and test_code.startswith("AN"):
+            code_score += 10
+        
+        return min(100, code_score)
     
-    # Если есть название теста, проверяем и его
-    name_score = 0
-    if test_name:
-        name_score = fuzz.partial_ratio(query.lower(), test_name.lower()) * 0.3
-    
-    # Комбинированный score
-    total_score = min(100, code_score + digit_bonus + prefix_bonus + name_score)
-    
-    return total_score
+    return 0.0 
 
-async def fuzzy_test_search(processor: DataProcessor, query: str, threshold: float = 50) -> List[Tuple[Document, float]]:
-    """Fuzzy поиск похожих тестов."""
-    query = query.upper()
+async def fuzzy_test_search(processor: DataProcessor, query: str, threshold: float = 30) -> List[Tuple[Document, float]]:
+    """Улучшенный fuzzy поиск с фильтрацией по цифрам."""
+    # Нормализуем запрос
+    query = normalize_test_code(query)
     
-    # Получаем больше результатов для анализа
+    # Извлекаем цифры из запроса для фильтрации
+    query_digits = ''.join(c for c in query if c.isdigit())
+    
+    # Получаем тесты для анализа
     all_tests = processor.search_test(query="", top_k=2000)
     
     fuzzy_results = []
@@ -150,8 +162,8 @@ async def fuzzy_test_search(processor: DataProcessor, query: str, threshold: flo
         
         if test_code in seen_codes:
             continue
-            
-        # Вычисляем fuzzy score
+        
+        # Вычисляем score
         score = calculate_fuzzy_score(query, test_code, test_name)
         
         if score >= threshold:
@@ -161,8 +173,86 @@ async def fuzzy_test_search(processor: DataProcessor, query: str, threshold: flo
     # Сортируем по убыванию score
     fuzzy_results.sort(key=lambda x: x[1], reverse=True)
     
-    # Возвращаем топ-30 результатов
+    # Если есть цифры в запросе, возвращаем только релевантные результаты
+    if query_digits:
+        # Фильтруем результаты - оставляем только с совпадающими или начинающимися цифрами
+        filtered_results = []
+        for doc, score in fuzzy_results:
+            code_digits = ''.join(c for c in doc.metadata.get('test_code', '') if c.isdigit())
+            if code_digits.startswith(query_digits):
+                filtered_results.append((doc, score))
+        return filtered_results[:30]
+    
     return fuzzy_results[:30]
+
+async def check_if_needs_new_search(query: str, current_test_data: Dict) -> bool:
+    """Улучшенная проверка - нужен ли новый поиск."""
+    
+    if not current_test_data:
+        return True
+    
+    query_upper = query.upper().strip()
+    query_lower = query.lower().strip()
+    current_test_code = current_test_data.get('test_code', '').upper()
+    current_test_name = current_test_data.get('test_name', '').lower()
+    
+    # Проверяем, не упоминается ли код другого теста
+    # Паттерны для поиска кодов тестов в тексте
+    code_patterns = [
+        r'\b[AА][NН]\d+[А-ЯA-Z]*\b',  # AN с цифрами и возможным суффиксом
+        r'\b\d{1,4}[А-ЯA-Z]+\b',       # Цифры с буквенным суффиксом
+        r'\b[AА][NН]\s*\d+\b',         # AN с пробелом и цифрами
+        r'\bан\s*\d+\b',               # ан в нижнем регистре
+    ]
+    
+    for pattern in code_patterns:
+        matches = re.findall(pattern, query_upper, re.IGNORECASE)
+        for match in matches:
+            normalized_match = normalize_test_code(match)
+            if normalized_match != current_test_code:
+                # Найден другой код теста
+                return True
+    
+    # Ключевые слова для поиска другого теста
+    search_keywords = [
+        'покажи', 'найди', 'поиск', 'информация о', 'что за тест',
+        'расскажи про', 'а что насчет', 'другой тест', 'еще тест',
+        'анализ на', 'тест на', 'найти тест', 'код теста'
+    ]
+    
+    # Проверяем наличие ключевых слов поиска
+    for keyword in search_keywords:
+        if keyword in query_lower:
+            # Проверяем, не про текущий ли тест спрашивают
+            if current_test_code.lower() not in query_lower and \
+               not any(word in current_test_name for word in query_lower.split()):
+                return True
+    
+    # Проверяем упоминание конкретных типов анализов
+    test_categories = {
+        'биохимия': ['биохим', 'алт', 'аст', 'креатинин', 'мочевина', 'глюкоза'],
+        'гематология': ['оак', 'общий анализ крови', 'гемоглобин', 'эритроциты', 'лейкоциты'],
+        'гормоны': ['ттг', 'т3', 'т4', 'кортизол', 'тестостерон'],
+        'инфекции': ['пцр', 'ифа', 'антитела', 'вирус', 'бактерии'],
+        'моча': ['моча', 'оам', 'общий анализ мочи'],
+    }
+    
+    # Определяем категорию текущего теста
+    current_category = None
+    for category, keywords in test_categories.items():
+        for keyword in keywords:
+            if keyword in current_test_name:
+                current_category = category
+                break
+    
+    # Проверяем, не спрашивают ли про другую категорию
+    for category, keywords in test_categories.items():
+        if category != current_category:
+            for keyword in keywords:
+                if keyword in query_lower:
+                    return True
+    
+    return False
 
 def create_similar_tests_keyboard(similar_tests: List[Tuple[Document, float]], current_test_code: str = None) -> InlineKeyboardMarkup:
     """Создает компактную inline клавиатуру с похожими тестами."""
@@ -456,45 +546,26 @@ def calculate_phonetic_score(query: str, test_code: str) -> float:
 async def smart_test_search(processor, original_query: str) -> Optional[tuple]:
     """Умный поиск с учетом различных вариантов написания."""
     
-    # Генерируем варианты
-    variants = generate_test_code_variants(original_query)
+    # Нормализуем запрос
+    normalized_query = normalize_test_code(original_query)
     
-    # 1. Точный поиск по всем вариантам
-    for variant in variants:
+    # 1. Точный поиск по нормализованному коду
+    results = processor.search_test(filter_dict={"test_code": normalized_query})
+    if results:
+        return results[0], normalized_query, "exact"
+    
+    # 2. Генерируем варианты и ищем
+    variants = generate_test_code_variants(normalized_query)
+    for variant in variants[:5]:
         results = processor.search_test(filter_dict={"test_code": variant})
         if results:
-            print(f"[DEBUG] Found exact match with variant: {variant}")
-            return results[0], variant, "exact"
+            return results[0], variant, "variant"
     
-    # 2. Текстовый поиск с фильтрацией
-    text_results = processor.search_test(query=original_query.upper(), top_k=50)
+    # 3. Текстовый поиск
+    text_results = processor.search_test(query=normalized_query, top_k=50)
     
-    best_match = None
-    best_score = 0
-    best_variant = None
-    
-    for doc, base_score in text_results:
-        test_code = doc.metadata.get('test_code', '')
-        
-        # Проверяем все варианты
-        for variant in variants:
-            if test_code == variant:
-                return (doc, base_score), variant, "text_exact"
-            
-            # Проверяем префикс
-            if test_code.startswith(variant[:3]):
-                phonetic_score = calculate_phonetic_score(variant, test_code)
-                combined_score = base_score * 0.3 + phonetic_score * 0.7
-                
-                if combined_score > best_score:
-                    best_score = combined_score
-                    best_match = (doc, base_score)
-                    best_variant = test_code
-    
-    # 3. Возвращаем лучшее совпадение, если оно достаточно хорошее
-    if best_match and best_score > 50:
-        print(f"[DEBUG] Found phonetic match: {best_variant} (score: {best_score:.1f})")
-        return best_match, best_variant, "phonetic"
+    if text_results and text_results[0][1] > 0.8:
+        return text_results[0], text_results[0][0].metadata.get('test_code'), "text"
     
     return None, None, None
 
@@ -595,11 +666,11 @@ def format_test_info(test_data: Dict) -> str:
     t_type = 'Тест' if test_data['type'] == 'Тесты' else 'Профиль'
     return (
         f"<b>{t_type}: {test_data['test_code']} - {test_data['test_name']}</b>\n\n"
-        f"📋 <b>Преаналитика:</b> {test_data['preanalytics']}\n"
         f"🧪 <b>Тип контейнера:</b> {test_data['container_type']}\n"
         f"🔢 <b>Номер контейнера:</b> {test_data['container_number']}\n"
         f"❄️ <b>Температура:</b> {test_data['storage_temp']}\n"
-        f"🧬 <b>Вид исследования:</b> {test_data['department']}\n\n"
+        f"🧬 <b>Вид исследования:</b> {test_data['department']}\n"
+        f"📋 <b>Преаналитика:</b> {test_data['preanalytics']}\n\n"
     )
     
 async def handle_general_question(message: Message, state: FSMContext, question_text: str):
@@ -1085,7 +1156,6 @@ async def handle_universal_search(message: Message, state: FSMContext):
 @questions_router.message(QuestionStates.waiting_for_code)
 async def handle_code_search(message: Message, state: FSMContext):
     """Handle test code search with smart matching and fuzzy suggestions."""
-    # Проверка на параллельную обработку
     data = await state.get_data()
     if data.get('is_processing', False):
         await message.answer(
@@ -1094,23 +1164,19 @@ async def handle_code_search(message: Message, state: FSMContext):
         )
         return
     
-    # Устанавливаем флаг обработки
     await state.update_data(is_processing=True)
     
     user_id = message.from_user.id
     original_input = message.text.strip()
     
-    # Инициализируем переменные
     gif_msg = None
     loading_msg = None
     animation_task = None
 
     try:
-        # Создаем задачу для отслеживания
         current_task = asyncio.current_task()
         await state.update_data(current_task=current_task)
         
-        # Безопасная отправка GIF
         try:
             if LOADING_GIF_ID:
                 gif_msg = await message.answer_animation(LOADING_GIF_ID, caption="")
@@ -1121,41 +1187,23 @@ async def handle_code_search(message: Message, state: FSMContext):
         if loading_msg:
             animation_task = asyncio.create_task(animate_loading(loading_msg))
         
-        # Проверяем, не отменена ли задача
         if current_task and current_task.cancelled():
             raise asyncio.CancelledError()
         
         processor = DataProcessor()
         processor.load_vector_store()
         
-        # Нормализуем входной код
+        # Нормализуем входной код (с учетом кириллицы)
         normalized_input = normalize_test_code(original_input)
         
-        # Сначала проверяем персонализированные результаты
-        user_suggestions = await db.get_search_suggestions(user_id, normalized_input)
+        # Используем умный поиск
+        result, found_variant, match_type = await smart_test_search(processor, original_input)
         
-        # Если есть точное совпадение в истории пользователя
-        if user_suggestions:
-            for sug in user_suggestions:
-                if sug['code'].upper() == normalized_input.upper():
-                    # Нашли в истории - сразу показываем
-                    results = processor.search_test(filter_dict={"test_code": sug['code']})
-                    if results:
-                        result = results[0]
-                        found_variant = sug['code']
-                        match_type = "personalized"
-                        break
-        
-        # Если не нашли в истории - используем умный поиск
-        if 'result' not in locals():
-            result, found_variant, match_type = await smart_test_search(processor, normalized_input)
-        
-        # Проверяем, не отменена ли задача
         if current_task and current_task.cancelled():
             raise asyncio.CancelledError()
         
         if not result:
-            # Ищем похожие тесты - увеличиваем количество
+            # Ищем похожие тесты с улучшенной фильтрацией
             similar_tests = await fuzzy_test_search(processor, normalized_input, threshold=30)
             
             if animation_task:
@@ -1163,7 +1211,6 @@ async def handle_code_search(message: Message, state: FSMContext):
             await safe_delete_message(loading_msg)
             await safe_delete_message(gif_msg)
             
-            # Записываем неудачный поиск
             await db.add_search_history(
                 user_id=user_id,
                 search_query=original_input,
@@ -1172,9 +1219,9 @@ async def handle_code_search(message: Message, state: FSMContext):
             )
             
             if similar_tests:
-                # Показываем ВСЕ найденные варианты (до 20)
-                response = f"❌ Тест с кодом '<code>{original_input.upper()}</code>' не найден.\n"
-                response += format_similar_tests_text(similar_tests, max_display=20)
+                # Показываем найденные варианты
+                response = f"❌ Тест с кодом '<code>{normalized_input}</code>' не найден.\n"
+                response += format_similar_tests_text(similar_tests, max_display=10)
                 
                 keyboard = create_similar_tests_keyboard(similar_tests[:20])
                 
@@ -1184,26 +1231,19 @@ async def handle_code_search(message: Message, state: FSMContext):
                     reply_markup=keyboard
                 )
             else:
-                error_msg = f"❌ Тест с кодом '{original_input.upper()}' не найден.\n"
+                error_msg = f"❌ Тест с кодом '{normalized_input}' не найден.\n"
                 error_msg += "Попробуйте ввести другой код или опишите, что вы ищете."
                 await message.answer(error_msg, reply_markup=get_back_to_menu_kb())
             
             await state.set_state(QuestionStates.waiting_for_search_type)
             return
             
-        # Найден результат
+        # Найден результат - продолжаем как обычно
         doc = result[0]
         test_data = format_test_data(doc.metadata)
         
-        response = ""
-        if match_type == "personalized":
-            response = f"<i>⭐ Из вашей истории поиска:</i>\n\n"
-        elif match_type == "phonetic" and found_variant != original_input.upper():
-            response = f"<i>По запросу '{original_input.upper()}' найден тест:</i>\n\n"
+        response = format_test_info(test_data)
         
-        response += format_test_info(test_data)
-        
-        # Сохраняем успешный поиск
         await db.add_search_history(
             user_id=user_id,
             search_query=original_input,
@@ -1218,87 +1258,12 @@ async def handle_code_search(message: Message, state: FSMContext):
             test_name=test_data['test_name']
         )
         
-        # Обновляем связанные тесты
-        data = await state.get_data()
-        if 'last_viewed_test' in data and data['last_viewed_test'] != test_data['test_code']:
-            await db.update_related_tests(
-                user_id=user_id,
-                test_code_1=data['last_viewed_test'],
-                test_code_2=test_data['test_code']
-            )
-        
-        # Получаем связанные тесты
-        related_tests = await db.get_user_related_tests(user_id, test_data['test_code'])
-        
-        # Ищем похожие тесты
-        similar_tests = await fuzzy_test_search(processor, test_data['test_code'], threshold=50)
-        similar_tests = [(d, s) for d, s in similar_tests if d.metadata.get('test_code') != test_data['test_code']]
-        
-        # Добавляем текст о похожих тестах если есть
-        if related_tests or similar_tests:
-            response += "\n<b>📋 Рекомендуем также:</b>\n"
-            
-            # Сначала связанные из истории
-            for related in related_tests[:3]:
-                response += f"• ⭐ <code>{related['test_code']}</code> - {related['test_name'][:50]}...\n"
-            
-            # Затем похожие
-            shown_codes = {r['test_code'] for r in related_tests}
-            for doc, _ in similar_tests[:5]:
-                if doc.metadata['test_code'] not in shown_codes:
-                    response += f"• <code>{doc.metadata['test_code']}</code> - {doc.metadata['test_name'][:50]}...\n"
-        
         if animation_task:
             animation_task.cancel()
         await safe_delete_message(loading_msg)
         await safe_delete_message(gif_msg)
         
-        # Отправляем результат
         await message.answer(response, parse_mode="HTML")
-        
-        # ВАЖНО: Создаем inline клавиатуру с похожими тестами
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[])
-        row = []
-        
-        # Добавляем связанные тесты
-        for related in related_tests[:6]:
-            row.append(InlineKeyboardButton(
-                text=f"⭐ {related['test_code']}",
-                callback_data=TestCallback.pack("show_test", related['test_code'])
-            ))
-            if len(row) >= 3:
-                keyboard.inline_keyboard.append(row)
-                row = []
-        
-        # Добавляем похожие тесты
-        shown_codes = {r['test_code'] for r in related_tests}
-        for doc, _ in similar_tests[:10]:
-            if len(keyboard.inline_keyboard) * 3 + len(row) >= 15:  # Максимум 15 кнопок
-                break
-            if doc.metadata['test_code'] not in shown_codes:
-                row.append(InlineKeyboardButton(
-                    text=doc.metadata['test_code'],
-                    callback_data=TestCallback.pack("show_test", doc.metadata['test_code'])
-                ))
-                if len(row) >= 3:
-                    keyboard.inline_keyboard.append(row)
-                    row = []
-        
-        if row:
-            keyboard.inline_keyboard.append(row)
-        
-        if keyboard.inline_keyboard:
-            keyboard.inline_keyboard.append([
-                InlineKeyboardButton(text="🔄 Новый поиск", callback_data="new_search"),
-                InlineKeyboardButton(text="❌ Закрыть", callback_data="close_keyboard")
-            ])
-            
-            await message.answer(
-                "🔍 Выберите похожий тест или задайте вопрос:",
-                reply_markup=keyboard
-            )
-        
-        # Показываем основную клавиатуру диалога
         await message.answer(
             "Можете задать вопрос об этом тесте или выбрать действие:", 
             reply_markup=get_dialog_kb()
@@ -1308,7 +1273,6 @@ async def handle_code_search(message: Message, state: FSMContext):
         await state.update_data(current_test=test_data, last_viewed_test=test_data['test_code'])
         
     except asyncio.CancelledError:
-        # Задача была отменена
         if animation_task:
             animation_task.cancel()
         await safe_delete_message(loading_msg)
@@ -1326,7 +1290,6 @@ async def handle_code_search(message: Message, state: FSMContext):
         await state.set_state(QuestionStates.waiting_for_search_type)
     
     finally:
-        # Сбрасываем флаг обработки
         await state.update_data(is_processing=False, current_task=None)
 
 @questions_router.message(QuestionStates.in_dialog, F.text == "🔄 Новый вопрос")
@@ -1527,7 +1490,7 @@ async def handle_name_search(message: Message, state: FSMContext):
 
 @questions_router.message(QuestionStates.in_dialog)
 async def handle_dialog(message: Message, state: FSMContext):
-    """Handle follow-up questions using LLM with smart context switching."""
+    """Обработчик диалога с автоматическим переключением на новый поиск."""
     text = message.text.strip()
     user_id = message.from_user.id
     
@@ -1545,19 +1508,20 @@ async def handle_dialog(message: Message, state: FSMContext):
         return
     
     data = await state.get_data()
-    test_data = data['current_test'] if 'current_test' in data else None
+    test_data = data.get('current_test')
     
-    # Проверяем, не новый ли это поиск по коду
+    # Проверяем, не код ли теста введен
     if is_test_code_pattern(text):
+        # Если это код - сразу ищем
         await state.set_state(QuestionStates.waiting_for_code)
         await handle_code_search(message, state)
         return
     
-    # Анализируем, спрашивает ли пользователь о другом тесте
+    # Проверяем, нужен ли новый поиск
     needs_new_search = await check_if_needs_new_search(text, test_data)
     
     if needs_new_search:
-        # Пользователь спрашивает о другом тесте - делаем новый поиск
+        # Автоматически запускаем новый поиск
         await state.set_state(QuestionStates.waiting_for_name)
         await handle_name_search(message, state)
         return
@@ -1566,46 +1530,63 @@ async def handle_dialog(message: Message, state: FSMContext):
         await message.answer("Контекст потерян. Задайте новый вопрос.", reply_markup=get_back_to_menu_kb())
         await state.set_state(QuestionStates.waiting_for_search_type)
         return
-        
-    gif_msg = await message.answer_animation(LOADING_GIF_ID, caption="")
-    loading_msg = await message.answer("Обрабатываю ваш запрос...\n⏳ Анализирую данные...")
-    animation_task = asyncio.create_task(animate_loading(loading_msg))
+    
+    # Если это вопрос про текущий тест - сначала пробуем обработать через LLM
+    gif_msg = None
+    loading_msg = None
+    animation_task = None
     
     try:
-        # Более умный промпт, который четко ограничивает контекст
+        gif_msg = await message.answer_animation(LOADING_GIF_ID, caption="")
+        loading_msg = await message.answer("Обрабатываю ваш запрос...\n⏳ Анализирую данные...")
+        animation_task = asyncio.create_task(animate_loading(loading_msg))
+        
         system_msg = SystemMessage(content=f"""
             Ты - ассистент лаборатории VetUnion. 
             
-            ВАЖНО: Ты можешь отвечать ТОЛЬКО про текущий тест:
+            Текущий тест:
             Код: {test_data['test_code']}
             Название: {test_data['test_name']}
-            Контейнер: {test_data['container_type']}
-            Преаналитика: {test_data['preanalytics']}
-            Температура: {test_data['storage_temp']}
-            Отдел: {test_data['department']}
             
-            Если пользователь спрашивает про ДРУГОЙ тест, скажи:
-            "Для получения информации о другом тесте, пожалуйста, введите его код или название."
+            ВАЖНОЕ ПРАВИЛО:
+            Если пользователь спрашивает про ДРУГОЙ тест или анализ (упоминает другой код, название или тип анализа),
+            ты ДОЛЖЕН ответить ТОЧНО так:
+            "NEED_NEW_SEARCH: [запрос пользователя]"
             
-            Отвечай кратко и по существу на русском языке, используя ТОЛЬКО информацию о текущем тесте.
+            Если вопрос касается текущего теста, отвечай кратко и точно.
         """)
         
         response = await llm.agenerate([[system_msg, HumanMessage(content=text)]])
         answer = response.generations[0][0].text.strip()
         
-        # Проверяем, не предлагает ли LLM искать другой тест
-        if "введите его код или название" in answer.lower():
-            await loading_msg.edit_text(
-                "Похоже, вы спрашиваете о другом тесте. "
-                "Введите код или название интересующего теста:"
-            )
-            await state.set_state(QuestionStates.waiting_for_search_type)
+        # Проверяем ответ LLM - нужен ли новый поиск
+        if answer.startswith("NEED_NEW_SEARCH:"):
+            # LLM определила что нужен новый поиск
+            search_query = answer.replace("NEED_NEW_SEARCH:", "").strip()
             
-            # Показываем персонализированные подсказки
-            await show_personalized_suggestions(message, state)
-        else:
-            await loading_msg.edit_text(answer)
-            await message.answer("Выберите действие:", reply_markup=get_dialog_kb())
+            # Удаляем загрузочные сообщения
+            if animation_task:
+                animation_task.cancel()
+            await safe_delete_message(loading_msg)
+            await safe_delete_message(gif_msg)
+            
+            # Автоматически запускаем новый поиск с извлеченным запросом
+            if search_query:
+                # Используем извлеченный запрос
+                message.text = search_query
+            
+            # Определяем тип поиска и запускаем
+            if is_test_code_pattern(message.text):
+                await state.set_state(QuestionStates.waiting_for_code)
+                await handle_code_search(message, state)
+            else:
+                await state.set_state(QuestionStates.waiting_for_name)
+                await handle_name_search(message, state)
+            return
+        
+        # Обычный ответ про текущий тест
+        await loading_msg.edit_text(answer)
+        await message.answer("Выберите действие:", reply_markup=get_dialog_kb())
         
         await db.add_request_stat(
             user_id=user_id,
@@ -1613,12 +1594,21 @@ async def handle_dialog(message: Message, state: FSMContext):
             request_text=text
         )
         
-    except Exception:
-        await loading_msg.edit_text("Ошибка обработки вопроса.")
-        await message.answer("Произошла ошибка. Попробуйте снова или начните новый вопрос.", reply_markup=get_dialog_kb())
+    except Exception as e:
+        print(f"[ERROR] Dialog processing failed: {e}")
+        # При ошибке пробуем определить автоматически
+        if animation_task:
+            animation_task.cancel()
+        await safe_delete_message(loading_msg)
+        await safe_delete_message(gif_msg)
+        
+        # Запускаем поиск как fallback
+        await state.set_state(QuestionStates.waiting_for_name)
+        await handle_name_search(message, state)
     finally:
-        animation_task.cancel()
-        await gif_msg.delete()
+        if animation_task and not animation_task.cancelled():
+            animation_task.cancel()
+        await safe_delete_message(gif_msg)
 
 async def handle_context_switch(message: Message, state: FSMContext, new_query: str):
     """Обрабатывает переключение контекста на новый тест."""
