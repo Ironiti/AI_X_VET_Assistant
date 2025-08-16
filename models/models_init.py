@@ -32,6 +32,7 @@ gemma3_27b_instruct_free = make_chat("google/gemma-3-27b-it:free", streaming=Fal
 qwq_32b_instruct_free = make_chat("qwen/qwq-32b:free", streaming=False)
 deepseek_r1_instruct_free = make_chat("deepseek/deepseek-r1:free", streaming=False)
 gemini_2_5_pro_exp_free = make_chat("google/gemini-2.5-pro-exp-03-25:free", streaming=False)
+Google_Gemini_2_5_Flash_Lite = make_chat("google/gemini-2.5-flash-lite", streaming=False)
 
 # PAYABLE models
 gpt_4o = make_chat("openai/gpt-4o", streaming=False)

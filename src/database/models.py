@@ -153,13 +153,28 @@ class Database:
                             })
         else:
             # Без запроса показываем топ частых
-            for test in frequent_tests[:5]:
+            for test in frequent_tests[:3]:
                 suggestions.append({
                     'type': 'frequent',
                     'code': test['test_code'],
                     'name': test['test_name'],
                     'frequency': test['frequency']
                 })
+            
+            # Добавляем недавние поиски
+            seen_codes = {s['code'] for s in suggestions}
+            for search in recent_searches[:2]:
+                if search['found_test_code'] and search['found_test_code'] not in seen_codes:
+                    # Получаем информацию о тесте
+                    test_info = await self.get_test_by_code(search['found_test_code'])
+                    if test_info:
+                        suggestions.append({
+                            'type': 'recent',
+                            'code': test_info['test_code'],
+                            'name': test_info['test_name'],
+                            'original_query': search['search_query']
+                        })
+                        seen_codes.add(test_info['test_code'])
         
         return suggestions[:10]  # Максимум 10 подсказок
 
@@ -627,7 +642,7 @@ class Database:
             # Search in ChromaDB with test code filter
             results = self.test_processor.search_test(
                 query="",
-                filter={"test_code": code.upper()},
+                filter_dict={"test_code": code.upper()},
                 top_k=1
             )
             

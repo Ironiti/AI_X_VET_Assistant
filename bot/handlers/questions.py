@@ -13,10 +13,12 @@ from fuzzywuzzy import fuzz, process
 from datetime import datetime
 from src.database.db_init import db
 from src.data_vectorization import DataProcessor
-from models.models_init import qwen3_32b_instruct as llm
+from models.models_init import Google_Gemini_2_5_Flash_Lite as llm
 
 LOADING_GIF_ID = "CgACAgIAAxkBAAMIaGr_qy1Wxaw2VrBrm3dwOAkYji4AAu54AAKmqHlJAtZWBziZvaA2BA"
 # LOADING_GIF_ID = "CgACAgIAAxkBAAIBFGiBcXtGY7OZvr3-L1dZIBRNqSztAALueAACpqh5Scn4VmIRb4UjNgQ"
+# LOADING_GIF_ID = "CgACAgIAAxkBAAMMaHSq3vqxq2RuMMj-DIMvldgDjfkAAu54AAKmqHlJCNcCjeoHRJI2BA"
+
 questions_router = Router()
 
 class TestCallback:
@@ -868,47 +870,51 @@ async def show_personalized_suggestions(message: Message, state: FSMContext):
     """Показывает персонализированные подсказки при начале поиска"""
     user_id = message.from_user.id
     
-    # Получаем подсказки
-    suggestions = await db.get_search_suggestions(user_id)
-    
-    if suggestions:
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+    try:
+        # Получаем подсказки
+        suggestions = await db.get_search_suggestions(user_id)
         
-        # Группируем по типам
-        frequent = [s for s in suggestions if s['type'] == 'frequent']
-        recent = [s for s in suggestions if s['type'] == 'recent']
-        
-        if frequent:
-            # Добавляем заголовок
-            keyboard.inline_keyboard.append([
-                InlineKeyboardButton(text="⭐ Часто используемые:", callback_data="ignore")
-            ])
+        if suggestions:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[])
             
-            for sug in frequent[:3]:
-                keyboard.inline_keyboard.append([
-                    InlineKeyboardButton(
-                        text=f"{sug['code']} - {sug['name'][:40]}... ({sug['frequency']}x)",
-                        callback_data=f"quick_test:{sug['code']}"
-                    )
-                ])
-        
-        if recent:
-            keyboard.inline_keyboard.append([
-                InlineKeyboardButton(text="🕐 Недавние поиски:", callback_data="ignore")
-            ])
+            # Группируем по типам
+            frequent = [s for s in suggestions if s['type'] == 'frequent']
+            recent = [s for s in suggestions if s['type'] == 'recent']
             
-            for sug in recent[:2]:
+            if frequent:
+                # Добавляем заголовок
                 keyboard.inline_keyboard.append([
-                    InlineKeyboardButton(
-                        text=f"{sug['code']} - {sug['name'][:40]}...",
-                        callback_data=f"quick_test:{sug['code']}"
-                    )
+                    InlineKeyboardButton(text="⭐ Часто используемые:", callback_data="ignore")
                 ])
-        
-        await message.answer(
-            "💡 Быстрый доступ к вашим тестам:",
-            reply_markup=keyboard
-        )
+                
+                for sug in frequent[:3]:
+                    keyboard.inline_keyboard.append([
+                        InlineKeyboardButton(
+                            text=f"{sug['code']} - {sug['name'][:40]}... ({sug['frequency']}x)",
+                            callback_data=f"quick_test:{sug['code']}"
+                        )
+                    ])
+            
+            if recent:
+                keyboard.inline_keyboard.append([
+                    InlineKeyboardButton(text="🕐 Недавние поиски:", callback_data="ignore")
+                ])
+                
+                for sug in recent[:2]:
+                    keyboard.inline_keyboard.append([
+                        InlineKeyboardButton(
+                            text=f"{sug['code']} - {sug['name'][:40]}...",
+                            callback_data=f"quick_test:{sug['code']}"
+                        )
+                    ])
+            
+            await message.answer(
+                "💡 Быстрый доступ к вашим тестам:",
+                reply_markup=keyboard
+            )
+    except Exception as e:
+        print(f"[ERROR] Failed to show personalized suggestions: {e}")
+        # Не показываем ошибку пользователю, просто не показываем подсказки
 
 # Обработчики
 @questions_router.callback_query(F.data.startswith("show_test:"))
@@ -1037,30 +1043,159 @@ async def handle_quick_test_selection(callback: CallbackQuery, state: FSMContext
     """Обработчик быстрого выбора теста из подсказок"""
     test_code = callback.data.split(':')[1]
     
-    # Получаем информацию о тесте
-    test_info = await db.get_test_by_code(test_code)
-    
-    if test_info:
-        # Формируем полный ответ с информацией о тесте
-        response_text = (
-            f"🔬 <b>{test_info['test_name']}</b>\n"
-            f"📋 Код: {test_info['test_code']}\n"
-            f"🏢 Отдел: {test_info['department']}\n"
-            f"🧪 Контейнер: {test_info['container_type']}\n"
-            f"❄️ Хранение: {test_info['storage_temp']}\n\n"
-            f"📝 Преаналитика:\n{test_info['preanalytics']}"
-        )
+    try:
+        # Используем DataProcessor напрямую для поиска
+        processor = DataProcessor()
+        processor.load_vector_store()
         
-        await callback.message.answer(response_text, parse_mode="HTML")
+        # Нормализуем код теста
+        normalized_code = normalize_test_code(test_code)
+        
+        # Сначала пробуем точный поиск по нормализованному коду
+        results = processor.search_test(filter_dict={"test_code": normalized_code})
+        
+        # Если не нашли - пробуем оригинальный код
+        if not results:
+            results = processor.search_test(filter_dict={"test_code": test_code})
+        
+        # Если не нашли - пробуем fuzzy поиск
+        if not results:
+            print(f"[DEBUG] Test {test_code} not found with filter. Trying fuzzy search...")
+            fuzzy_results = await fuzzy_test_search(processor, test_code, threshold=90)
+            
+            if fuzzy_results:
+                # Берем первый результат с высоким score
+                results = [fuzzy_results[0]]
+                print(f"[DEBUG] Found via fuzzy search: {results[0][0].metadata.get('test_code')}")
+            else:
+                # Пробуем текстовый поиск
+                print(f"[DEBUG] Trying text search for {test_code}")
+                text_results = processor.search_test(query=test_code, top_k=10)
+                
+                # Фильтруем по точному совпадению кода
+                for doc, score in text_results:
+                    doc_code = doc.metadata.get('test_code', '')
+                    if doc_code.upper() == test_code.upper() or doc_code.upper() == normalized_code.upper():
+                        results = [(doc, score)]
+                        print(f"[DEBUG] Found via text search: {doc_code}")
+                        break
+        
+        if not results:
+            # Последняя попытка - используем smart_test_search
+            result, found_variant, match_type = await smart_test_search(processor, test_code)
+            if result:
+                results = [result]
+                print(f"[DEBUG] Found via smart search: {found_variant} (type: {match_type})")
+        
+        if not results:
+            print(f"[ERROR] Test {test_code} not found after all attempts")
+            await callback.message.answer(f"❌ Тест {test_code} не найден в базе данных")
+            await callback.answer()
+            return
+            
+        doc = results[0][0] if isinstance(results[0], tuple) else results[0]
+        test_data = format_test_data(doc.metadata)
+        
+        # Формируем ответ
+        response = f"<b>Информация о выбранном тесте:</b>\n\n"
+        response += format_test_info(test_data)
         
         # Обновляем статистику
-        await db.update_user_frequent_test(
-            callback.from_user.id, 
-            test_info['test_code'],
-            test_info['test_name']
+        user_id = callback.from_user.id
+        await db.add_search_history(
+            user_id=user_id,
+            search_query=f"Быстрый выбор: {test_code}",
+            found_test_code=test_data['test_code'],
+            search_type='code',
+            success=True
         )
-    else:
-        await callback.message.answer("❌ Тест не найден")
+        await db.update_user_frequent_test(
+            user_id=user_id,
+            test_code=test_data['test_code'],
+            test_name=test_data['test_name']
+        )
+        
+        # Обновляем связанные тесты
+        data = await state.get_data()
+        if 'last_viewed_test' in data and data['last_viewed_test'] != test_data['test_code']:
+            await db.update_related_tests(
+                user_id=user_id,
+                test_code_1=data['last_viewed_test'],
+                test_code_2=test_data['test_code']
+            )
+        
+        # Получаем связанные тесты из истории пользователя
+        related_tests = await db.get_user_related_tests(user_id, test_data['test_code'])
+        
+        # Ищем похожие тесты для этого теста
+        similar_tests = await fuzzy_test_search(processor, test_data['test_code'], threshold=40)
+        
+        # Фильтруем, чтобы не показывать сам тест
+        similar_tests = [(d, s) for d, s in similar_tests if d.metadata.get('test_code') != test_data['test_code']]
+        
+        # Создаем клавиатуру если есть похожие или связанные
+        reply_markup = None
+        if related_tests or similar_tests:
+            response += "\n<b>🎯 Рекомендуем также:</b>"
+            keyboard = []
+            row = []
+            
+            # Сначала связанные из истории (приоритет)
+            for related in related_tests[:4]:
+                row.append(InlineKeyboardButton(
+                    text=f"⭐ {related['test_code']}",
+                    callback_data=TestCallback.pack("show_test", related['test_code'])
+                ))
+                if len(row) >= 2:
+                    keyboard.append(row)
+                    row = []
+            
+            # Затем похожие
+            for doc, _ in similar_tests[:4]:
+                if len(keyboard) * 2 + len(row) >= 8:  # Максимум 8 кнопок
+                    break
+                code = doc.metadata.get('test_code')
+                if not any(r['test_code'] == code for r in related_tests):
+                    row.append(InlineKeyboardButton(
+                        text=code,
+                        callback_data=TestCallback.pack("show_test", code)
+                    ))
+                    if len(row) >= 2:
+                        keyboard.append(row)
+                        row = []
+            
+            if row:
+                keyboard.append(row)
+            
+            keyboard.append([
+                InlineKeyboardButton(text="🔄 Новый поиск", callback_data="new_search"),
+                InlineKeyboardButton(text="❌ Закрыть", callback_data="close_keyboard")
+            ])
+            
+            reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+        
+        # Отправляем как новое сообщение
+        await callback.message.answer(
+            response, 
+            parse_mode="HTML",
+            reply_markup=reply_markup
+        )
+        
+        # Обновляем состояние с текущим тестом
+        await state.set_state(QuestionStates.in_dialog)
+        await state.update_data(current_test=test_data, last_viewed_test=test_data['test_code'])
+        
+        # Показываем клавиатуру для продолжения диалога
+        await callback.message.answer(
+            "Можете задать вопрос об этом тесте или выбрать действие:",
+            reply_markup=get_dialog_kb()
+        )
+        
+    except Exception as e:
+        print(f"[ERROR] Quick test selection failed: {e}")
+        import traceback
+        traceback.print_exc()
+        await callback.message.answer("⚠️ Ошибка при загрузке информации о тесте")
     
     await callback.answer()  # Закрываем уведомление о нажатии
     
