@@ -63,6 +63,7 @@ TEST_ABBREVIATIONS = {
     "ГЕМКА": "общий анализ крови клинический анализ крови оак гематология",
     "ГЕМАТОЛОГИЯ": "общий анализ крови клинический анализ крови оак гемка",
     "ГЕМАТКА": "общий анализ крови клинический анализ крови оак гемка гематология",
+    "цитология": "Цитологическое исследование",
 }
 
 def is_test_code_pattern(text: str) -> bool:
@@ -663,16 +664,37 @@ def format_test_data(metadata: Dict) -> Dict:
         'department': metadata['department']
     }
 
-def format_test_info(test_data: Dict) -> str:
-    """Format test information from metadata using HTML tags."""
+def format_test_info_brief(test_data: Dict) -> str:
+    """Format brief test information for initial search results."""
     t_type = 'Тест' if test_data['type'] == 'Тесты' else 'Профиль'
+    # Экранируем HTML символы в названии теста
+    test_name = html.escape(test_data['test_name'])
+    department = html.escape(test_data['department'])
+    
     return (
-        f"<b>{t_type}: {test_data['test_code']} - {test_data['test_name']}</b>\n\n"
-        f"🧪 <b>Тип контейнера:</b> {test_data['container_type']}\n"
-        f"🔢 <b>Номер контейнера:</b> {test_data['container_number']}\n"
-        f"❄️ <b>Температура:</b> {test_data['storage_temp']}\n"
-        f"🧬 <b>Вид исследования:</b> {test_data['department']}\n"
-        f"📋 <b>Преаналитика:</b> {test_data['preanalytics']}\n\n"
+        f"<b>{t_type}: {test_data['test_code']} - {test_name}</b>\n"
+        f"🧬 <b>Вид исследования:</b> {department}\n"
+    )
+
+def format_test_info(test_data: Dict) -> str:
+    """Format full test information from metadata using HTML tags."""
+    t_type = 'Тест' if test_data['type'] == 'Тесты' else 'Профиль'
+    
+    # Экранируем HTML символы во всех полях
+    test_name = html.escape(test_data['test_name'])
+    container_type = html.escape(test_data['container_type'])
+    container_number = html.escape(str(test_data['container_number']))
+    storage_temp = html.escape(test_data['storage_temp'])
+    department = html.escape(test_data['department'])
+    preanalytics = html.escape(test_data['preanalytics'])
+    
+    return (
+        f"<b>{t_type}: {test_data['test_code']} - {test_name}</b>\n\n"
+        f"🧪 <b>Тип контейнера:</b> {container_type}\n"
+        f"🔢 <b>Номер контейнера:</b> {container_number}\n"
+        f"❄️ <b>Температура:</b> {storage_temp}\n"
+        f"🧬 <b>Вид исследования:</b> {department}\n"
+        f"📋 <b>Преаналитика:</b> {preanalytics}\n\n"
     )
     
 async def handle_general_question(message: Message, state: FSMContext, question_text: str):
@@ -918,6 +940,7 @@ async def show_personalized_suggestions(message: Message, state: FSMContext):
 
 # Обработчики
 @questions_router.callback_query(F.data.startswith("show_test:"))
+@questions_router.callback_query(F.data.startswith("show_test:"))
 async def handle_show_test_callback(callback: CallbackQuery, state: FSMContext):
     """Обработчик для показа информации о тесте из inline кнопки."""
     action, test_code = TestCallback.unpack(callback.data)
@@ -929,57 +952,101 @@ async def handle_show_test_callback(callback: CallbackQuery, state: FSMContext):
         processor = DataProcessor()
         processor.load_vector_store()
         
-        # Ищем тест по коду
+        # Сначала пробуем точный поиск
         results = processor.search_test(filter_dict={"test_code": test_code})
         
+        # Если не нашли - пробуем с нормализацией
         if not results:
-            await callback.message.answer(f"❌ Тест {test_code} не найден")
+            normalized_code = normalize_test_code(test_code)
+            results = processor.search_test(filter_dict={"test_code": normalized_code})
+        
+        # Если не нашли - используем fuzzy поиск с высоким порогом
+        if not results:
+            print(f"[DEBUG] Test {test_code} not found with exact search. Trying fuzzy...")
+            fuzzy_results = await fuzzy_test_search(processor, test_code, threshold=85)
+            
+            if fuzzy_results:
+                # Ищем точное совпадение среди fuzzy результатов
+                for doc, score in fuzzy_results:
+                    if doc.metadata.get('test_code', '').upper() == test_code.upper():
+                        results = [(doc, score)]
+                        print(f"[DEBUG] Found exact match in fuzzy results: {doc.metadata.get('test_code')}")
+                        break
+                
+                # Если точного не нашли - берем первый с высоким score
+                if not results and fuzzy_results[0][1] >= 90:
+                    results = [fuzzy_results[0]]
+                    print(f"[DEBUG] Using best fuzzy match: {fuzzy_results[0][0].metadata.get('test_code')} (score: {fuzzy_results[0][1]})")
+        
+        # Последняя попытка - текстовый поиск
+        if not results:
+            print(f"[DEBUG] Trying text search for {test_code}")
+            text_results = processor.search_test(query=test_code, top_k=50)
+            
+            # Ищем точное совпадение кода
+            for doc, score in text_results:
+                doc_code = doc.metadata.get('test_code', '')
+                # Проверяем точное совпадение с учетом регистра и пробелов
+                if doc_code.strip().upper() == test_code.strip().upper():
+                    results = [(doc, score)]
+                    print(f"[DEBUG] Found via text search: {doc_code}")
+                    break
+        
+        # Если все еще не нашли - используем smart_test_search
+        if not results:
+            result, found_variant, match_type = await smart_test_search(processor, test_code)
+            if result:
+                results = [result]
+                print(f"[DEBUG] Found via smart search: {found_variant} (type: {match_type})")
+        
+        if not results:
+            print(f"[ERROR] Test {test_code} not found after all attempts")
+            await callback.message.answer(f"❌ Тест {test_code} не найден в базе данных")
             return
             
-        doc = results[0][0]
+        doc = results[0][0] if isinstance(results[0], tuple) else results[0]
         test_data = format_test_data(doc.metadata)
         
-        # Формируем ответ
+        # Формируем полный ответ
         response = f"<b>Информация о выбранном тесте:</b>\n\n"
-        response += format_test_info(test_data)
+        response += format_test_info(test_data)  # Используем полную версию для callback
         
         # Обновляем статистику
         user_id = callback.from_user.id
         await db.add_search_history(
             user_id=user_id,
             search_query=f"Выбор из списка: {test_code}",
-            found_test_code=test_code,
+            found_test_code=test_data['test_code'],
             search_type='code',
             success=True
         )
         await db.update_user_frequent_test(
             user_id=user_id,
-            test_code=test_code,
+            test_code=test_data['test_code'],
             test_name=test_data['test_name']
         )
         
         # Обновляем связанные тесты
         data = await state.get_data()
-        if 'last_viewed_test' in data and data['last_viewed_test'] != test_code:
+        if 'last_viewed_test' in data and data['last_viewed_test'] != test_data['test_code']:
             await db.update_related_tests(
                 user_id=user_id,
                 test_code_1=data['last_viewed_test'],
-                test_code_2=test_code
+                test_code_2=test_data['test_code']
             )
         
         # Получаем связанные тесты из истории пользователя
-        related_tests = await db.get_user_related_tests(user_id, test_code)
+        related_tests = await db.get_user_related_tests(user_id, test_data['test_code'])
         
         # Ищем похожие тесты для этого теста
-        similar_tests = await fuzzy_test_search(processor, test_code, threshold=40)
+        similar_tests = await fuzzy_test_search(processor, test_data['test_code'], threshold=40)
         
         # Фильтруем, чтобы не показывать сам тест
-        similar_tests = [(d, s) for d, s in similar_tests if d.metadata.get('test_code') != test_code]
+        similar_tests = [(d, s) for d, s in similar_tests if d.metadata.get('test_code') != test_data['test_code']]
         
         # Создаем клавиатуру если есть похожие или связанные
         reply_markup = None
         if related_tests or similar_tests:
-            response += "\n<b>🎯 Рекомендуем также:</b>"
             keyboard = []
             row = []
             
@@ -1026,7 +1093,7 @@ async def handle_show_test_callback(callback: CallbackQuery, state: FSMContext):
         
         # Обновляем состояние с текущим тестом
         await state.set_state(QuestionStates.in_dialog)
-        await state.update_data(current_test=test_data, last_viewed_test=test_code)
+        await state.update_data(current_test=test_data, last_viewed_test=test_data['test_code'])
         
         # Показываем клавиатуру для продолжения диалога
         await callback.message.answer(
@@ -1036,6 +1103,8 @@ async def handle_show_test_callback(callback: CallbackQuery, state: FSMContext):
         
     except Exception as e:
         print(f"[ERROR] Callback handling failed: {e}")
+        import traceback
+        traceback.print_exc()
         await callback.message.answer("⚠️ Ошибка при загрузке информации о тесте")
 
 @questions_router.callback_query(F.data.startswith("quick_test:"))
@@ -1534,7 +1603,7 @@ async def handle_name_search(message: Message, state: FSMContext):
             full_test_responses = []
             for i, doc in enumerate(selected_docs):
                 test_data = format_test_data(doc.metadata)
-                full_response = f"<b>{i+1}.</b> {format_test_info(test_data)}\n\n"
+                full_response = f"<b>{i+1}.</b> {format_test_info_brief(test_data)}\n"
                 full_test_responses.append(full_response)
             
             # Группируем ответы в сообщения, не превышающие 4000 символов
@@ -1589,7 +1658,7 @@ async def handle_name_search(message: Message, state: FSMContext):
         else:
             # Single result
             test_data = format_test_data(selected_docs[0].metadata)
-            response = format_test_info(test_data)
+            response = format_test_info_brief(test_data)
             
             # Проверяем длину и отправляем
             if len(response) > 4000:
