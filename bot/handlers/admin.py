@@ -9,6 +9,7 @@ from bot.keyboards import (
     get_excel_export_kb, get_broadcast_type_kb, get_system_management_kb, get_back_to_menu_kb
 )
 from utils.excel_exporter import ExcelExporter
+from utils.csv_exporter import CSVExporter
 from datetime import datetime
 import asyncio
 
@@ -187,12 +188,19 @@ async def process_export_choice(message: Message, state: FSMContext):
     
     try:
         exporter = ExcelExporter(db.db_path)
+        csv_exporter = CSVExporter(db.db_path)
         filename = f"export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
         
         if message.text == "📊 Полная выгрузка":
-            excel_data = await exporter.export_all_data()
-            filename = f"full_{filename}"
-            caption = "📊 Полная выгрузка данных системы"
+            try:
+                excel_data = await exporter.export_all_data()
+                filename = f"full_{filename}"
+                caption = "📊 Полная выгрузка данных системы"
+            except Exception as excel_error:
+                print(f"[WARNING] Excel export failed, using CSV backup: {excel_error}")
+                excel_data = await csv_exporter.export_all_data_csv()
+                filename = f"full_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+                caption = "📊 Полная выгрузка данных системы (CSV резерв)"
         
         elif message.text == "👥 Только пользователи":
             excel_data = await exporter.export_users()
@@ -233,11 +241,24 @@ async def process_export_choice(message: Message, state: FSMContext):
         await state.clear()
         
     except Exception as e:
+        print(f"[ERROR] Excel export failed: {e}")
+        import traceback
+        traceback.print_exc()
+        
         await loading_msg.delete()
-        await message.answer(
-            f"❌ Ошибка при создании выгрузки: {str(e)}",
-            reply_markup=get_admin_menu_kb()
-        )
+        
+        # Более детальная информация об ошибке для администратора
+        error_details = str(e)
+        if "xlsxwriter" in error_details.lower():
+            error_msg = "❌ Ошибка: отсутствует библиотека xlsxwriter. Обратитесь к разработчику."
+        elif "database" in error_details.lower() or "sqlite" in error_details.lower():
+            error_msg = "❌ Ошибка доступа к базе данных. Попробуйте позже."
+        elif "permission" in error_details.lower():
+            error_msg = "❌ Ошибка доступа к файлам. Проверьте права доступа."
+        else:
+            error_msg = f"❌ Ошибка при создании выгрузки: {error_details[:100]}..."
+        
+        await message.answer(error_msg, reply_markup=get_admin_menu_kb())
         await state.clear()
 
 @admin_router.message(F.text == "📢 Рассылка")

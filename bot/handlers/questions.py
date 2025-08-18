@@ -716,11 +716,7 @@ async def handle_general_question(message: Message, state: FSMContext, question_
         
         answer = response.generations[0][0].text.strip()
         
-        await db.add_request_stat(
-            user_id=user_id,
-            request_type='general_question',
-            request_text=question_text
-        )
+        # Статистика уже сохранена в handle_universal_search
         
         await loading_msg.delete()
         await message.answer(answer, parse_mode="HTML")
@@ -1325,7 +1321,7 @@ async def handle_universal_search(message: Message, state: FSMContext):
     # Расширенная проверка для разных вариантов
     # Проверяем не только коды, но и явные запросы
     search_indicators = [
-        'покажи', 'найди', 'поиск', 'информация', 
+        'покажи', 'найди', 'поиск', 'информация',
         'что такое', 'расскажи про', 'анализ на'
     ]
     
@@ -1354,6 +1350,12 @@ async def handle_universal_search(message: Message, state: FSMContext):
             await state.set_state(QuestionStates.waiting_for_name)
             await handle_name_search(message, state)
         else:
+            # Сохраняем статистику для общих вопросов
+            await db.add_request_stat(
+                user_id=user_id,
+                request_type='question',
+                request_text=text
+            )
             # Обрабатываем как общий вопрос
             await handle_general_question(message, state, text)
 
@@ -1372,6 +1374,13 @@ async def handle_code_search(message: Message, state: FSMContext):
     
     user_id = message.from_user.id
     original_input = message.text.strip()
+    
+    # Сохраняем статистику вопроса
+    await db.add_request_stat(
+        user_id=user_id,
+        request_type='question',
+        request_text=original_input
+    )
     
     gif_msg = None
     loading_msg = None
@@ -1543,6 +1552,13 @@ async def handle_name_search(message: Message, state: FSMContext):
     """Handle test name search using RAG."""
     user_id = message.from_user.id
     text = message.text.strip()
+    
+    # Сохраняем статистику вопроса
+    await db.add_request_stat(
+        user_id=user_id,
+        request_type='question',
+        request_text=text
+    )
     
     gif_msg = None
     loading_msg = None
@@ -1792,11 +1808,7 @@ async def handle_dialog(message: Message, state: FSMContext):
         await loading_msg.edit_text(answer)
         await message.answer("Выберите действие:", reply_markup=get_dialog_kb())
         
-        await db.add_request_stat(
-            user_id=user_id,
-            request_type='question',
-            request_text=text
-        )
+        # Статистика уже сохранена в handle_universal_search или при первоначальном входе
         
     except Exception as e:
         print(f"[ERROR] Dialog processing failed: {e}")
