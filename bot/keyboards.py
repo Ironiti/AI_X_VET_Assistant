@@ -2,7 +2,7 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
 def get_back_to_menu_kb():
     kb = [
-        [KeyboardButton(text="🔙 Вернуться в главное меню")]
+        [KeyboardButton(text="❌ Завершить диалог")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
@@ -129,7 +129,7 @@ def get_admin_menu_kb():
         [KeyboardButton(text="📋 Все обращения"), KeyboardButton(text="🔐 Создать код")],
         [KeyboardButton(text="📥 Выгрузка в Excel"), KeyboardButton(text="📢 Рассылка")],
         [KeyboardButton(text="🔬 Задать вопрос ассистенту"), KeyboardButton(text="📞 Заказать звонок")],
-        [KeyboardButton(text="💡 Предложения и пожелания")],
+        [KeyboardButton(text="💡 Предложения и пожелания"), KeyboardButton(text="📋 Опросы")],
         [KeyboardButton(text="🔧 Управление системой")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)

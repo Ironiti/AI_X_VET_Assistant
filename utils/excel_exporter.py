@@ -180,7 +180,7 @@ class ExcelExporter:
                 rs.timestamp as "Дата и время"
             FROM request_statistics rs
             LEFT JOIN users u ON rs.user_id = u.telegram_id
-            WHERE rs.request_type = 'question'
+            WHERE rs.request_type IN ('question', 'general_question')
             ORDER BY rs.timestamp DESC
         ''')
         

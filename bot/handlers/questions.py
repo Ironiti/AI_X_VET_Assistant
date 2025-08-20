@@ -292,11 +292,6 @@ def create_similar_tests_keyboard(similar_tests: List[Tuple[Document, float]], c
     if row:
         keyboard.append(row)
     
-    # Добавляем служебные кнопки
-    keyboard.append([
-        InlineKeyboardButton(text="🔄 Новый поиск", callback_data="new_search"),
-        InlineKeyboardButton(text="❌ Закрыть", callback_data="close_keyboard")
-    ])
     
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
@@ -726,8 +721,7 @@ async def handle_general_question(message: Message, state: FSMContext, question_
             [
                 InlineKeyboardButton(text="🔢 Найти тест по коду", callback_data="search_by_code"),
                 InlineKeyboardButton(text="📝 Найти по названию", callback_data="search_by_name")
-            ],
-            [InlineKeyboardButton(text="🔄 Новый вопрос", callback_data="new_search")]
+            ]
         ])
         
         await message.answer("Что бы вы хотели сделать дальше?", reply_markup=keyboard)
@@ -1073,10 +1067,6 @@ async def handle_show_test_callback(callback: CallbackQuery, state: FSMContext):
             if row:
                 keyboard.append(row)
             
-            keyboard.append([
-                InlineKeyboardButton(text="🔄 Новый поиск", callback_data="new_search"),
-                InlineKeyboardButton(text="❌ Закрыть", callback_data="close_keyboard")
-            ])
             
             reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
         
@@ -1232,11 +1222,6 @@ async def handle_quick_test_selection(callback: CallbackQuery, state: FSMContext
             if row:
                 keyboard.append(row)
             
-            keyboard.append([
-                InlineKeyboardButton(text="🔄 Новый поиск", callback_data="new_search"),
-                InlineKeyboardButton(text="❌ Закрыть", callback_data="close_keyboard")
-            ])
-            
             reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
         
         # Отправляем как новое сообщение
@@ -1299,9 +1284,31 @@ async def start_question(message: Message, state: FSMContext):
     
     await state.set_state(QuestionStates.waiting_for_search_type)
 
-# Глобальный хендлер для кнопки возврата в меню (работает в любом состоянии)
+# Глобальный хендлер для кнопки завершения диалога (работает в любом состоянии)
+@questions_router.message(F.text == "❌ Завершить диалог")
+async def handle_end_dialog(message: Message, state: FSMContext):
+    current_state = await state.get_state()
+    user = await db.get_user(message.from_user.id)
+    role = user['role'] if 'role' in user.keys() else 'staff'
+    user_name = get_user_first_name(user)
+    
+    # Исключение: если пользователь нажал "задать вопрос ассистенту" и не ввел вопрос
+    if current_state == QuestionStates.waiting_for_search_type:
+        # Возвращаем в главное меню без прощания
+        await state.clear()
+        farewell = get_time_based_farewell(user_name)
+        await message.answer(farewell, reply_markup=get_menu_by_role(role))
+        return
+    
+    # Во всех остальных случаях завершаем диалог
+    await state.clear()
+    farewell = get_time_based_farewell(user_name)
+    await message.answer(farewell, reply_markup=get_menu_by_role(role))
+    return
+
+# Обработчик для старой кнопки (для совместимости)
 @questions_router.message(F.text == "🔙 Вернуться в главное меню")
-async def handle_back_to_menu(message: Message, state: FSMContext):
+async def handle_back_to_menu_legacy(message: Message, state: FSMContext):
     await state.clear()
     user = await db.get_user(message.from_user.id)
     role = user['role'] if 'role' in user.keys() else 'staff'
@@ -1314,8 +1321,8 @@ async def handle_universal_search(message: Message, state: FSMContext):
     text = message.text.strip()
     user_id = message.from_user.id
     
-    # Проверяем, не кнопка ли это возврата
-    if text == "🔙 Вернуться в главное меню":
+    # Проверяем, не кнопка ли это возврата или завершения диалога
+    if text == "🔙 Вернуться в главное меню" or text == "❌ Завершить диалог":
         return
     
     # Расширенная проверка для разных вариантов
@@ -1662,10 +1669,6 @@ async def handle_name_search(message: Message, state: FSMContext):
             if row:
                 keyboard.inline_keyboard.append(row)
             
-            keyboard.inline_keyboard.append([
-                InlineKeyboardButton(text="🔄 Новый поиск", callback_data="new_search")
-            ])
-            
             await message.answer(
                 "Выберите интересующий тест:",
                 reply_markup=keyboard
@@ -1714,14 +1717,6 @@ async def handle_dialog(message: Message, state: FSMContext):
     text = message.text.strip()
     user_id = message.from_user.id
     
-    if text == "❌ Завершить диалог":
-        await state.clear()
-        user = await db.get_user(user_id)
-        role = user['role'] if 'role' in user.keys() else 'staff'
-        user_name = get_user_first_name(user)
-        farewell = get_time_based_farewell(user_name)
-        await message.answer(farewell, reply_markup=get_menu_by_role(role))
-        return
         
     if text == "🔄 Новый вопрос":
         await handle_new_question_in_dialog(message, state)

@@ -1,3 +1,4 @@
+import json
 from typing import Optional
 import aiosqlite
 from datetime import datetime, timedelta
@@ -8,6 +9,444 @@ class Database:
     def __init__(self, db_path: str):
         self.db_path = db_path
         self.test_processor = DataProcessor()
+        
+    async def update_poll_media(self, poll_id, media_file_id, media_type):
+        """Добавление благодарственного медиа к опросу"""
+        async with aiosqlite.connect(self.db_path) as db:
+            # Проверяем, существует ли колонка, если нет - создаем
+            cursor = await db.execute("PRAGMA table_info(polls)")
+            columns = await cursor.fetchall()
+            column_names = [col[1] for col in columns]
+            
+            if 'thank_you_media' not in column_names:
+                await db.execute('ALTER TABLE polls ADD COLUMN thank_you_media TEXT')
+            if 'thank_you_media_type' not in column_names:
+                await db.execute('ALTER TABLE polls ADD COLUMN thank_you_media_type TEXT')
+            
+            await db.execute(
+                "UPDATE polls SET thank_you_media = ?, thank_you_media_type = ? WHERE id = ?",
+                (media_file_id, media_type, poll_id)
+            )
+            await db.commit()
+
+    async def get_poll_info(self, poll_id):
+        """Получение информации об опросе"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM polls WHERE id = ?",
+                (poll_id,)
+            )
+            row = await cursor.fetchone()
+            if row:
+                result = dict(row)
+                # Для обратной совместимости
+                if result.get('thank_you_media'):
+                    result['thank_you_video'] = result['thank_you_media']
+                return result
+            return None
+        
+    async def update_poll_video(self, poll_id, video_file_id):
+        """Добавление благодарственного видео к опросу"""
+        async with aiosqlite.connect(self.db_path) as db:
+            # Добавляем колонку если её нет
+            await db.execute('''
+                ALTER TABLE polls ADD COLUMN thank_you_video TEXT
+            ''')
+            
+            await db.execute(
+                "UPDATE polls SET thank_you_video = ? WHERE id = ?",
+                (video_file_id, poll_id)
+            )
+            await db.commit()
+        
+    async def create_poll(self, title, description, questions, created_by):
+        """Создание нового опроса"""
+        async with aiosqlite.connect(self.db_path) as db:
+            # Создаем таблицы для опросов если их нет
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS polls (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    description TEXT,
+                    created_by INTEGER,
+                    is_active BOOLEAN DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS poll_questions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    poll_id INTEGER,
+                    question_text TEXT NOT NULL,
+                    question_type TEXT NOT NULL,
+                    options TEXT,
+                    question_order INTEGER,
+                    FOREIGN KEY (poll_id) REFERENCES polls (id)
+                )
+            ''')
+            
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS poll_responses (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    poll_id INTEGER,
+                    question_id INTEGER,
+                    user_id INTEGER,
+                    answer TEXT,
+                    answered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (poll_id) REFERENCES polls (id),
+                    FOREIGN KEY (question_id) REFERENCES poll_questions (id)
+                )
+            ''')
+            
+            # Вставляем опрос
+            cursor = await db.execute(
+                "INSERT INTO polls (title, description, created_by) VALUES (?, ?, ?)",
+                (title, description, created_by)
+            )
+            poll_id = cursor.lastrowid
+            
+            # Вставляем вопросы
+            for idx, question in enumerate(questions):
+                options_json = json.dumps(question.get('options')) if question.get('options') else None
+                await db.execute(
+                    "INSERT INTO poll_questions (poll_id, question_text, question_type, options, question_order) VALUES (?, ?, ?, ?, ?)",
+                    (poll_id, question['text'], question['type'], options_json, idx + 1)
+                )
+            
+            await db.commit()
+            return poll_id
+
+    async def get_poll_info(self, poll_id):
+        """Получение информации об опросе"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM polls WHERE id = ?",
+                (poll_id,)
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def check_user_poll_participation(self, user_id, poll_id):
+        """Проверка участия пользователя в опросе"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM poll_responses WHERE user_id = ? AND poll_id = ?",
+                (user_id, poll_id)
+            )
+            count = await cursor.fetchone()
+            return count[0] > 0
+
+    async def get_poll_questions(self, poll_id):
+        """Получение вопросов опроса"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                SELECT id, question_text, question_type, options
+                FROM poll_questions
+                WHERE poll_id = ?
+                ORDER BY question_order
+            ''', (poll_id,))
+            
+            rows = await cursor.fetchall()
+            questions = []
+            for row in rows:
+                questions.append({
+                    'id': row[0],
+                    'text': row[1],
+                    'type': row[2],
+                    'options': json.loads(row[3]) if row[3] else None
+                })
+            return questions
+
+    async def save_poll_response(self, poll_id, question_id, user_id, answer):
+        """Сохранение ответа пользователя на вопрос опроса"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT INTO poll_responses (poll_id, question_id, user_id, answer) VALUES (?, ?, ?, ?)",
+                (poll_id, question_id, user_id, answer)
+            )
+            await db.commit()
+
+    async def get_active_polls(self):
+        """Получение активных опросов"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                SELECT 
+                    p.id,
+                    p.title,
+                    p.description,
+                    p.created_at,
+                    COUNT(DISTINCT pq.id) as questions_count,
+                    COUNT(DISTINCT pr.user_id) as responses_count
+                FROM polls p
+                LEFT JOIN poll_questions pq ON p.id = pq.poll_id
+                LEFT JOIN poll_responses pr ON p.id = pr.poll_id
+                WHERE p.is_active = 1
+                GROUP BY p.id
+                ORDER BY p.created_at DESC
+            ''')
+            
+            rows = await cursor.fetchall()
+            polls = []
+            for row in rows:
+                polls.append({
+                    'id': row[0],
+                    'title': row[1],
+                    'description': row[2],
+                    'created_at': row[3],
+                    'questions_count': row[4],
+                    'responses_count': row[5]
+                })
+            return polls
+
+    async def get_polls_with_results(self):
+        """Получение опросов с результатами"""
+        async with aiosqlite.connect(self.db_path) as db:
+            # Получаем все опросы
+            cursor = await db.execute('''
+                SELECT 
+                    p.id,
+                    p.title,
+                    COUNT(DISTINCT pr.user_id) as total_responses
+                FROM polls p
+                LEFT JOIN poll_responses pr ON p.id = pr.poll_id
+                GROUP BY p.id
+                HAVING total_responses > 0
+                ORDER BY p.created_at DESC
+            ''')
+            
+            polls_data = await cursor.fetchall()
+            polls = []
+            
+            for poll_row in polls_data:
+                poll_id = poll_row[0]
+                
+                # Получаем вопросы для каждого опроса
+                q_cursor = await db.execute('''
+                    SELECT id, question_text, question_type, options
+                    FROM poll_questions
+                    WHERE poll_id = ?
+                    ORDER BY question_order
+                ''', (poll_id,))
+                
+                questions_data = await q_cursor.fetchall()
+                questions = []
+                
+                for q_row in questions_data:
+                    question_id = q_row[0]
+                    question = {
+                        'text': q_row[1],
+                        'type': q_row[2]
+                    }
+                    
+                    if q_row[2] == 'rating':
+                        # Для рейтинга считаем среднее
+                        avg_cursor = await db.execute('''
+                            SELECT AVG(CAST(answer as REAL))
+                            FROM poll_responses
+                            WHERE question_id = ? AND answer IS NOT NULL
+                        ''', (question_id,))
+                        avg_row = await avg_cursor.fetchone()
+                        question['avg_rating'] = avg_row[0] if avg_row[0] else 0
+                        
+                    elif q_row[2] in ['single', 'multiple']:
+                        # Для вариантов считаем самый популярный
+                        top_cursor = await db.execute('''
+                            SELECT answer, COUNT(*) as cnt
+                            FROM poll_responses
+                            WHERE question_id = ?
+                            GROUP BY answer
+                            ORDER BY cnt DESC
+                            LIMIT 1
+                        ''', (question_id,))
+                        top_row = await top_cursor.fetchone()
+                        question['top_answer'] = top_row[0] if top_row else 'Нет ответов'
+                        
+                    else:  # text
+                        # Для текстовых просто считаем количество
+                        count_cursor = await db.execute('''
+                            SELECT COUNT(*)
+                            FROM poll_responses
+                            WHERE question_id = ?
+                        ''', (question_id,))
+                        count_row = await count_cursor.fetchone()
+                        question['answer_count'] = count_row[0]
+                    
+                    questions.append(question)
+                
+                polls.append({
+                    'title': poll_row[1],
+                    'total_responses': poll_row[2],
+                    'questions': questions
+                })
+            
+            return polls
+
+    async def get_full_poll_results(self):
+        """Получение полных результатов опросов для выгрузки"""
+        async with aiosqlite.connect(self.db_path) as db:
+            # Получаем все опросы
+            cursor = await db.execute('''
+                SELECT 
+                    p.id,
+                    p.title,
+                    p.description,
+                    p.is_active,
+                    p.created_at,
+                    COUNT(DISTINCT pr.user_id) as total_responses
+                FROM polls p
+                LEFT JOIN poll_responses pr ON p.id = pr.poll_id
+                GROUP BY p.id
+                ORDER BY p.created_at DESC
+            ''')
+            
+            polls_data = await cursor.fetchall()
+            polls = []
+            
+            for poll_row in polls_data:
+                poll_id = poll_row[0]
+                
+                # Получаем вопросы
+                q_cursor = await db.execute('''
+                    SELECT id, question_text, question_type, options
+                    FROM poll_questions
+                    WHERE poll_id = ?
+                    ORDER BY question_order
+                ''', (poll_id,))
+                
+                questions_data = await q_cursor.fetchall()
+                questions = []
+                
+                for q_row in questions_data:
+                    question_id = q_row[0]
+                    question_type = q_row[2]
+                    options = json.loads(q_row[3]) if q_row[3] else None
+                    
+                    question = {
+                        'text': q_row[1],
+                        'type': question_type
+                    }
+                    
+                    if question_type == 'rating':
+                        # Получаем все оценки с информацией о пользователях
+                        rating_cursor = await db.execute('''
+                            SELECT pr.answer, COUNT(*) as cnt
+                            FROM poll_responses pr
+                            WHERE pr.question_id = ?
+                            GROUP BY pr.answer
+                        ''', (question_id,))
+                        ratings = await rating_cursor.fetchall()
+                        
+                        total = sum(r[1] for r in ratings)
+                        sum_rating = sum(int(r[0]) * r[1] for r in ratings if r[0])
+                        question['avg_rating'] = sum_rating / total if total > 0 else 0
+                        
+                        # Добавляем детальную информацию
+                        detail_cursor = await db.execute('''
+                            SELECT pr.answer, u.name, u.telegram_id
+                            FROM poll_responses pr
+                            LEFT JOIN users u ON pr.user_id = u.telegram_id
+                            WHERE pr.question_id = ?
+                        ''', (question_id,))
+                        details = await detail_cursor.fetchall()
+                        question['detailed_answers'] = [
+                            {
+                                'answer': d[0],
+                                'user_name': d[1] or f'ID: {d[2]}',
+                                'user_id': d[2]
+                            }
+                            for d in details
+                        ]
+                        
+                    elif question_type in ['single', 'multiple']:
+                        # Статистика по вариантам
+                        question['options_stats'] = []
+                        if options:
+                            for option in options:
+                                count_cursor = await db.execute('''
+                                    SELECT COUNT(*)
+                                    FROM poll_responses
+                                    WHERE question_id = ? AND answer LIKE ?
+                                ''', (question_id, f'%{option}%'))
+                                count = (await count_cursor.fetchone())[0]
+                                
+                                total_cursor = await db.execute('''
+                                    SELECT COUNT(DISTINCT user_id)
+                                    FROM poll_responses
+                                    WHERE question_id = ?
+                                ''', (question_id,))
+                                total = (await total_cursor.fetchone())[0]
+                                
+                                percentage = (count / total * 100) if total > 0 else 0
+                                question['options_stats'].append({
+                                    'text': option,
+                                    'count': count,
+                                    'percentage': percentage
+                                })
+                        
+                        # Добавляем детальную информацию
+                        detail_cursor = await db.execute('''
+                            SELECT pr.answer, u.name, u.telegram_id, u.client_code
+                            FROM poll_responses pr
+                            LEFT JOIN users u ON pr.user_id = u.telegram_id
+                            WHERE pr.question_id = ?
+                        ''', (question_id,))
+                        details = await detail_cursor.fetchall()
+                        question['detailed_answers'] = [
+                            {
+                                'answer': d[0],
+                                'user_name': d[1] or f'ID: {d[2]}',
+                                'user_id': d[2],
+                                'client_code': d[3]
+                            }
+                            for d in details
+                        ]
+                        
+                    else:  # text
+                        # Получаем все текстовые ответы с информацией о пользователях
+                        text_cursor = await db.execute('''
+                            SELECT 
+                                pr.answer,
+                                u.name,
+                                u.telegram_id,
+                                u.client_code,
+                                u.user_type,
+                                pr.answered_at
+                            FROM poll_responses pr
+                            LEFT JOIN users u ON pr.user_id = u.telegram_id
+                            WHERE pr.question_id = ? AND pr.answer IS NOT NULL
+                            ORDER BY pr.answered_at DESC
+                        ''', (question_id,))
+                        text_answers = await text_cursor.fetchall()
+                        
+                        question['text_answers'] = [a[0] for a in text_answers]
+                        question['text_answers_detailed'] = [
+                            {
+                                'answer': a[0],
+                                'user_name': a[1] or f'ID: {a[2]}',
+                                'user_id': a[2],
+                                'client_code': a[3],
+                                'user_type': a[4],
+                                'answered_at': a[5]
+                            }
+                            for a in text_answers
+                        ]
+                    
+                    questions.append(question)
+                
+                polls.append({
+                    'id': poll_row[0],
+                    'title': poll_row[1],
+                    'description': poll_row[2],
+                    'is_active': poll_row[3],
+                    'created_at': poll_row[4],
+                    'total_responses': poll_row[5],
+                    'questions': questions
+                })
+            
+            return polls       
         
     async def add_search_history(self, user_id: int, search_query: str, 
                            found_test_code: str = None, search_type: str = 'text', 

@@ -1,7 +1,7 @@
 import random
 import string
 from aiogram import Router, F
-from aiogram.types import Message, BufferedInputFile
+from aiogram.types import Message, BufferedInputFile, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from bot.keyboards import (
@@ -36,6 +36,515 @@ class SystemStates(StatesGroup):
 class ViewFeedbackStates(StatesGroup):
     viewing_feedback = State()
     viewing_detailed = State()
+    
+class PollStates(StatesGroup):
+    poll_menu = State()
+    creating_title = State()
+    creating_description = State()
+    adding_questions = State()
+    entering_question = State()
+    setting_answer_type = State()
+    entering_options = State()
+    confirming_poll = State()
+    viewing_polls = State()
+    adding_thank_you_video = State()
+    viewing_results = State()
+    choosing_recipients = State() 
+    
+@admin_router.message(PollStates.adding_thank_you_video)
+async def handle_thank_you_video(message: Message, state: FSMContext):
+    if message.text == "➡️ Пропустить":
+        # Переходим к выбору получателей
+        await message.answer(
+            "Кому отправить опрос?",
+            reply_markup=get_broadcast_type_kb()
+        )
+        await state.set_state(PollStates.choosing_recipients)
+        
+    elif message.text == "🎬 Добавить медиа" or message.text == "🎬 Добавить видео":
+        await message.answer(
+            "📎 Отправьте видео или GIF для благодарственного сообщения:\n\n"
+            "Поддерживаемые форматы:\n"
+            "• MP4 видео\n"
+            "• Анимированные GIF\n",
+            reply_markup=get_back_to_menu_kb()
+        )
+        
+    # Автоматически определяем тип медиа
+    elif message.video:
+        # Это видео
+        data = await state.get_data()
+        poll_id = data['created_poll_id']
+        
+        await db.update_poll_media(poll_id, message.video.file_id, 'video')
+        
+        await message.answer(
+            "✅ Видео добавлено!\n\nКому отправить опрос?",
+            reply_markup=get_broadcast_type_kb()
+        )
+        await state.set_state(PollStates.choosing_recipients)
+        
+    elif message.animation:
+        # Это GIF
+        data = await state.get_data()
+        poll_id = data['created_poll_id']
+        
+        await db.update_poll_media(poll_id, message.animation.file_id, 'animation')
+        
+        await message.answer(
+            "✅ GIF добавлен!\n\nКому отправить опрос?",
+            reply_markup=get_broadcast_type_kb()
+        )
+        await state.set_state(PollStates.choosing_recipients)
+        
+    elif message.document:
+        # Проверяем, не GIF ли это в виде документа
+        if message.document.mime_type and 'gif' in message.document.mime_type.lower():
+            data = await state.get_data()
+            poll_id = data['created_poll_id']
+            
+            await db.update_poll_media(poll_id, message.document.file_id, 'document_gif')
+            
+            await message.answer(
+                "✅ GIF (документ) добавлен!\n\nКому отправить опрос?",
+                reply_markup=get_broadcast_type_kb()
+            )
+            await state.set_state(PollStates.choosing_recipients)
+        else:
+            await message.answer(
+                "❌ Пожалуйста, отправьте видео или GIF.\n"
+                "Или нажмите 'Пропустить' для продолжения без медиа.",
+                reply_markup=ReplyKeyboardMarkup(
+                    keyboard=[
+                        [KeyboardButton(text="🎬 Добавить видео")],
+                        [KeyboardButton(text="➡️ Пропустить")]
+                    ],
+                    resize_keyboard=True
+                )
+            )
+    
+    else:
+        await message.answer(
+            "Пожалуйста, отправьте видео/GIF или нажмите 'Пропустить'",
+            reply_markup=ReplyKeyboardMarkup(
+                keyboard=[
+                    [KeyboardButton(text="🎬 Добавить видео")],
+                    [KeyboardButton(text="➡️ Пропустить")]
+                ],
+                resize_keyboard=True
+            )
+        )
+
+@admin_router.message(PollStates.adding_questions)
+async def handle_poll_questions(message: Message, state: FSMContext):
+    if message.text == "❌ Отменить создание":
+        await state.clear()
+        await message.answer("Создание опроса отменено.", reply_markup=get_admin_menu_kb())
+        return
+    
+    elif message.text == "➕ Добавить вопрос":
+        await message.answer(
+            "Введите текст вопроса:",
+            reply_markup=get_back_to_menu_kb()
+        )
+        await state.set_state(PollStates.entering_question)
+    
+    elif message.text == "✅ Завершить создание":
+        data = await state.get_data()
+        questions = data.get('poll_questions', [])
+        
+        if not questions:
+            await message.answer(
+                "❌ Опрос должен содержать хотя бы один вопрос!",
+                reply_markup=get_poll_creation_kb()
+            )
+            return
+        
+        # Создаем опрос в БД
+        poll_id = await db.create_poll(
+            title=data['poll_title'],
+            description=data.get('poll_description'),
+            questions=questions,
+            created_by=message.from_user.id
+        )
+
+        # Сохраняем данные опроса для рассылки
+        await state.update_data(
+            created_poll_id=poll_id,
+            created_poll_title=data['poll_title']
+        )
+
+        # Спрашиваем про видео
+        await message.answer(
+            f"✅ Опрос '{data['poll_title']}' создан!\n\n"
+            "Хотите добавить благодарственное медиа после опроса?\n"
+            "(поддерживается видео и GIF)",
+            reply_markup=ReplyKeyboardMarkup(
+                keyboard=[
+                    [KeyboardButton(text="🎬 Добавить медиа")],
+                    [KeyboardButton(text="➡️ Пропустить")]
+                ],
+                resize_keyboard=True
+            )
+        )
+        await state.set_state(PollStates.adding_thank_you_video)
+        return  
+
+@admin_router.message(PollStates.choosing_recipients)
+async def send_poll_to_users(message: Message, state: FSMContext):
+    if message.text == "🔙 Вернуться в главное меню":
+        await state.clear()
+        await message.answer("Опрос создан, но не отправлен.", reply_markup=get_admin_menu_kb())
+        return
+    
+    broadcast_types = {
+        "📢 Всем пользователям": "all",
+        "👨‍⚕️ Только клиентам": "clients",
+        "🔬 Только сотрудникам": "employees"
+    }
+    
+    if message.text not in broadcast_types:
+        await message.answer(
+            "Выберите тип рассылки из предложенных вариантов.",
+            reply_markup=get_broadcast_type_kb()
+        )
+        return
+    
+    broadcast_type = broadcast_types[message.text]
+    recipients = await db.get_broadcast_recipients(broadcast_type)
+    
+    if not recipients:
+        await message.answer(
+            "❌ Не найдено получателей для рассылки.",
+            reply_markup=get_admin_menu_kb()
+        )
+        await state.clear()
+        return
+    
+    loading_msg = await message.answer(f"📤 Отправляю опрос {len(recipients)} пользователям...")
+    
+    data = await state.get_data()
+    poll_id = data['created_poll_id']
+    poll_title = data['created_poll_title']
+    
+    # Отправляем опрос пользователям
+    from bot.handlers import bot
+    from bot.handlers.poll_sender import send_poll_to_user
+    
+    success_count = 0
+    failed_count = 0
+    
+    for user_id in recipients:
+        try:
+            await send_poll_to_user(bot, user_id, poll_id)
+            success_count += 1
+            await asyncio.sleep(0.1)
+        except Exception as e:
+            failed_count += 1
+            print(f"Failed to send poll to {user_id}: {e}")
+    
+    await loading_msg.delete()
+    await message.answer(
+        f"✅ Опрос отправлен!\n\n"
+        f"📤 Успешно: {success_count}\n"
+        f"❌ Неудачно: {failed_count}",
+        reply_markup=get_admin_menu_kb()
+    )
+    await state.clear()
+
+# Добавляем клавиатуры для опросов
+def get_poll_management_kb():
+    from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+    keyboard = [
+        [KeyboardButton(text="📝 Создать опрос")],
+        [KeyboardButton(text="📊 Активные опросы")],
+        [KeyboardButton(text="📈 Результаты опросов")],
+        [KeyboardButton(text="📥 Выгрузить результаты")],
+        [KeyboardButton(text="🔙 Назад")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+
+def get_poll_answer_type_kb():
+    from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+    keyboard = [
+        [KeyboardButton(text="📝 Текстовый ответ")],
+        [KeyboardButton(text="☑️ Один вариант")],
+        [KeyboardButton(text="✅ Несколько вариантов")],
+        [KeyboardButton(text="⭐ Оценка (1-5)")],
+        [KeyboardButton(text="🔙 Отмена")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+
+def get_poll_creation_kb():
+    from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+    keyboard = [
+        [KeyboardButton(text="➕ Добавить вопрос")],
+        [KeyboardButton(text="✅ Завершить создание")],
+        [KeyboardButton(text="❌ Отменить создание")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+
+@admin_router.message(F.text == "📋 Опросы")
+async def poll_management(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    
+    user = await db.get_user(user_id)
+    if not user or user['role'] != 'admin':
+        await message.answer("У вас нет доступа к этой функции.")
+        return
+    
+    await message.answer(
+        "📋 Управление опросами\n\n"
+        "Здесь вы можете создавать опросы, просматривать результаты и выгружать статистику.",
+        reply_markup=get_poll_management_kb()
+    )
+    await state.set_state(PollStates.poll_menu)
+
+@admin_router.message(PollStates.poll_menu, F.text == "📝 Создать опрос")
+async def create_poll_start(message: Message, state: FSMContext):
+    await message.answer(
+        "📝 Создание нового опроса\n\n"
+        "Введите название опроса:",
+        reply_markup=get_back_to_menu_kb()
+    )
+    await state.set_state(PollStates.creating_title)
+
+@admin_router.message(PollStates.creating_title)
+async def create_poll_title(message: Message, state: FSMContext):
+    if message.text == "🔙 Вернуться в главное меню":
+        await state.clear()
+        await message.answer("Операция отменена.", reply_markup=get_admin_menu_kb())
+        return
+    
+    await state.update_data(poll_title=message.text)
+    await message.answer(
+        "Введите описание опроса (или отправьте '-' для пропуска):",
+        reply_markup=get_back_to_menu_kb()
+    )
+    await state.set_state(PollStates.creating_description)
+
+@admin_router.message(PollStates.creating_description)
+async def create_poll_description(message: Message, state: FSMContext):
+    if message.text == "🔙 Вернуться в главное меню":
+        await state.clear()
+        await message.answer("Операция отменена.", reply_markup=get_admin_menu_kb())
+        return
+    
+    description = None if message.text == "-" else message.text
+    await state.update_data(poll_description=description, poll_questions=[])
+    
+    await message.answer(
+        "Теперь добавим вопросы к опросу.",
+        reply_markup=get_poll_creation_kb()
+    )
+    await state.set_state(PollStates.adding_questions)
+
+
+@admin_router.message(PollStates.entering_question)
+async def enter_question_text(message: Message, state: FSMContext):
+    if message.text == "🔙 Вернуться в главное меню":
+        await state.set_state(PollStates.adding_questions)
+        await message.answer(
+            "Добавление вопроса отменено.",
+            reply_markup=get_poll_creation_kb()
+        )
+        return
+    
+    await state.update_data(current_question_text=message.text)
+    await message.answer(
+        "Выберите тип ответа на этот вопрос:",
+        reply_markup=get_poll_answer_type_kb()
+    )
+    await state.set_state(PollStates.setting_answer_type)
+
+@admin_router.message(PollStates.setting_answer_type)
+async def set_answer_type(message: Message, state: FSMContext):
+    if message.text == "🔙 Отмена":
+        await state.set_state(PollStates.adding_questions)
+        await message.answer(
+            "Добавление вопроса отменено.",
+            reply_markup=get_poll_creation_kb()
+        )
+        return
+    
+    answer_types = {
+        "📝 Текстовый ответ": "text",
+        "☑️ Один вариант": "single",
+        "✅ Несколько вариантов": "multiple",
+        "⭐ Оценка (1-5)": "rating"
+    }
+    
+    if message.text not in answer_types:
+        await message.answer(
+            "Выберите тип ответа из предложенных вариантов.",
+            reply_markup=get_poll_answer_type_kb()
+        )
+        return
+    
+    answer_type = answer_types[message.text]
+    await state.update_data(current_answer_type=answer_type)
+    
+    if answer_type in ["single", "multiple"]:
+        await message.answer(
+            "Введите варианты ответов через запятую:\n"
+            "Например: Да, Нет, Не знаю",
+            reply_markup=get_back_to_menu_kb()
+        )
+        await state.set_state(PollStates.entering_options)
+    else:
+        # Для текстовых ответов и рейтинга сразу сохраняем вопрос
+        data = await state.get_data()
+        questions = data.get('poll_questions', [])
+        
+        new_question = {
+            'text': data['current_question_text'],
+            'type': answer_type,
+            'options': None
+        }
+        questions.append(new_question)
+        
+        await state.update_data(poll_questions=questions)
+        await message.answer(
+            f"✅ Вопрос добавлен! Всего вопросов: {len(questions)}",
+            reply_markup=get_poll_creation_kb()
+        )
+        await state.set_state(PollStates.adding_questions)
+
+@admin_router.message(PollStates.entering_options)
+async def enter_options(message: Message, state: FSMContext):
+    if message.text == "🔙 Вернуться в главное меню":
+        await state.set_state(PollStates.adding_questions)
+        await message.answer(
+            "Добавление вопроса отменено.",
+            reply_markup=get_poll_creation_kb()
+        )
+        return
+    
+    options = [opt.strip() for opt in message.text.split(',')]
+    
+    if len(options) < 2:
+        await message.answer(
+            "❌ Необходимо указать минимум 2 варианта ответа.\n"
+            "Введите варианты через запятую:",
+            reply_markup=get_back_to_menu_kb()
+        )
+        return
+    
+    data = await state.get_data()
+    questions = data.get('poll_questions', [])
+    
+    new_question = {
+        'text': data['current_question_text'],
+        'type': data['current_answer_type'],
+        'options': options
+    }
+    questions.append(new_question)
+    
+    await state.update_data(poll_questions=questions)
+    await message.answer(
+        f"✅ Вопрос добавлен! Всего вопросов: {len(questions)}",
+        reply_markup=get_poll_creation_kb()
+    )
+    await state.set_state(PollStates.adding_questions)
+
+@admin_router.message(PollStates.poll_menu, F.text == "📊 Активные опросы")
+async def view_active_polls(message: Message):
+    polls = await db.get_active_polls()
+    
+    if not polls:
+        await message.answer(
+            "Нет активных опросов.",
+            reply_markup=get_poll_management_kb()
+        )
+        return
+    
+    text = "📊 Активные опросы:\n\n"
+    for poll in polls:
+        text += f"🔸 {poll['title']}\n"
+        text += f"   ID: {poll['id']}\n"
+        text += f"   Вопросов: {poll['questions_count']}\n"
+        text += f"   Ответов: {poll['responses_count']}\n"
+        text += f"   Создан: {poll['created_at']}\n\n"
+    
+    await message.answer(text, reply_markup=get_poll_management_kb())
+
+@admin_router.message(PollStates.poll_menu, F.text == "📈 Результаты опросов")
+async def view_poll_results(message: Message, state: FSMContext):
+    polls = await db.get_polls_with_results()
+    
+    if not polls:
+        await message.answer(
+            "Нет опросов с результатами.",
+            reply_markup=get_poll_management_kb()
+        )
+        return
+    
+    text = "📈 Результаты опросов:\n\n"
+    for poll in polls:
+        text += f"📊 {poll['title']}\n"
+        text += f"Участников: {poll['total_responses']}\n"
+        
+        # Показываем краткую статистику по каждому вопросу
+        for q_idx, question in enumerate(poll['questions'], 1):
+            text += f"\n{q_idx}. {question['text']}\n"
+            
+            if question['type'] == 'rating':
+                avg_rating = question.get('avg_rating', 0)
+                text += f"   Средняя оценка: ⭐ {avg_rating:.1f}\n"
+            elif question['type'] in ['single', 'multiple']:
+                top_answer = question.get('top_answer', 'Нет ответов')
+                text += f"   Популярный ответ: {top_answer}\n"
+            else:
+                text += f"   Ответов: {question.get('answer_count', 0)}\n"
+        
+        text += "─" * 30 + "\n"
+    
+    await message.answer(text, reply_markup=get_poll_management_kb())
+
+@admin_router.message(PollStates.poll_menu, F.text == "📥 Выгрузить результаты")
+async def export_poll_results(message: Message):
+    loading_msg = await message.answer("⏳ Подготавливаю выгрузку результатов опросов...")
+    
+    try:
+        # Получаем все результаты опросов
+        polls_data = await db.get_full_poll_results()
+        
+        if not polls_data:
+            await loading_msg.delete()
+            await message.answer(
+                "Нет данных для выгрузки.",
+                reply_markup=get_poll_management_kb()
+            )
+            return
+        
+        # Создаем Excel файл с результатами
+        from utils.poll_exporter import PollExporter
+        exporter = PollExporter()
+        excel_data = await exporter.export_polls_to_excel(polls_data)
+        
+        filename = f"poll_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        
+        await loading_msg.delete()
+        await message.answer_document(
+            BufferedInputFile(excel_data, filename),
+            caption=f"📊 Результаты опросов\n📅 Дата выгрузки: {datetime.now().strftime('%d.%m.%Y %H:%M')}",
+            reply_markup=get_poll_management_kb()
+        )
+        
+    except Exception as e:
+        await loading_msg.delete()
+        await message.answer(
+            f"❌ Ошибка при выгрузке: {str(e)}",
+            reply_markup=get_poll_management_kb()
+        )
+
+@admin_router.message(PollStates.poll_menu, F.text == "🔙 Назад")
+async def back_from_polls(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        "Главное меню администратора",
+        reply_markup=get_admin_menu_kb()
+    )
 
 # Добавим новую функцию для клавиатуры выбора типа контента
 def get_broadcast_content_type_kb():
