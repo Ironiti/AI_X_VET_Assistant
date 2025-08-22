@@ -29,46 +29,53 @@ def create_question_keyboard(poll_id, question_id, question_type, options, quest
     keyboard = []
     
     if question_type == 'single' and options:
-        # Один вариант ответа
-        for option in options:
+        # Один вариант ответа с красивыми кружками
+        for i, option in enumerate(options):
             keyboard.append([InlineKeyboardButton(
-                text=f"◯ {option}",
+                text=f"⚪ {option}",
                 callback_data=f"answer_single:{poll_id}:{question_id}:{question_index}:{option[:20]}"
             )])
     
     elif question_type == 'multiple' and options:
-        # Несколько вариантов - используем состояние для сбора
+        # Несколько вариантов с чекбоксами
         for option in options:
             keyboard.append([InlineKeyboardButton(
-                text=f"☐ {option}",
+                text=f"▢ {option}",
                 callback_data=f"toggle_multi:{poll_id}:{question_id}:{option[:20]}"
             )])
         keyboard.append([InlineKeyboardButton(
-            text="✅ Подтвердить выбор",
+            text="✅ Готово • Подтвердить выбор",
             callback_data=f"confirm_multi:{poll_id}:{question_id}:{question_index}"
         )])
     
     elif question_type == 'rating':
-        # Рейтинг от 1 до 10 в две строки
+        # Рейтинг с визуальными индикаторами
         row1 = []
         row2 = []
+        
+        # Первая строка (1-5) с градиентом от плохого к среднему
+        emojis1 = ["😟", "😕", "😐", "🙂", "😊"]
         for i in range(1, 6):
             row1.append(InlineKeyboardButton(
-                text=str(i),
+                text=f"{emojis1[i-1]} {i}",
                 callback_data=f"answer_rating:{poll_id}:{question_id}:{question_index}:{i}"
             ))
+        
+        # Вторая строка (6-10) от хорошего к отличному
+        emojis2 = ["😃", "😄", "🤗", "🤩", "🌟"]
         for i in range(6, 11):
             row2.append(InlineKeyboardButton(
-                text=str(i),
+                text=f"{emojis2[i-6]} {i}",
                 callback_data=f"answer_rating:{poll_id}:{question_id}:{question_index}:{i}"
             ))
+        
         keyboard.append(row1)
         keyboard.append(row2)
     
     elif question_type == 'text':
         # Для текстового ответа
         keyboard.append([InlineKeyboardButton(
-            text="💬 Написать ответ",
+            text="✏️ Написать ответ",
             callback_data=f"answer_text:{poll_id}:{question_id}:{question_index}"
         )])
     
@@ -88,20 +95,28 @@ async def send_poll_to_user(bot, user_id, poll_id):
     
     questions = await db.get_poll_questions(poll_id)
     
+    # Красивый заголовок с градиентом эмодзи
     text = (
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "     📊 <b>НОВЫЙ ОПРОС</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"<b>{poll_info['title']}</b>\n"
+        "✨ ━━━━━━━━━━━━━━━━━━━━━ ✨\n"
+        "        💫 <b>НОВЫЙ ОПРОС</b> 💫\n"
+        "✨ ━━━━━━━━━━━━━━━━━━━━━ ✨\n\n"
+        f"📌 <b>{poll_info['title'].upper()}</b>\n"
     )
     
     if poll_info.get('description'):
-        text += f"\n📝 <i>{poll_info['description']}</i>\n"
+        text += f"\n💬 <i>{poll_info['description']}</i>\n"
     
-    text += f"\n📋 Вопросов: <b>{len(questions)}</b>\n"
-    text += f"⏱ Время: <b>~{len(questions) * 30} сек.</b>\n\n"
-    text += "━━━━━━━━━━━━━━━━━━━━━\n"
-    text += "Нажмите кнопку ниже для начала 👇"
+    text += "\n" + "─" * 30 + "\n\n"
+    
+    # Информация в виде карточек
+    text += f"📊 <b>Количество вопросов:</b> {len(questions)}\n"
+    text += f"⏱ <b>Время прохождения:</b> ~{len(questions) * 30} секунд\n"
+    text += f"🎯 <b>Тип:</b> Быстрый опрос\n\n"
+    
+    # Мотивационный текст
+    text += "💡 <i>Ваше мнение поможет нам стать лучше!</i>\n\n"
+    text += "✨ ━━━━━━━━━━━━━━━━━━━━━ ✨\n"
+    text += "        Готовы начать? 🚀"
     
     await bot.send_message(
         user_id,
@@ -151,23 +166,58 @@ async def show_poll_question(message, state: FSMContext, user_id: int):
     question = questions[current_index]
     poll_id = data['poll_id']
     
-    # Прогресс бар
-    progress = "█" * (current_index + 1) + "░" * (len(questions) - current_index - 1)
+    # Расчет прогресса - считаем только завершенные вопросы
+    progress_percent = (current_index / len(questions)) * 100  # Убрали +1
     
+    # Батарея прогресса с изменением цвета
+    if progress_percent == 0:
+        battery_emoji = "⚪"
+        battery_icon = "🪫"  # Полностью разряженная батарея
+    elif progress_percent <= 25:
+        battery_emoji = "🔴"
+        battery_icon = "🪫"
+    elif progress_percent <= 50:
+        battery_emoji = "🟠"
+        battery_icon = "🔋"
+    elif progress_percent <= 75:
+        battery_emoji = "🟡"
+        battery_icon = "🔋"
+    else:
+        battery_emoji = "🟢"
+        battery_icon = "🔋"
+    
+    # Визуальный прогресс-бар
+    filled = int((progress_percent / 100) * 10)
+    empty = 10 - filled
+    progress_bar = battery_emoji * filled + "⚪" * empty
+    
+    # Красивый заголовок
     text = (
-        f"<b>Вопрос {current_index + 1} из {len(questions)}</b>\n"
-        f"[{progress}]\n\n"
-        f"❓ <b>{question['text']}</b>\n"
+        f"{battery_icon} <b>ВОПРОС {current_index + 1}/{len(questions)}</b>\n"
+        f"{progress_bar} <code>{int(progress_percent)}%</code>\n"
+        f"{'─' * 25}\n\n"
     )
     
+    # Эмодзи для типов вопросов
+    question_emojis = {
+        'text': '',
+        'single': '🎯',
+        'multiple': '🎨',
+        'rating': ''
+    }
+    
+    emoji = question_emojis.get(question['type'], '❓')
+    text += f"{emoji} <b>{question['text']}</b>\n\n"
+    
+    # Красивые подсказки для каждого типа
     if question['type'] == 'text':
-        text += "\n💡 <i>Нажмите кнопку ниже для ввода текстового ответа</i>"
+        text += "╰➤ <i>Поделитесь своими мыслями в текстовом сообщении</i> ✍️"
     elif question['type'] == 'multiple':
-        text += "\n☑️ <i>Можно выбрать несколько вариантов</i>"
+        text += "╰➤ <i>Можете выбрать несколько подходящих вариантов</i> 🔲"
     elif question['type'] == 'rating':
-        text += "\n📊 <i>Оцените от 1 (минимум) до 10 (максимум)</i>"
+        text += "╰➤ <i>Оцените по шкале от 1 до 10</i> 📊"
     elif question['type'] == 'single':
-        text += "\n📌 <i>Выберите один вариант ответа</i>"
+        text += "╰➤ <i>Выберите наиболее подходящий вариант</i> ⚡"
     
     keyboard = create_question_keyboard(
         poll_id,
@@ -339,16 +389,22 @@ async def handle_multi_toggle(callback: CallbackQuery, state: FSMContext):
     # Обновляем клавиатуру с отмеченными опциями
     keyboard = []
     for opt in current_question.get('options', []):
-        icon = "☑" if opt in selected else "☐"
+        icon = "▣" if opt in selected else "▢"
         keyboard.append([InlineKeyboardButton(
             text=f"{icon} {opt}",
             callback_data=f"toggle_multi:{poll_id}:{question_id}:{opt[:20]}"
         )])
     
-    keyboard.append([InlineKeyboardButton(
-        text="✅ Подтвердить выбор" if selected else "⚠️ Выберите хотя бы один вариант",
-        callback_data=f"confirm_multi:{poll_id}:{question_id}:{current_index}"
-    )])
+    if selected:
+        keyboard.append([InlineKeyboardButton(
+            text=f"✅ Готово • Выбрано: {len(selected)}",
+            callback_data=f"confirm_multi:{poll_id}:{question_id}:{current_index}"
+        )])
+    else:
+        keyboard.append([InlineKeyboardButton(
+            text="⚠️ Выберите хотя бы один вариант",
+            callback_data=f"confirm_multi:{poll_id}:{question_id}:{current_index}"
+        )])
     
     await callback.message.edit_reply_markup(
         reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
