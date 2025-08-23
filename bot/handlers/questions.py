@@ -2,10 +2,13 @@ from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.filters import Command
 from bot.keyboards import get_menu_by_role, get_dialog_kb, get_back_to_menu_kb, get_search_type_kb
 from langchain.schema import SystemMessage, HumanMessage, Document
 import pytz
 import asyncio
+import base64
+import urllib.parse
 import html
 import re
 from typing import Optional, Dict, List, Tuple
@@ -14,6 +17,8 @@ from datetime import datetime
 from src.database.db_init import db
 from src.data_vectorization import DataProcessor
 from models.models_init import Google_Gemini_2_5_Flash_Lite as llm
+
+BOT_USERNAME = "AI_VET_UNION_BOT"
 
 LOADING_GIF_ID = "CgACAgIAAxkBAAMIaGr_qy1Wxaw2VrBrm3dwOAkYji4AAu54AAKmqHlJAtZWBziZvaA2BA"
 # LOADING_GIF_ID = "CgACAgIAAxkBAAIBFGiBcXtGY7OZvr3-L1dZIBRNqSztAALueAACpqh5Scn4VmIRb4UjNgQ"
@@ -85,6 +90,84 @@ def is_test_code_pattern(text: str) -> bool:
             
     return False
 
+def simple_translit(text: str) -> str:
+    """Простая транслитерация для deep links."""
+    translit_map = {
+        'А': 'A', 'Б': 'B', 'В': 'V', 'Г': 'G', 'Д': 'D', 'Е': 'E', 'Ё': 'YO',
+        'Ж': 'ZH', 'З': 'Z', 'И': 'I', 'Й': 'Y', 'К': 'K', 'Л': 'L', 'М': 'M',
+        'Н': 'N', 'О': 'O', 'П': 'P', 'Р': 'R', 'С': 'S', 'Т': 'T', 'У': 'U',
+        'Ф': 'F', 'Х': 'KH', 'Ц': 'TS', 'Ч': 'CH', 'Ш': 'SH', 'Щ': 'SCH',
+        'Ъ': '', 'Ы': 'YI', 'Ь': '', 'Э': 'EH', 'Ю': 'YU', 'Я': 'YA'  # Изменил Э->EH и Ы->YI
+    }
+    
+    result = ''
+    for char in text.upper():
+        if char in translit_map:
+            result += translit_map[char]
+        else:
+            result += char
+    return result
+
+def reverse_translit(text: str) -> str:
+    """Обратная транслитерация для deep links."""
+    # Важно: проверяем сначала длинные комбинации
+    reverse_map = [
+        ('SCH', 'Щ'), ('SH', 'Ш'), ('CH', 'Ч'), ('KH', 'Х'), ('ZH', 'Ж'),
+        ('YU', 'Ю'), ('YA', 'Я'), ('YO', 'Ё'), ('TS', 'Ц'), ('YI', 'Ы'),
+        ('EH', 'Э'),  # Добавил EH->Э ПЕРЕД обычным E
+        ('A', 'А'), ('B', 'Б'), ('V', 'В'), ('G', 'Г'), ('D', 'Д'),
+        ('E', 'Е'), ('Z', 'З'), ('I', 'И'), ('Y', 'Й'), ('K', 'К'),
+        ('L', 'Л'), ('M', 'М'), ('N', 'Н'), ('O', 'О'), ('P', 'П'),
+        ('R', 'Р'), ('S', 'С'), ('T', 'Т'), ('U', 'У'), ('F', 'Ф')
+    ]
+    
+    result = text.upper()
+    
+    # Заменяем только суффиксы после цифр
+    import re
+    match = re.match(r'^(AN\d+)(.+)$', result)
+    if match:
+        prefix = match.group(1)
+        suffix = match.group(2)
+        
+        # Преобразуем только суффикс
+        for lat, cyr in reverse_map:
+            suffix = suffix.replace(lat, cyr)
+        
+        result = prefix + suffix
+    
+    return result
+
+def reverse_translit(text: str) -> str:
+    """Обратная транслитерация для deep links."""
+    # Словарь для обратной транслитерации
+    reverse_map = {
+        'SCH': 'Щ', 'SH': 'Ш', 'CH': 'Ч', 'KH': 'Х', 'ZH': 'Ж',
+        'YU': 'Ю', 'YA': 'Я', 'YO': 'Ё', 'TS': 'Ц', 'YI': 'Ы', 
+        'EH': 'Э',
+        'A': 'А', 'B': 'Б', 'V': 'В', 'G': 'Г', 'D': 'Д',
+        'E': 'Е', 'Z': 'З', 'I': 'И', 'Y': 'Й', 'K': 'К',
+        'L': 'Л', 'M': 'М', 'N': 'Н', 'O': 'О', 'P': 'П',
+        'R': 'Р', 'S': 'С', 'T': 'Т', 'U': 'У', 'F': 'Ф', 'H': 'Х'
+    }
+    
+    result = text.upper()
+    
+    # Сортируем ключи по длине (сначала длинные комбинации)
+    sorted_keys = sorted(reverse_map.keys(), key=len, reverse=True)
+    
+    # Заменяем все вхождения
+    for lat in sorted_keys:
+        cyr = reverse_map[lat]
+        result = result.replace(lat, cyr)
+    
+    return result
+
+def create_test_link(test_code: str) -> str:
+    """Создает deep link для теста с транслитерацией."""
+    safe_code = simple_translit(test_code)
+    return f"https://t.me/{BOT_USERNAME}?start=test_{safe_code}"
+
 def normalize_test_code(text: str) -> str:
     """Нормализует введенный код теста."""
     text = text.strip().upper().replace(' ', '')
@@ -99,6 +182,13 @@ def normalize_test_code(text: str) -> str:
     elif re.match(r'^\d', text):
         text = f"AN{text}"
     
+    return text
+
+def fix_bold(text: str) -> str:
+    """Заменяет markdown жирный текст на HTML."""
+    import re
+    # Заменяем **текст** на <b>текст</b>
+    text = re.sub(r'\*\*([^\*]+)\*\*', r'<b>\1</b>', text)
     return text
 
 def calculate_fuzzy_score(query: str, test_code: str, test_name: str = "") -> float:
@@ -295,6 +385,18 @@ def create_similar_tests_keyboard(similar_tests: List[Tuple[Document, float]], c
     
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
+@questions_router.message(Command("test_link"))
+async def test_link_generation(message: Message):
+    """Тестовая команда для проверки генерации ссылок"""
+    test_codes = ["AN506ГИЭ", "AN511", "AN512-A", "AN712БТК"]
+    
+    response = "🔗 Тестовые ссылки:\n\n"
+    for code in test_codes:
+        link = create_test_link(code)
+        response += f"Код: <code>{code}</code>\nСсылка: <a href='{link}'>Нажмите здесь</a>\n\n"
+    
+    await message.answer(response, parse_mode="HTML", disable_web_page_preview=True)
+
 @questions_router.callback_query(F.data == "close_keyboard")
 async def handle_close_keyboard(callback: CallbackQuery):
     await callback.answer()
@@ -313,6 +415,56 @@ def format_similar_tests_text(similar_tests: List[Tuple[Document, float]], max_d
         if len(test_name) > 50:
             test_name = test_name[:47] + "..."
         text += f"• <code>{test_code}</code> - {test_name}\n"
+    
+    if len(similar_tests) > max_display:
+        text += f"\n<i>Показаны {max_display} из {len(similar_tests)} найденных</i>"
+    
+    return text
+
+def format_test_info_with_links(test_data: Dict) -> str:
+    """Форматирует информацию о тесте с кликабельными ссылками на похожие тесты."""
+    t_type = 'Тест' if test_data['type'] == 'Тесты' else 'Профиль'
+    
+    # Базовая информация
+    test_name = html.escape(test_data['test_name'])
+    container_type = html.escape(test_data['container_type'])
+    # ... остальные поля
+    
+    return (
+        f"<b>{t_type}: {test_data['test_code']} - {test_name}</b>\n\n"
+        f"🧪 <b>Тип контейнера:</b> {container_type}\n"
+        # ... остальная информация
+    )
+
+# Добавьте обработчик deep links в начало роутера:
+@questions_router.message(F.text.regexp(r'^/start test_(.+)'))
+async def handle_deep_link_test(message: Message, state: FSMContext):
+    """Обработчик deep link для быстрого открытия теста."""
+    match = re.match(r'^/start test_(.+)', message.text)
+    if match:
+        test_code = match.group(1).replace("_", " ")
+        
+        # Имитируем ввод кода теста
+        message.text = test_code
+        await state.set_state(QuestionStates.waiting_for_code)
+        await handle_code_search(message, state)
+
+# Модифицируйте вывод похожих тестов:
+def format_similar_tests_with_links(similar_tests: List[Tuple[Document, float]], max_display: int = 5) -> str:
+    """Форматирует текст с кликабельными ссылками на похожие тесты."""
+    if not similar_tests:
+        return ""
+    
+    text = "\n<b>📋 Похожие тесты (нажмите на код):</b>\n"
+    for doc, score in similar_tests[:max_display]:
+        test_code = doc.metadata.get('test_code', '')
+        test_name = doc.metadata.get('test_name', '')
+        if len(test_name) > 40:
+            test_name = test_name[:37] + "..."
+        
+        # Создаем кликабельную ссылку
+        link = create_test_link(test_code)
+        text += f"• <a href='{link}'>{test_code}</a> - {test_name}\n"
     
     if len(similar_tests) > max_display:
         text += f"\n<i>Показаны {max_display} из {len(similar_tests)} найденных</i>"
@@ -699,9 +851,8 @@ async def handle_general_question(message: Message, state: FSMContext, question_
     loading_msg = await message.answer("🤔 Обрабатываю ваш вопрос...")
     
     try:
-        system_prompt = """Ты - ассистент лаборатории VetUnion. 
-        Отвечай на вопросы о лабораторных исследованиях, преаналитике, условиях хранения образцов.
-        Если вопрос касается конкретного теста, предложи воспользоваться поиском по коду или названию.
+        system_prompt = """Ты - ассистент ветеринарной лаборатории VetUnion. 
+        Ты отвечаешь на все вопросы в области ветеринарии исходя из вопроса, который тебе задали и ты знаешь профессиональный сленг. 
         Отвечай кратко и по существу на русском языке."""
         
         response = await llm.agenerate([[
@@ -710,7 +861,7 @@ async def handle_general_question(message: Message, state: FSMContext, question_
         ]])
         
         answer = response.generations[0][0].text.strip()
-        
+        answer = fix_bold(answer)
         # Статистика уже сохранена в handle_universal_search
         
         await loading_msg.delete()
@@ -1347,6 +1498,7 @@ async def handle_universal_search(message: Message, state: FSMContext):
     else:
         # Длинный вопрос - возможно, общий вопрос
         # Сначала пробуем найти тест
+
         processor = DataProcessor()
         processor.load_vector_store()
         
@@ -1554,6 +1706,7 @@ async def handle_new_search(callback: CallbackQuery, state: FSMContext):
     if last_viewed:
         await state.update_data(last_viewed_test=last_viewed)
 
+# Замените функцию handle_name_search на эту версию:
 @questions_router.message(QuestionStates.waiting_for_name)
 async def handle_name_search(message: Message, state: FSMContext):
     """Handle test name search using RAG."""
@@ -1620,72 +1773,77 @@ async def handle_name_search(message: Message, state: FSMContext):
         await safe_delete_message(gif_msg)
         
         if len(selected_docs) > 1:
-            # Show multiple results with full info, splitting into multiple messages if needed
+            # Показываем несколько результатов с КЛИКАБЕЛЬНЫМИ ССЫЛКАМИ
             
-            # Подготавливаем полные данные для всех тестов
-            full_test_responses = []
-            for i, doc in enumerate(selected_docs):
+            # Формируем сообщение с кликабельными кодами
+            response = "Найдено несколько подходящих тестов:\n\n"
+            
+            for i, doc in enumerate(selected_docs, 1):
                 test_data = format_test_data(doc.metadata)
-                full_response = f"<b>{i+1}.</b> {format_test_info_brief(test_data)}\n"
-                full_test_responses.append(full_response)
+                test_code = test_data['test_code']
+                test_name = html.escape(test_data['test_name'])
+                department = html.escape(test_data['department'])
+                
+                # Создаем кликабельную ссылку для кода
+                link = create_test_link(test_code)
+                
+                response += (
+                    f"<b>{i}.</b> Тест: <a href='{link}'>{test_code}</a> - {test_name}\n"
+                    f"🧬 <b>Вид исследования:</b> {department}\n\n"
+                )
+                
+                # Ограничиваем длину сообщения
+                if len(response) > 3500:
+                    response += "\n<i>... и другие результаты</i>"
+                    break
             
-            # Группируем ответы в сообщения, не превышающие 4000 символов
-            messages_to_send = []
-            current_message = "Найдено несколько подходящих тестов:\n\n"
+            # Отправляем сообщение с кликабельными ссылками
+            await message.answer(
+                response, 
+                parse_mode="HTML",
+                disable_web_page_preview=True
+            )
             
-            for test_response in full_test_responses:
-                # Проверяем, поместится ли текущий тест в текущее сообщение
-                if len(current_message + test_response) <= 4000:
-                    current_message += test_response
-                else:
-                    # Если текущее сообщение не пустое, добавляем его в список
-                    if current_message.strip() != "Найдено несколько подходящих тестов:":
-                        messages_to_send.append(current_message)
-                    
-                    # Начинаем новое сообщение с текущим тестом
-                    current_message = test_response
-            
-            # Добавляем последнее сообщение, если оно не пустое
-            if current_message.strip():
-                messages_to_send.append(current_message)
-            
-            # Отправляем все сообщения
-            for message_text in messages_to_send:
-                await message.answer(message_text, parse_mode="HTML")
-            
-            # Создаем клавиатуру для выбора
+            # Создаем компактную клавиатуру с кнопками (как дополнение к ссылкам)
             keyboard = InlineKeyboardMarkup(inline_keyboard=[])
             row = []
             
             for i, doc in enumerate(selected_docs[:15]):  # До 15 кнопок
+                test_code = doc.metadata['test_code']
                 row.append(InlineKeyboardButton(
-                    text=doc.metadata['test_code'],
-                    callback_data=TestCallback.pack("show_test", doc.metadata['test_code'])
+                    text=test_code,
+                    callback_data=TestCallback.pack("show_test", test_code)
                 ))
+                
+                # По 3 кнопки в ряд
                 if len(row) >= 3:
                     keyboard.inline_keyboard.append(row)
                     row = []
             
+            # Добавляем последний ряд если есть
             if row:
                 keyboard.inline_keyboard.append(row)
             
+            # Отправляем клавиатуру с инструкцией
             await message.answer(
-                "Выберите интересующий тест:",
-                reply_markup=keyboard
+                "💡 <b>Нажмите на код теста в сообщении выше или выберите из кнопок:</b>",
+                reply_markup=keyboard,
+                parse_mode="HTML"
             )
 
         else:
-            # Single result
+            # Один результат
             test_data = format_test_data(selected_docs[0].metadata)
-            response = format_test_info_brief(test_data)
+            response = format_test_info(test_data)
             
-            # Проверяем длину и отправляем
-            if len(response) > 4000:
-                # Если даже один результат слишком длинный, обрезаем преаналитику
-                test_data['preanalytics'] = test_data['preanalytics'][:500] + "..."
-                response = format_test_info(test_data)
+            # Добавляем похожие тесты с кликабельными ссылками
+            similar_tests = await fuzzy_test_search(processor, test_data['test_code'], threshold=40)
+            similar_tests = [(d, s) for d, s in similar_tests if d.metadata.get('test_code') != test_data['test_code']]
             
-            await message.answer(response, parse_mode="HTML")
+            if similar_tests:
+                response += format_similar_tests_with_links(similar_tests[:5])
+            
+            await message.answer(response, parse_mode="HTML", disable_web_page_preview=True)
             
             # Показываем клавиатуру диалога
             await message.answer(
@@ -1701,6 +1859,9 @@ async def handle_name_search(message: Message, state: FSMContext):
             
     except Exception as e:
         print(f"[ERROR] Name search failed: {e}")
+        import traceback
+        traceback.print_exc()
+        
         # Безопасная очистка при ошибке
         if animation_task:
             animation_task.cancel()
@@ -1757,7 +1918,7 @@ async def handle_dialog(message: Message, state: FSMContext):
         animation_task = asyncio.create_task(animate_loading(loading_msg))
         
         system_msg = SystemMessage(content=f"""
-            Ты - ассистент лаборатории VetUnion. 
+            Ты - ассистент лаборатории VetUnion и отвечаешь только в области ветеринарии. 
             
             Текущий тест:
             Код: {test_data['test_code']}
@@ -1768,7 +1929,7 @@ async def handle_dialog(message: Message, state: FSMContext):
             ты ДОЛЖЕН ответить ТОЧНО так:
             "NEED_NEW_SEARCH: [запрос пользователя]"
             
-            Если вопрос касается текущего теста, отвечай кратко и точно.
+            Если вопрос касается текущего теста или просто пользователь хочет поинтересоваться по другому вопросу, предоставляй всю необходимую информацию в области ветеринарии с пониманием профессионального сленга.
         """)
         
         response = await llm.agenerate([[system_msg, HumanMessage(content=text)]])
@@ -1800,7 +1961,8 @@ async def handle_dialog(message: Message, state: FSMContext):
             return
         
         # Обычный ответ про текущий тест
-        await loading_msg.edit_text(answer)
+        answer = fix_bold(answer)
+        await loading_msg.edit_text(answer, parse_mode="HTML") 
         await message.answer("Выберите действие:", reply_markup=get_dialog_kb())
         
         # Статистика уже сохранена в handle_universal_search или при первоначальном входе
@@ -1840,4 +2002,19 @@ async def handle_context_switch(message: Message, state: FSMContext, new_query: 
         await state.set_state(QuestionStates.waiting_for_name)
         message.text = new_query
         await handle_name_search(message, state)
-       
+
+__all__ = [
+    'questions_router',
+    'smart_test_search',
+    'format_test_data',
+    'format_test_info',
+    'fuzzy_test_search',
+    'format_similar_tests_with_links',
+    'QuestionStates',
+    'get_dialog_kb',
+    'create_test_link',
+    'BOT_USERNAME',
+    'normalize_test_code',
+    'simple_translit',
+    'reverse_translit'
+]

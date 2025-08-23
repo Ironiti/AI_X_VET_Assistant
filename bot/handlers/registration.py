@@ -9,6 +9,13 @@ from bot.keyboards import (
     get_main_menu_kb, get_admin_menu_kb, get_specialization_kb,
     get_region_kb, get_country_kb
 )
+from bot.handlers.questions import (
+    smart_test_search, format_test_data, format_test_info,
+    fuzzy_test_search, format_similar_tests_with_links,
+    QuestionStates, get_dialog_kb, normalize_test_code,
+    reverse_translit  # Добавьте эту функцию
+)
+from src.data_vectorization import DataProcessor
 
 from src.database.db_init import db
 
@@ -51,7 +58,131 @@ class RegistrationStates(StatesGroup):
 async def cmd_start(message: Message, state: FSMContext):
     user_id = message.from_user.id
     print(f"[INFO] User {user_id} initiated registration")
+    
+    # Проверяем, есть ли параметры (deep link)
+    args = message.text.split(maxsplit=1)
+    if len(args) > 1 and args[1].startswith("test_"):
+        # Это deep link на тест
+        encoded_code = args[1][5:]  # Убираем "test_"
+        
+        # Применяем обратную транслитерацию
+        test_code = reverse_translit(encoded_code)
+        
+        print(f"[DEBUG] Received encoded: {encoded_code}")
+        print(f"[DEBUG] After reverse translit: {test_code}")
+        
+        # Проверяем, зарегистрирован ли пользователь
+        user_exists = await db.user_exists(user_id)
+        
+        if not user_exists:
+            # Пользователь не зарегистрирован, сохраняем запрос теста и начинаем регистрацию
+            await state.update_data(pending_test_code=test_code)
+            await message.answer(
+                "Для просмотра информации о тестах необходимо пройти регистрацию.\n\n"
+                "После регистрации вы автоматически получите информацию о запрошенном тесте.\n\n"
+                "Выберите, кто вы:",
+                reply_markup=get_user_type_kb()
+            )
+            await state.set_state(RegistrationStates.waiting_for_user_type)
+            return
+        
+        # Пользователь зарегистрирован, обрабатываем запрос теста
+        await state.clear()  # Очищаем состояние на всякий случай
+        
+        loading_msg = await message.answer(f"🔍 Загружаю информацию о тесте {test_code}...")
+        
+        try:
+            processor = DataProcessor()
+            processor.load_vector_store()
+            
+            # Используем smart_test_search для поиска
+            result, found_variant, match_type = await smart_test_search(processor, test_code)
+            
+            if result:
+                doc = result[0]
+                test_data = format_test_data(doc.metadata)
+                
+                # Удаляем сообщение о загрузке
+                try:
+                    await loading_msg.delete()
+                except:
+                    pass
+                
+                # Показываем информацию о тесте
+                response = format_test_info(test_data)
+                
+                # Ищем похожие тесты
+                similar_tests = await fuzzy_test_search(processor, test_data['test_code'], threshold=40)
+                similar_tests = [(d, s) for d, s in similar_tests if d.metadata.get('test_code') != test_data['test_code']]
+                
+                # Добавляем похожие тесты с кликабельными ссылками
+                if similar_tests:
+                    response += format_similar_tests_with_links(similar_tests[:5])
+                
+                await message.answer(response, parse_mode="HTML", disable_web_page_preview=True)
+                
+                # Обновляем статистику
+                await db.add_search_history(
+                    user_id=user_id,
+                    search_query=f"Deep link: {test_code}",
+                    found_test_code=test_data['test_code'],
+                    search_type='code',
+                    success=True
+                )
+                await db.update_user_frequent_test(
+                    user_id=user_id,
+                    test_code=test_data['test_code'],
+                    test_name=test_data['test_name']
+                )
+                
+                # Устанавливаем контекст для диалога
+                await state.set_state(QuestionStates.in_dialog)
+                await state.update_data(current_test=test_data, last_viewed_test=test_data['test_code'])
+                
+                # Показываем клавиатуру диалога
+                await message.answer(
+                    "Можете задать вопрос об этом тесте или выбрать действие:",
+                    reply_markup=get_dialog_kb()
+                )
+            else:
+                try:
+                    await loading_msg.delete()
+                except:
+                    pass
+                    
+                await message.answer(f"❌ Тест {test_code} не найден в базе данных")
+                
+                # Показываем главное меню
+                user = await db.get_user(user_id)
+                menu_kb = get_admin_menu_kb() if user['role'] == 'admin' else get_main_menu_kb()
+                await message.answer(
+                    "Выберите действие:",
+                    reply_markup=menu_kb
+                )
+                
+        except Exception as e:
+            print(f"[ERROR] Deep link handling failed: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            try:
+                await loading_msg.delete()
+            except:
+                pass
+                
+            await message.answer("⚠️ Ошибка при загрузке информации о тесте")
+            
+            # Показываем главное меню
+            user = await db.get_user(user_id)
+            menu_kb = get_admin_menu_kb() if user['role'] == 'admin' else get_main_menu_kb()
+            await message.answer(
+                "Выберите действие:",
+                reply_markup=menu_kb
+            )
+        
+        return  # Важно! Выходим, чтобы не выполнять обычную логику /start
 
+    # Обычная логика /start (без deep link)
     await state.clear()
     user_exists = await db.user_exists(user_id)
 
