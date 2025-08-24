@@ -2,6 +2,7 @@ import json
 from typing import Optional
 import aiosqlite
 from datetime import datetime, timedelta
+import re
 
 from src.data_vectorization import DataProcessor
 
@@ -117,17 +118,6 @@ class Database:
             
             await db.commit()
             return poll_id
-
-    async def get_poll_info(self, poll_id):
-        """Получение информации об опросе"""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                "SELECT * FROM polls WHERE id = ?",
-                (poll_id,)
-            )
-            row = await cursor.fetchone()
-            return dict(row) if row else None
 
     async def check_user_poll_participation(self, user_id, poll_id):
         """Проверка участия пользователя в опросе"""
@@ -664,6 +654,66 @@ class Database:
             await db.commit()
             
             return deleted
+
+    # НОВЫЕ МЕТОДЫ ДЛЯ РАБОТЫ С ФОТО КОНТЕЙНЕРОВ
+    def parse_container_numbers(self, container_string: str) -> list[int]:
+        """Парсит строку с номерами контейнеров (например: '836 *I* 800' -> [836, 800])"""
+        # Находим все числа в строке
+        numbers = re.findall(r'\d+', str(container_string))
+        return [int(n) for n in numbers]
+
+    async def add_container_photo(self, container_number: int, file_id: str, uploaded_by: int, description: str = None):
+        """Добавляет или обновляет фото контейнера с описанием"""
+        async with aiosqlite.connect(self.db_path) as db:
+            # Сначала проверяем, есть ли колонка description
+            cursor = await db.execute("PRAGMA table_info(container_photos)")
+            columns = await cursor.fetchall()
+            column_names = [col[1] for col in columns]
+            
+            if 'description' not in column_names:
+                await db.execute('ALTER TABLE container_photos ADD COLUMN description TEXT')
+            
+            await db.execute('''
+                INSERT OR REPLACE INTO container_photos (container_number, file_id, uploaded_by, description)
+                VALUES (?, ?, ?, ?)
+            ''', (container_number, file_id, uploaded_by, description))
+            await db.commit()
+            return True
+
+    async def delete_container_photo(self, container_number: int):
+        """Удаляет фото контейнера"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('DELETE FROM container_photos WHERE container_number = ?', (container_number,))
+            await db.commit()
+            return True
+
+    async def get_container_photo(self, container_number: int):
+        """Получает фото контейнера по номеру"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                'SELECT file_id FROM container_photos WHERE container_number = ?',
+                (container_number,)
+            )
+            row = await cursor.fetchone()
+            return row[0] if row else None
+
+    async def get_all_container_photos(self):
+        """Получает все фото контейнеров"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                SELECT container_number, file_id, upload_date 
+                FROM container_photos 
+                ORDER BY container_number
+            ''')
+            rows = await cursor.fetchall()
+            return [
+                {
+                    'container_number': row[0],
+                    'file_id': row[1],
+                    'upload_date': row[2]
+                }
+                for row in rows
+            ]
         
     async def initialize(self):
         """Initialize database and vector store"""
@@ -711,7 +761,18 @@ class Database:
                 )
             ''')
             
-            await db.commit()
+            # ТАБЛИЦА ДЛЯ ФОТО КОНТЕЙНЕРОВ
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS container_photos (
+                    container_number INTEGER PRIMARY KEY,
+                    file_id TEXT NOT NULL,
+                    description TEXT,
+                    uploaded_by INTEGER,
+                    upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (uploaded_by) REFERENCES users(telegram_id)
+                )
+            ''')
+            
             # Обновленная таблица пользователей
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS users (
@@ -735,13 +796,15 @@ class Database:
                 )
             ''')
         
-            # Таблица для жалоб и предложений
+            # Таблица для жалоб и предложений с поддержкой медиа
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS feedback (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER,
                     feedback_type TEXT,
                     message TEXT,
+                    media_type TEXT,
+                    media_file_id TEXT,
                     timestamp TIMESTAMP,
                     status TEXT DEFAULT 'new',
                     FOREIGN KEY (user_id) REFERENCES users (telegram_id)
@@ -885,12 +948,15 @@ class Database:
             ''', (user_id, request_type, request_text, datetime.now()))
             await db.commit()
     
-    async def add_feedback(self, user_id: int, feedback_type: str, message: str):
+    async def add_feedback(self, user_id: int, feedback_type: str, message: str, 
+                          media_type: str = None, media_file_id: str = None):
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute('''
-                INSERT INTO feedback (user_id, feedback_type, message, timestamp)
-                VALUES (?, ?, ?, ?)
-            ''', (user_id, feedback_type, message, datetime.now()))
+                INSERT INTO feedback (user_id, feedback_type, message, 
+                                    media_type, media_file_id, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (user_id, feedback_type, message, media_type, 
+                 media_file_id, datetime.now()))
             await db.commit()
 
     async def get_statistics(self):

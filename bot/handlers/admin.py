@@ -51,6 +51,228 @@ class PollStates(StatesGroup):
     viewing_results = State()
     choosing_recipients = State() 
     
+class ContainerPhotoStates(StatesGroup):
+    menu = State()
+    adding_photo = State()
+    waiting_for_number = State()
+    waiting_for_description = State()
+    deleting_photo = State()
+    viewing_photos = State()
+    
+def get_container_photos_kb():
+    from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+    keyboard = [
+        [KeyboardButton(text="📷 Добавить фото контейнера")],
+        [KeyboardButton(text="🗑️ Удалить фото контейнера")],
+        [KeyboardButton(text="📋 Список всех фото")],
+        [KeyboardButton(text="🔙 Назад")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+
+# Обновите клавиатуру системного управления:
+def get_system_management_kb():
+    from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+    keyboard = [
+        [KeyboardButton(text="🔄 Обновить векторную БД")],
+        [KeyboardButton(text="🗑️ Очистить старые логи")],
+        [KeyboardButton(text="📊 Системная информация")],
+        [KeyboardButton(text="🧪 Управление фото контейнеров")],  # НОВАЯ КНОПКА
+        [KeyboardButton(text="🔙 Назад")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+
+# Добавьте обработчики:
+@admin_router.message(SystemStates.in_system_menu, F.text == "🧪 Управление фото контейнеров")
+async def manage_container_photos(message: Message, state: FSMContext):
+    await message.answer(
+        "🧪 Управление фото контейнеров\n\n"
+        "Здесь вы можете добавлять и удалять фото пробирок для автоматического показа при выборе теста.",
+        reply_markup=get_container_photos_kb()
+    )
+    await state.set_state(ContainerPhotoStates.menu)
+
+@admin_router.message(ContainerPhotoStates.menu, F.text == "📷 Добавить фото контейнера")
+async def start_add_photo(message: Message, state: FSMContext):
+    await message.answer(
+        "📷 Добавление фото контейнера\n\n"
+        "Отправьте фото пробирки/контейнера:",
+        reply_markup=get_back_to_menu_kb()
+    )
+    await state.set_state(ContainerPhotoStates.adding_photo)
+
+@admin_router.message(ContainerPhotoStates.adding_photo, F.photo)
+async def receive_container_photo(message: Message, state: FSMContext):
+    # Сохраняем file_id фото
+    photo = message.photo[-1]  # Берем лучшее качество
+    file_id = photo.file_id
+    
+    await state.update_data(photo_file_id=file_id)
+    
+    await message.answer(
+        "Введите номер контейнера (только цифру, например: 808):",
+        reply_markup=get_back_to_menu_kb()
+    )
+    await state.set_state(ContainerPhotoStates.waiting_for_number)
+
+@admin_router.message(ContainerPhotoStates.waiting_for_number)
+async def receive_container_number(message: Message, state: FSMContext):
+    if message.text == "🔙 Вернуться в главное меню":
+        await state.clear()
+        await message.answer("Операция отменена.", reply_markup=get_admin_menu_kb())
+        return
+    
+    if not message.text.isdigit():
+        await message.answer("❌ Введите только цифру номера контейнера:")
+        return
+    
+    container_number = int(message.text)
+    await state.update_data(container_number=container_number)
+    
+    # Запрашиваем описание
+    await message.answer(
+        f"📝 Введите описание для контейнера №{container_number}\n"
+        f"(например: 'Пробирка с красной крышкой для биохимии')\n\n"
+        f"Или отправьте '-' чтобы пропустить описание:",
+        reply_markup=get_back_to_menu_kb()
+    )
+    await state.set_state(ContainerPhotoStates.waiting_for_description)
+    
+@admin_router.message(F.text == "🔧 Создать таблицу фото")
+async def create_photos_table(message: Message):
+    user = await db.get_user(message.from_user.id)
+    if not user or user['role'] != 'admin':
+        return
+    
+    try:
+        await db.create_tables()  # Это создаст недостающие таблицы
+        await message.answer("✅ Таблица container_photos создана!")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+
+@admin_router.message(ContainerPhotoStates.waiting_for_description)
+async def save_container_photo_with_description(message: Message, state: FSMContext):
+    if message.text == "🔙 Вернуться в главное меню":
+        await state.clear()
+        await message.answer("Операция отменена.", reply_markup=get_admin_menu_kb())
+        return
+    
+    data = await state.get_data()
+    container_number = data['container_number']
+    file_id = data['photo_file_id']
+    
+    # Получаем описание
+    description = None if message.text == "-" else message.text
+    
+    # Сохраняем в БД
+    success = await db.add_container_photo(
+        container_number=container_number,
+        file_id=file_id,
+        uploaded_by=message.from_user.id,
+        description=description
+    )
+    
+    if success:
+        desc_text = f"\n📝 Описание: {description}" if description else ""
+        await message.answer(
+            f"✅ Фото для контейнера №{container_number} успешно сохранено!{desc_text}",
+            reply_markup=get_container_photos_kb()
+        )
+    else:
+        await message.answer(
+            "❌ Ошибка при сохранении фото",
+            reply_markup=get_container_photos_kb()
+        )
+    
+    await state.set_state(ContainerPhotoStates.menu)
+
+@admin_router.message(ContainerPhotoStates.menu, F.text == "📋 Список всех фото")
+async def list_container_photos(message: Message):
+    photos = await db.get_all_container_photos()
+    
+    if not photos:
+        await message.answer(
+            "Нет загруженных фото контейнеров.",
+            reply_markup=get_container_photos_kb()
+        )
+        return
+    
+    text = "📋 Загруженные фото контейнеров:\n\n"
+    for photo in photos:
+        text += f"🧪 Контейнер №{photo['container_number']}\n"
+        # Используем .get() с значением по умолчанию
+        description = photo.get('description', 'Без описания')
+        text += f"   {description}\n"
+        text += f"   📅 {photo.get('upload_date', 'Дата не указана')}\n\n"
+    
+    await message.answer(text, reply_markup=get_container_photos_kb())
+    
+    # Показываем сами фото
+    from bot.handlers import bot
+    for photo in photos[:5]:  # Показываем первые 5
+        try:
+            # Также используем .get() для caption
+            description = photo.get('description', 'Без описания')
+            await bot.send_photo(
+                message.chat.id,
+                photo=photo['file_id'],
+                caption=f"Контейнер №{photo['container_number']}: {description}"
+            )
+        except:
+            pass
+
+@admin_router.message(ContainerPhotoStates.menu, F.text == "🗑️ Удалить фото контейнера")
+async def start_delete_photo(message: Message, state: FSMContext):
+    photos = await db.get_all_container_photos()
+    
+    if not photos:
+        await message.answer(
+            "Нет фото для удаления.",
+            reply_markup=get_container_photos_kb()
+        )
+        return
+    
+    text = "Введите номер контейнера для удаления фото:\n\n"
+    text += "Доступные контейнеры: "
+    text += ", ".join([str(p['container_number']) for p in photos])
+    
+    await message.answer(text, reply_markup=get_back_to_menu_kb())
+    await state.set_state(ContainerPhotoStates.deleting_photo)
+
+@admin_router.message(ContainerPhotoStates.deleting_photo)
+async def delete_container_photo(message: Message, state: FSMContext):
+    if message.text == "🔙 Вернуться в главное меню":
+        await state.set_state(ContainerPhotoStates.menu)
+        await message.answer("Отмена удаления.", reply_markup=get_container_photos_kb())
+        return
+    
+    if not message.text.isdigit():
+        await message.answer("❌ Введите номер контейнера (цифру):")
+        return
+    
+    container_number = int(message.text)
+    success = await db.delete_container_photo(container_number)
+    
+    if success:
+        await message.answer(
+            f"✅ Фото контейнера №{container_number} удалено",
+            reply_markup=get_container_photos_kb()
+        )
+    else:
+        await message.answer(
+            f"❌ Контейнер №{container_number} не найден",
+            reply_markup=get_container_photos_kb()
+        )
+    
+    await state.set_state(ContainerPhotoStates.menu)
+
+@admin_router.message(ContainerPhotoStates.menu, F.text == "🔙 Назад")
+async def back_from_container_photos(message: Message, state: FSMContext):
+    await state.set_state(SystemStates.in_system_menu)
+    await message.answer(
+        "🔧 Управление системой",
+        reply_markup=get_system_management_kb()
+    )    
+
 @admin_router.message(PollStates.adding_thank_you_video)
 async def handle_thank_you_video(message: Message, state: FSMContext):
     if message.text == "➡️ Пропустить":

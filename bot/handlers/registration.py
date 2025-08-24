@@ -12,7 +12,7 @@ from bot.keyboards import (
 from bot.handlers.questions import (
     smart_test_search, format_test_data, format_test_info,
     fuzzy_test_search, format_similar_tests_with_links,
-    QuestionStates, get_dialog_kb, normalize_test_code,
+    QuestionStates, get_dialog_kb, send_test_info_with_photo,
     reverse_translit  # Добавьте эту функцию
 )
 from src.data_vectorization import DataProcessor
@@ -119,7 +119,8 @@ async def cmd_start(message: Message, state: FSMContext):
                 if similar_tests:
                     response += format_similar_tests_with_links(similar_tests[:5])
                 
-                await message.answer(response, parse_mode="HTML", disable_web_page_preview=True)
+                # Используем send_test_info_with_photo для отображения с фото
+                await send_test_info_with_photo(message, test_data, response)
                 
                 # Обновляем статистику
                 await db.add_search_history(

@@ -1,5 +1,5 @@
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.filters import Command
@@ -23,8 +23,14 @@ BOT_USERNAME = "AI_VET_UNION_BOT"
 LOADING_GIF_ID = "CgACAgIAAxkBAAMIaGr_qy1Wxaw2VrBrm3dwOAkYji4AAu54AAKmqHlJAtZWBziZvaA2BA"
 # LOADING_GIF_ID = "CgACAgIAAxkBAAIBFGiBcXtGY7OZvr3-L1dZIBRNqSztAALueAACpqh5Scn4VmIRb4UjNgQ"
 # LOADING_GIF_ID = "CgACAgIAAxkBAAMMaHSq3vqxq2RuMMj-DIMvldgDjfkAAu54AAKmqHlJCNcCjeoHRJI2BA"
-
 questions_router = Router()
+
+def fix_bold(text: str) -> str:
+    """Заменяет markdown жирный текст на HTML."""
+    import re
+    # Заменяем **текст** на <b>текст</b>
+    text = re.sub(r'\*\*([^\*]+)\*\*', r'<b>\1</b>', text)
+    return text
 
 class TestCallback:
     @staticmethod
@@ -73,10 +79,8 @@ TEST_ABBREVIATIONS = {
 
 def is_test_code_pattern(text: str) -> bool:
     """Проверяет, соответствует ли текст паттерну кода теста."""
-    # Убираем пробелы и приводим к верхнему регистру
     text = text.strip().upper().replace(' ', '')
     
-    # Паттерны для разных вариантов
     patterns = [
         r'^[AА][NН]\d+',  # AN или АН + цифры
         r'^[AА][NН]\d+[A-ZА-Я\-]+',  # AN + цифры + суффикс
@@ -97,7 +101,7 @@ def simple_translit(text: str) -> str:
         'Ж': 'ZH', 'З': 'Z', 'И': 'I', 'Й': 'Y', 'К': 'K', 'Л': 'L', 'М': 'M',
         'Н': 'N', 'О': 'O', 'П': 'P', 'Р': 'R', 'С': 'S', 'Т': 'T', 'У': 'U',
         'Ф': 'F', 'Х': 'KH', 'Ц': 'TS', 'Ч': 'CH', 'Ш': 'SH', 'Щ': 'SCH',
-        'Ъ': '', 'Ы': 'YI', 'Ь': '', 'Э': 'EH', 'Ю': 'YU', 'Я': 'YA'  # Изменил Э->EH и Ы->YI
+        'Ъ': '', 'Ы': 'YI', 'Ь': '', 'Э': 'EH', 'Ю': 'YU', 'Я': 'YA'
     }
     
     result = ''
@@ -110,61 +114,52 @@ def simple_translit(text: str) -> str:
 
 def reverse_translit(text: str) -> str:
     """Обратная транслитерация для deep links."""
-    # Важно: проверяем сначала длинные комбинации
-    reverse_map = [
-        ('SCH', 'Щ'), ('SH', 'Ш'), ('CH', 'Ч'), ('KH', 'Х'), ('ZH', 'Ж'),
-        ('YU', 'Ю'), ('YA', 'Я'), ('YO', 'Ё'), ('TS', 'Ц'), ('YI', 'Ы'),
-        ('EH', 'Э'),  # Добавил EH->Э ПЕРЕД обычным E
-        ('A', 'А'), ('B', 'Б'), ('V', 'В'), ('G', 'Г'), ('D', 'Д'),
-        ('E', 'Е'), ('Z', 'З'), ('I', 'И'), ('Y', 'Й'), ('K', 'К'),
-        ('L', 'Л'), ('M', 'М'), ('N', 'Н'), ('O', 'О'), ('P', 'П'),
-        ('R', 'Р'), ('S', 'С'), ('T', 'Т'), ('U', 'У'), ('F', 'Ф')
-    ]
+    text = text.upper()
     
-    result = text.upper()
+    # Специальные случаи для полных кодов
+    special_cases = {
+        'ANDOKR': 'ANДОКР'
+    }
     
-    # Заменяем только суффиксы после цифр
+    if text in special_cases:
+        return 
+    
+    # Общая обратная транслитерация для суффиксов
     import re
-    match = re.match(r'^(AN\d+)(.+)$', result)
+    match = re.match(r'^(AN\d+)(.+)$', text)
     if match:
         prefix = match.group(1)
         suffix = match.group(2)
         
-        # Преобразуем только суффикс
-        for lat, cyr in reverse_map:
-            suffix = suffix.replace(lat, cyr)
+        # Словарь суффиксов
+        suffix_map = {
+            'GIEH': 'ГИЭ',
+            'GII': 'ГИИ', 
+            'BTK': 'БТК',
+            'BAL': 'БАЛ',
+            'KLSCH': 'КЛЩ',
+            'VPT': 'ВПТ',
+            'GLZ': 'ГЛЗ',
+            'GSK': 'ГСК',
+            'KM': 'КМ',
+            'KR': 'КР',
+            'LIK': 'ЛИК',
+            'NOS': 'НОС',
+            'PRK': 'ПРК',
+            'ROT': 'РОТ',
+            'SIN': 'СИН',
+            'FK': 'ФК',
+            'ASP': 'АСП',
+            'OBS': 'ОБС'
+        }
         
-        result = prefix + suffix
+        if suffix in suffix_map:
+            return prefix + suffix_map[suffix]
     
-    return result
-
-def reverse_translit(text: str) -> str:
-    """Обратная транслитерация для deep links."""
-    # Словарь для обратной транслитерации
-    reverse_map = {
-        'SCH': 'Щ', 'SH': 'Ш', 'CH': 'Ч', 'KH': 'Х', 'ZH': 'Ж',
-        'YU': 'Ю', 'YA': 'Я', 'YO': 'Ё', 'TS': 'Ц', 'YI': 'Ы', 
-        'EH': 'Э',
-        'A': 'А', 'B': 'Б', 'V': 'В', 'G': 'Г', 'D': 'Д',
-        'E': 'Е', 'Z': 'З', 'I': 'И', 'Y': 'Й', 'K': 'К',
-        'L': 'Л', 'M': 'М', 'N': 'Н', 'O': 'О', 'P': 'П',
-        'R': 'Р', 'S': 'С', 'T': 'Т', 'U': 'У', 'F': 'Ф', 'H': 'Х'
-    }
-    
-    result = text.upper()
-    
-    # Сортируем ключи по длине (сначала длинные комбинации)
-    sorted_keys = sorted(reverse_map.keys(), key=len, reverse=True)
-    
-    # Заменяем все вхождения
-    for lat in sorted_keys:
-        cyr = reverse_map[lat]
-        result = result.replace(lat, cyr)
-    
-    return result
+    return text
 
 def create_test_link(test_code: str) -> str:
-    """Создает deep link для теста с транслитерацией."""
+    """Создает deep link для теста."""
     safe_code = simple_translit(test_code)
     return f"https://t.me/{BOT_USERNAME}?start=test_{safe_code}"
 
@@ -184,12 +179,65 @@ def normalize_test_code(text: str) -> str:
     
     return text
 
-def fix_bold(text: str) -> str:
-    """Заменяет markdown жирный текст на HTML."""
-    import re
-    # Заменяем **текст** на <b>текст</b>
-    text = re.sub(r'\*\*([^\*]+)\*\*', r'<b>\1</b>', text)
-    return text
+async def get_test_container_photos(test_data: Dict) -> List[Dict]:
+    """Получает все фото контейнеров для теста"""
+    container_string = str(test_data.get('container_number', ''))
+    
+    # Парсим номера контейнеров
+    container_numbers = db.parse_container_numbers(container_string)
+    
+    photos = []
+    for num in container_numbers:
+        file_id = await db.get_container_photo(num)
+        if file_id:
+            photos.append({
+                'number': num,
+                'file_id': file_id
+            })
+    
+    return photos
+
+async def show_container_photos(message: Message, test_data: Dict):
+    """Показывает все фото контейнеров для теста"""
+    photos = await get_test_container_photos(test_data)
+    
+    if photos:
+        # Если одно фото
+        if len(photos) == 1:
+            photo = photos[0]
+            caption = (
+                f"🧪 <b>Контейнер №{photo['number']}</b>\n"
+                f"❄️ Температура хранения: {test_data['storage_temp']}"
+            )
+            try:
+                await message.answer_photo(
+                    photo=photo['file_id'],
+                    caption=caption,
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                print(f"[ERROR] Failed to send container photo: {e}")
+        
+        # Если несколько фото - отправляем медиа группу
+        elif len(photos) > 1:
+            media_group = []
+            for i, photo in enumerate(photos):
+                caption = f"🧪 <b>Контейнер №{photo['number']}</b>"
+                if i == 0:  # Добавляем температуру только к первому фото
+                    caption += f"\n❄️ Температура хранения: {test_data['storage_temp']}"
+                
+                media_group.append(
+                    InputMediaPhoto(
+                        media=photo['file_id'],
+                        caption=caption,
+                        parse_mode="HTML"
+                    )
+                )
+            
+            try:
+                await message.answer_media_group(media_group)
+            except Exception as e:
+                print(f"[ERROR] Failed to send container photos: {e}")
 
 def calculate_fuzzy_score(query: str, test_code: str, test_name: str = "") -> float:
     """Улучшенная функция для точного поиска по коду теста."""
@@ -421,35 +469,6 @@ def format_similar_tests_text(similar_tests: List[Tuple[Document, float]], max_d
     
     return text
 
-def format_test_info_with_links(test_data: Dict) -> str:
-    """Форматирует информацию о тесте с кликабельными ссылками на похожие тесты."""
-    t_type = 'Тест' if test_data['type'] == 'Тесты' else 'Профиль'
-    
-    # Базовая информация
-    test_name = html.escape(test_data['test_name'])
-    container_type = html.escape(test_data['container_type'])
-    # ... остальные поля
-    
-    return (
-        f"<b>{t_type}: {test_data['test_code']} - {test_name}</b>\n\n"
-        f"🧪 <b>Тип контейнера:</b> {container_type}\n"
-        # ... остальная информация
-    )
-
-# Добавьте обработчик deep links в начало роутера:
-@questions_router.message(F.text.regexp(r'^/start test_(.+)'))
-async def handle_deep_link_test(message: Message, state: FSMContext):
-    """Обработчик deep link для быстрого открытия теста."""
-    match = re.match(r'^/start test_(.+)', message.text)
-    if match:
-        test_code = match.group(1).replace("_", " ")
-        
-        # Имитируем ввод кода теста
-        message.text = test_code
-        await state.set_state(QuestionStates.waiting_for_code)
-        await handle_code_search(message, state)
-
-# Модифицируйте вывод похожих тестов:
 def format_similar_tests_with_links(similar_tests: List[Tuple[Document, float]], max_display: int = 5) -> str:
     """Форматирует текст с кликабельными ссылками на похожие тесты."""
     if not similar_tests:
@@ -861,8 +880,7 @@ async def handle_general_question(message: Message, state: FSMContext, question_
         ]])
         
         answer = response.generations[0][0].text.strip()
-        answer = fix_bold(answer)
-        # Статистика уже сохранена в handle_universal_search
+        answer = fix_bold(answer)  # Добавляем конвертацию markdown
         
         await loading_msg.delete()
         await message.answer(answer, parse_mode="HTML")
@@ -881,76 +899,6 @@ async def handle_general_question(message: Message, state: FSMContext, question_
         print(f"[ERROR] General question handling failed: {e}")
         await loading_msg.delete()
         await message.answer("⚠️ Не удалось обработать вопрос. Попробуйте переформулировать.")
-
-async def check_if_needs_new_search(query: str, current_test_data: Dict) -> bool:
-    """Проверяет, требуется ли новый поиск вместо ответа о текущем тесте."""
-    
-    if not current_test_data:
-        return True
-    
-    query_lower = query.lower()
-    current_test_name = current_test_data['test_name'].lower() if current_test_data else ""
-    
-    # Ключевые слова, указывающие на поиск другого теста
-    other_test_indicators = [
-        'другой тест', 'другой анализ', 'еще один', 'а что насчет',
-        'а если', 'покажи', 'найди', 'поиск', 'информация о'
-    ]
-    
-    # Проверяем явные индикаторы
-    for indicator in other_test_indicators:
-        if indicator in query_lower:
-            return True
-    
-    # Список общих типов анализов
-    test_types = {
-        'кровь': ['общий анализ крови', 'оак', 'гематология', 'клинический анализ крови'],
-        'моча': ['общий анализ мочи', 'оам', 'анализ мочи', 'моча'],
-        'биохимия': ['биохимический', 'биохимия', 'бх'],
-        'гормоны': ['гормон', 'ттг', 'т3', 'т4', 'тиреотропный'],
-        'инфекции': ['пцр', 'ифа', 'антитела', 'вирус'],
-        'кал': ['кал', 'копрограмма', 'фекалии'],
-        'цитология': ['цитология', 'мазок', 'соскоб']
-    }
-    
-    # Проверяем, упоминается ли другой тип анализа
-    current_type = None
-    mentioned_type = None
-    
-    # Определяем тип текущего теста
-    for test_type, keywords in test_types.items():
-        for keyword in keywords:
-            if keyword in current_test_name:
-                current_type = test_type
-                break
-    
-    # Проверяем, какой тип упоминается в запросе
-    for test_type, keywords in test_types.items():
-        for keyword in keywords:
-            if keyword in query_lower:
-                mentioned_type = test_type
-                break
-    
-    # Если упоминается другой тип теста - нужен новый поиск
-    if mentioned_type and mentioned_type != current_type:
-        return True
-    
-    # Проверяем упоминание конкретных тестов
-    # Если в запросе есть паттерн кода теста, отличный от текущего
-    potential_codes = re.findall(r'\b[AА][NН]?\d+\b', query.upper())
-    if potential_codes:
-        for code in potential_codes:
-            if normalize_test_code(code) != current_test_data['test_code']:
-                return True
-    
-    # Проверяем, не спрашивает ли о совершенно другом
-    # Например, если текущий тест про кровь, а спрашивают про мочу
-    if current_type == 'кровь' and any(word in query_lower for word in ['моч', 'урин']):
-        return True
-    if current_type == 'моча' and any(word in query_lower for word in ['кров', 'гемат', 'эритроцит']):
-        return True
-    
-    return False
 
 # Также добавим обработчики для callback кнопок, которые могут быть не определены:
 @questions_router.callback_query(F.data == "search_by_code")
@@ -1081,7 +1029,6 @@ async def show_personalized_suggestions(message: Message, state: FSMContext):
 
 # Обработчики
 @questions_router.callback_query(F.data.startswith("show_test:"))
-@questions_router.callback_query(F.data.startswith("show_test:"))
 async def handle_show_test_callback(callback: CallbackQuery, state: FSMContext):
     """Обработчик для показа информации о тесте из inline кнопки."""
     action, test_code = TestCallback.unpack(callback.data)
@@ -1150,7 +1097,7 @@ async def handle_show_test_callback(callback: CallbackQuery, state: FSMContext):
         
         # Формируем полный ответ
         response = f"<b>Информация о выбранном тесте:</b>\n\n"
-        response += format_test_info(test_data)  # Используем полную версию для callback
+        response += format_test_info(test_data)
         
         # Обновляем статистику
         user_id = callback.from_user.id
@@ -1218,15 +1165,17 @@ async def handle_show_test_callback(callback: CallbackQuery, state: FSMContext):
             if row:
                 keyboard.append(row)
             
-            
             reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
         
-        # Отправляем как новое сообщение
-        await callback.message.answer(
-            response, 
-            parse_mode="HTML",
-            reply_markup=reply_markup
-        )
+        # Отправляем информацию с фото ТОЛЬКО ОДИН РАЗ
+        await send_test_info_with_photo(callback.message, test_data, response)
+        
+        # Если есть рекомендации - отправляем их отдельным сообщением
+        if reply_markup:
+            await callback.message.answer(
+                "🎯 Рекомендуем также:",
+                reply_markup=reply_markup
+            )
         
         # Обновляем состояние с текущим тестом
         await state.set_state(QuestionStates.in_dialog)
@@ -1342,7 +1291,6 @@ async def handle_quick_test_selection(callback: CallbackQuery, state: FSMContext
         # Создаем клавиатуру если есть похожие или связанные
         reply_markup = None
         if related_tests or similar_tests:
-            response += "\n<b>🎯 Рекомендуем также:</b>"
             keyboard = []
             row = []
             
@@ -1375,12 +1323,15 @@ async def handle_quick_test_selection(callback: CallbackQuery, state: FSMContext
             
             reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
         
-        # Отправляем как новое сообщение
-        await callback.message.answer(
-            response, 
-            parse_mode="HTML",
-            reply_markup=reply_markup
-        )
+        # Отправляем информацию с фото ТОЛЬКО ОДИН РАЗ
+        await send_test_info_with_photo(callback.message, test_data, response)
+        
+        # Если есть рекомендации - отправляем их отдельным сообщением
+        if reply_markup:
+            await callback.message.answer(
+                "🎯 Рекомендуем также:",
+                reply_markup=reply_markup
+            )
         
         # Обновляем состояние с текущим тестом
         await state.set_state(QuestionStates.in_dialog)
@@ -1498,7 +1449,6 @@ async def handle_universal_search(message: Message, state: FSMContext):
     else:
         # Длинный вопрос - возможно, общий вопрос
         # Сначала пробуем найти тест
-
         processor = DataProcessor()
         processor.load_vector_store()
         
@@ -1593,14 +1543,15 @@ async def handle_code_search(message: Message, state: FSMContext):
             if similar_tests:
                 # Показываем найденные варианты
                 response = f"❌ Тест с кодом '<code>{normalized_input}</code>' не найден.\n"
-                response += format_similar_tests_text(similar_tests, max_display=10)
+                response += format_similar_tests_with_links(similar_tests, max_display=10)
                 
                 keyboard = create_similar_tests_keyboard(similar_tests[:20])
                 
                 await message.answer(
-                    response + "\n<i>Выберите код теста из кнопок ниже:</i>", 
+                    response + "\n<i>Нажмите на код теста в сообщении выше или выберите из кнопок ниже:</i>", 
                     parse_mode="HTML", 
-                    reply_markup=keyboard
+                    reply_markup=keyboard,
+                    disable_web_page_preview=True
                 )
             else:
                 error_msg = f"❌ Тест с кодом '{normalized_input}' не найден.\n"
@@ -1635,7 +1586,9 @@ async def handle_code_search(message: Message, state: FSMContext):
         await safe_delete_message(loading_msg)
         await safe_delete_message(gif_msg)
         
-        await message.answer(response, parse_mode="HTML")
+        # ИЗМЕНЕНО: Отправляем информацию с фото
+        await send_test_info_with_photo(message, test_data, response)
+        
         await message.answer(
             "Можете задать вопрос об этом тесте или выбрать действие:", 
             reply_markup=get_dialog_kb()
@@ -1706,7 +1659,17 @@ async def handle_new_search(callback: CallbackQuery, state: FSMContext):
     if last_viewed:
         await state.update_data(last_viewed_test=last_viewed)
 
-# Замените функцию handle_name_search на эту версию:
+@questions_router.message(QuestionStates.in_dialog, F.text == "📷 Показать контейнер")
+async def handle_show_container_photo(message: Message, state: FSMContext):
+    """Показывает фото контейнеров для текущего теста."""
+    data = await state.get_data()
+    test_data = data.get('current_test')
+    
+    if not test_data:
+        await message.answer("❌ Сначала выберите тест")
+        return
+    
+
 @questions_router.message(QuestionStates.waiting_for_name)
 async def handle_name_search(message: Message, state: FSMContext):
     """Handle test name search using RAG."""
@@ -1843,7 +1806,8 @@ async def handle_name_search(message: Message, state: FSMContext):
             if similar_tests:
                 response += format_similar_tests_with_links(similar_tests[:5])
             
-            await message.answer(response, parse_mode="HTML", disable_web_page_preview=True)
+            # ИЗМЕНЕНО: Отправляем с фото
+            await send_test_info_with_photo(message, test_data, response)
             
             # Показываем клавиатуру диалога
             await message.answer(
@@ -1961,8 +1925,8 @@ async def handle_dialog(message: Message, state: FSMContext):
             return
         
         # Обычный ответ про текущий тест
-        answer = fix_bold(answer)
-        await loading_msg.edit_text(answer, parse_mode="HTML") 
+        answer = fix_bold(answer)  # Добавляем конвертацию markdown
+        await loading_msg.edit_text(answer, parse_mode="HTML")  # Добавляем parse_mode
         await message.answer("Выберите действие:", reply_markup=get_dialog_kb())
         
         # Статистика уже сохранена в handle_universal_search или при первоначальном входе
@@ -1982,6 +1946,45 @@ async def handle_dialog(message: Message, state: FSMContext):
         if animation_task and not animation_task.cancelled():
             animation_task.cancel()
         await safe_delete_message(gif_msg)
+        
+async def send_test_info_with_photo(message: Message, test_data: Dict, response_text: str):
+    """Отправляет информацию о тесте с фото контейнера если оно есть"""
+    # Получаем номера контейнеров
+    container_numbers = db.parse_container_numbers(str(test_data.get('container_number', '')))
+    
+    if container_numbers:
+        # Получаем фото первого контейнера
+        first_photo = await db.get_container_photo(container_numbers[0])
+        
+        if first_photo:
+            try:
+                # Отправляем фото с полной информацией в подписи
+                await message.answer_photo(
+                    photo=first_photo,
+                    caption=response_text,
+                    parse_mode="HTML"
+                )
+                
+                # Если есть еще контейнеры - отправляем их дополнительными фото
+                if len(container_numbers) > 1:
+                    for num in container_numbers[1:]:
+                        photo_id = await db.get_container_photo(num)
+                        if photo_id:
+                            try:
+                                await message.answer_photo(
+                                    photo=photo_id,
+                                    caption=f"🧪 Дополнительный контейнер №{num}",
+                                    parse_mode="HTML"
+                                )
+                            except:
+                                pass
+                return True
+            except Exception as e:
+                print(f"[ERROR] Failed to send photo with caption: {e}")
+    
+    # Если фото нет - отправляем обычное текстовое сообщение
+    await message.answer(response_text, parse_mode="HTML")
+    return False
 
 async def handle_context_switch(message: Message, state: FSMContext, new_query: str):
     """Обрабатывает переключение контекста на новый тест."""
