@@ -125,6 +125,124 @@ async def receive_container_numbers(message: Message, state: FSMContext):
     
     # Парсим введенные номера
     numbers = []
+    text = message.text.replace(' ', '')
+    parts = text.split(',')
+    
+    for part in parts:
+        part = part.strip()
+        
+        # Проверяем, не диапазон ли это
+        if '-' in part and not part.startswith('-'):  # Исключаем отрицательные числа
+            try:
+                range_parts = part.split('-')
+                if len(range_parts) == 2:
+                    start = int(range_parts[0])
+                    end = int(range_parts[1])
+                    numbers.extend(range(start, end + 1))
+            except ValueError:
+                await message.answer(f"❌ Неверный формат диапазона: {part}\nПопробуйте еще раз:")
+                return
+        else:
+            # Обычное число
+            try:
+                numbers.append(int(part))
+            except ValueError:
+                await message.answer(f"❌ Неверный номер: {part}\nВведите числа через запятую:")
+                return
+    
+    if not numbers:
+        await message.answer("❌ Не удалось распознать номера. Попробуйте еще раз:")
+        return
+    
+    # Убираем дубликаты и сортируем
+    numbers = sorted(list(set(numbers)))
+    
+    await state.update_data(container_numbers=numbers)
+    
+    # Показываем, что будет сохранено
+    preview = f"📦 Будут обновлены контейнеры ({len(numbers)} шт.):\n"
+    if len(numbers) <= 20:
+        preview += ", ".join(str(n) for n in numbers)
+    else:
+        preview += ", ".join(str(n) for n in numbers[:10])
+        preview += f"... и еще {len(numbers)-10} номеров"
+    
+    preview += "\n\n📝 Введите описание для этих контейнеров\n(например: 'Пробирка с сиреневой крышкой / Калий ЭДТА'):"
+    
+    await message.answer(preview, reply_markup=get_back_to_menu_kb())
+    await state.set_state(ContainerPhotoStates.waiting_for_description)
+
+@admin_router.message(ContainerPhotoStates.waiting_for_description)
+async def save_container_photos_batch(message: Message, state: FSMContext):
+    if message.text == "🔙 Вернуться в главное меню":
+        await state.clear()
+        await message.answer("Операция отменена.", reply_markup=get_admin_menu_kb())
+        return
+    
+    data = await state.get_data()
+    container_numbers = data.get('container_numbers', [])
+    file_id = data.get('photo_file_id')
+    description = message.text if message.text != "-" else None
+    
+    if not container_numbers or not file_id:
+        await message.answer("❌ Ошибка: потеряны данные. Попробуйте заново.", reply_markup=get_container_photos_kb())
+        await state.set_state(ContainerPhotoStates.menu)
+        return
+    
+    # Показываем прогресс
+    progress_msg = await message.answer(f"⏳ Сохраняю фото для {len(container_numbers)} контейнеров...")
+    
+    success_count = 0
+    failed_count = 0
+    failed_numbers = []
+    
+    # Сохраняем для каждого номера
+    for num in container_numbers:
+        try:
+            success = await db.add_container_photo(
+                container_number=num,
+                file_id=file_id,
+                uploaded_by=message.from_user.id,
+                description=description
+            )
+            if success:
+                success_count += 1
+            else:
+                failed_count += 1
+                failed_numbers.append(num)
+        except Exception as e:
+            print(f"[ERROR] Failed to save container {num}: {e}")
+            failed_count += 1
+            failed_numbers.append(num)
+    
+    await progress_msg.delete()
+    
+    # Результат
+    result = f"✅ Готово!\n\n"
+    result += f"📸 Успешно сохранено: {success_count} контейнеров\n"
+    if failed_count > 0:
+        result += f"❌ Ошибки: {failed_count} контейнеров\n"
+        if failed_numbers:
+            result += f"Не удалось сохранить: {', '.join(str(n) for n in failed_numbers[:10])}"
+            if len(failed_numbers) > 10:
+                result += f"... и еще {len(failed_numbers)-10}"
+            result += "\n"
+    
+    if description:
+        result += f"\n📝 Описание: {description}"
+    
+    await message.answer(result, reply_markup=get_container_photos_kb())
+    await state.set_state(ContainerPhotoStates.menu)
+
+@admin_router.message(ContainerPhotoStates.waiting_for_number)
+async def receive_container_numbers(message: Message, state: FSMContext):
+    if message.text == "🔙 Вернуться в главное меню":
+        await state.clear()
+        await message.answer("Операция отменена.", reply_markup=get_admin_menu_kb())
+        return
+    
+    # Парсим введенные номера
+    numbers = []
     parts = message.text.replace(' ', '').split(',')
     
     for part in parts:
