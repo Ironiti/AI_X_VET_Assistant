@@ -18,7 +18,7 @@ from src.database.db_init import db
 from src.data_vectorization import DataProcessor
 from models.models_init import Google_Gemini_2_5_Flash_Lite as llm
 
-BOT_USERNAME = "AI_VET_UNION_BOT"
+BOT_USERNAME = "AL_VET_UNION_BOT"
 
 LOADING_GIF_ID = "CgACAgIAAxkBAAMIaGr_qy1Wxaw2VrBrm3dwOAkYji4AAu54AAKmqHlJAtZWBziZvaA2BA"
 # LOADING_GIF_ID = "CgACAgIAAxkBAAIBFGiBcXtGY7OZvr3-L1dZIBRNqSztAALueAACpqh5Scn4VmIRb4UjNgQ"
