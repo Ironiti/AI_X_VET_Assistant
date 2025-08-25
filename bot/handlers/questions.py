@@ -18,7 +18,7 @@ from src.database.db_init import db
 from src.data_vectorization import DataProcessor
 from models.models_init import Google_Gemini_2_5_Flash_Lite as llm
 
-BOT_USERNAME = "AL_VET_UNION_BOT"
+BOT_USERNAME = "AI_VET_UNION_BOT"
 
 LOADING_GIF_ID = "CgACAgIAAxkBAAMIaGr_qy1Wxaw2VrBrm3dwOAkYji4AAu54AAKmqHlJAtZWBziZvaA2BA"
 # LOADING_GIF_ID = "CgACAgIAAxkBAAIBFGiBcXtGY7OZvr3-L1dZIBRNqSztAALueAACpqh5Scn4VmIRb4UjNgQ"
@@ -114,15 +114,24 @@ def simple_translit(text: str) -> str:
 
 def reverse_translit(text: str) -> str:
     """Обратная транслитерация для deep links."""
+    # Добавляем проверку на None и пустую строку
+    if not text:
+        return ""
+    
     text = text.upper()
     
     # Специальные случаи для полных кодов
     special_cases = {
-        'ANDOKR': 'ANДОКР'
+        'ANDOKR': 'ANДОКР',
+        'AN515GIEH': 'AN515ГИЭ',
+        'AN506GIEH': 'AN506ГИЭ',
+        'AN513GIEH': 'AN513ГИЭ',
+        'AN515GIEH': 'AN515ГИЭ',
+        'AN712BTK': 'AN712БТК'
     }
     
     if text in special_cases:
-        return 
+        return special_cases[text]
     
     # Общая обратная транслитерация для суффиксов
     import re
@@ -165,6 +174,10 @@ def create_test_link(test_code: str) -> str:
 
 def normalize_test_code(text: str) -> str:
     """Нормализует введенный код теста."""
+    # Добавляем проверку на None и пустую строку
+    if not text:
+        return ""
+    
     text = text.strip().upper().replace(' ', '')
     
     # Заменяем кириллицу на латиницу в префиксе AN/АН
@@ -715,8 +728,16 @@ def calculate_phonetic_score(query: str, test_code: str) -> float:
 async def smart_test_search(processor, original_query: str) -> Optional[tuple]:
     """Умный поиск с учетом различных вариантов написания."""
     
+    # Добавляем проверку на None и пустую строку
+    if not original_query:
+        return None, None, None
+    
     # Нормализуем запрос
     normalized_query = normalize_test_code(original_query)
+    
+    # Если после нормализации получили пустую строку
+    if not normalized_query:
+        return None, None, None
     
     # 1. Точный поиск по нормализованному коду
     results = processor.search_test(filter_dict={"test_code": normalized_query})
