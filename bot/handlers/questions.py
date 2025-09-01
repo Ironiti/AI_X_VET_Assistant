@@ -23,6 +23,7 @@ BOT_USERNAME = "AL_VET_UNION_BOT"
 LOADING_GIF_ID = "CgACAgIAAxkBAAMIaGr_qy1Wxaw2VrBrm3dwOAkYji4AAu54AAKmqHlJAtZWBziZvaA2BA"
 # LOADING_GIF_ID = "CgACAgIAAxkBAAIBFGiBcXtGY7OZvr3-L1dZIBRNqSztAALueAACpqh5Scn4VmIRb4UjNgQ"
 # LOADING_GIF_ID = "CgACAgIAAxkBAAMMaHSq3vqxq2RuMMj-DIMvldgDjfkAAu54AAKmqHlJCNcCjeoHRJI2BA"
+
 questions_router = Router()
 
 def fix_bold(text: str) -> str:
@@ -94,83 +95,57 @@ def is_test_code_pattern(text: str) -> bool:
             
     return False
 
-def simple_translit(text: str) -> str:
-    """Простая транслитерация для deep links."""
-    translit_map = {
-        'А': 'A', 'Б': 'B', 'В': 'V', 'Г': 'G', 'Д': 'D', 'Е': 'E', 'Ё': 'YO',
-        'Ж': 'ZH', 'З': 'Z', 'И': 'I', 'Й': 'Y', 'К': 'K', 'Л': 'L', 'М': 'M',
-        'Н': 'N', 'О': 'O', 'П': 'P', 'Р': 'R', 'С': 'S', 'Т': 'T', 'У': 'U',
-        'Ф': 'F', 'Х': 'KH', 'Ц': 'TS', 'Ч': 'CH', 'Ш': 'SH', 'Щ': 'SCH',
-        'Ъ': '', 'Ы': 'YI', 'Ь': '', 'Э': 'EH', 'Ю': 'YU', 'Я': 'YA'
-    }
-    
-    result = ''
-    for char in text.upper():
-        if char in translit_map:
-            result += translit_map[char]
-        else:
-            result += char
-    return result
-
-def reverse_translit(text: str) -> str:
-    """Обратная транслитерация для deep links."""
-    # Добавляем проверку на None и пустую строку
-    if not text:
+def encode_test_code_for_url(test_code: str) -> str:
+    """Надежно кодирует код теста для использования в URL."""
+    if not test_code:
         return ""
     
-    text = text.upper()
+    try:
+        # Кодируем в bytes, затем в URL-safe base64
+        encoded_bytes = test_code.encode('utf-8')
+        encoded_b64 = base64.urlsafe_b64encode(encoded_bytes).decode('ascii')
+        # Убираем padding '=' для более чистых URL
+        encoded_b64 = encoded_b64.rstrip('=')
+        return encoded_b64
+    except Exception as e:
+        print(f"[ERROR] Failed to encode test code '{test_code}': {e}")
+        # Fallback: используем только ASCII символы
+        safe_code = ''.join(c if c.isascii() else '_' for c in test_code)
+        return base64.urlsafe_b64encode(safe_code.encode()).decode().rstrip('=')
+
+def decode_test_code_from_url(encoded_code: str) -> str:
+    """Надежно декодирует код теста из URL."""
+    if not encoded_code:
+        return ""
     
-    # Специальные случаи для полных кодов
-    special_cases = {
-        'ANDOKR': 'ANДОКР',
-        'AN515GIEH': 'AN515ГИЭ',
-        'AN506GIEH': 'AN506ГИЭ',
-        'AN513GIEH': 'AN513ГИЭ',
-        'AN515GIEH': 'AN515ГИЭ',
-        'AN712BTK': 'AN712БТК'
-    }
-    
-    if text in special_cases:
-        return special_cases[text]
-    
-    # Общая обратная транслитерация для суффиксов
-    import re
-    match = re.match(r'^(AN\d+)(.+)$', text)
-    if match:
-        prefix = match.group(1)
-        suffix = match.group(2)
+    try:
+        # Восстанавливаем padding если нужно
+        padding_needed = 4 - (len(encoded_code) % 4)
+        if padding_needed and padding_needed != 4:
+            encoded_code += '=' * padding_needed
         
-        # Словарь суффиксов
-        suffix_map = {
-            'GIEH': 'ГИЭ',
-            'GII': 'ГИИ', 
-            'BTK': 'БТК',
-            'BAL': 'БАЛ',
-            'KLSCH': 'КЛЩ',
-            'VPT': 'ВПТ',
-            'GLZ': 'ГЛЗ',
-            'GSK': 'ГСК',
-            'KM': 'КМ',
-            'KR': 'КР',
-            'LIK': 'ЛИК',
-            'NOS': 'НОС',
-            'PRK': 'ПРК',
-            'ROT': 'РОТ',
-            'SIN': 'СИН',
-            'FK': 'ФК',
-            'ASP': 'АСП',
-            'OBS': 'ОБС'
-        }
+        # Декодируем
+        decoded_bytes = base64.urlsafe_b64decode(encoded_code)
+        decoded_str = decoded_bytes.decode('utf-8')
         
-        if suffix in suffix_map:
-            return prefix + suffix_map[suffix]
-    
-    return text
+        print(f"[DEBUG] Successfully decoded: {encoded_code} -> {decoded_str}")
+        return decoded_str
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to decode '{encoded_code}': {e}")
+        # Fallback: возвращаем как есть для попытки поиска
+        return encoded_code
 
 def create_test_link(test_code: str) -> str:
     """Создает deep link для теста."""
-    safe_code = simple_translit(test_code)
-    return f"https://t.me/{BOT_USERNAME}?start=test_{safe_code}"
+    if not test_code:
+        return f"https://t.me/{BOT_USERNAME}"
+    
+    encoded_code = encode_test_code_for_url(test_code)
+    link = f"https://t.me/{BOT_USERNAME}?start=test_{encoded_code}"
+    
+    print(f"[DEBUG] Created link: {test_code} -> {encoded_code} -> {link}")
+    return link
 
 def normalize_test_code(text: str) -> str:
     """Нормализует введенный код теста."""
@@ -194,21 +169,99 @@ def normalize_test_code(text: str) -> str:
 
 async def get_test_container_photos(test_data: Dict) -> List[Dict]:
     """Получает все фото контейнеров для теста"""
-    container_string = str(test_data.get('container_number', ''))
+    container_type_raw = str(test_data.get('container_type', '')).strip()
     
-    # Парсим номера контейнеров
-    container_numbers = db.parse_container_numbers(container_string)
+    if not container_type_raw or container_type_raw.lower() in ['не указан', 'нет', '-', '']:
+        return []
+    
+    # Убираем кавычки и нормализуем
+    container_type_raw = container_type_raw.replace('"', '').replace('\n', ' ')
+    container_type_raw = ' '.join(container_type_raw.split())
     
     photos = []
-    for num in container_numbers:
-        file_id = await db.get_container_photo(num)
-        if file_id:
-            photos.append({
-                'number': num,
-                'file_id': file_id
-            })
+    
+    # Разбиваем по *I* если есть несколько контейнеров
+    container_types = []
+    if '*I*' in container_type_raw:
+        container_types = [ct.strip() for ct in container_type_raw.split('*I*')]
+    else:
+        container_types = [container_type_raw]
+    
+    for ct in container_types:
+        if ct:
+            # Нормализуем каждый тип
+            ct_normalized = ' '.join(word.capitalize() for word in ct.split())
+            photo_data = await db.get_container_photo(ct_normalized)
+            if photo_data:
+                photos.append({
+                    'type': ct_normalized,
+                    'file_id': photo_data['file_id'],
+                    'description': photo_data.get('description')
+                })
     
     return photos
+
+async def send_test_info_with_photo(message: Message, test_data: Dict, response_text: str):
+    """Отправляет информацию о тесте с фото контейнера если оно есть"""
+    container_type_raw = str(test_data.get('container_type', '')).strip()
+    
+    if container_type_raw and container_type_raw.lower() not in ['не указан', 'нет', '-', '']:
+        # Убираем кавычки и нормализуем
+        container_type_raw = container_type_raw.replace('"', '').replace('\n', ' ')
+        container_type_raw = ' '.join(container_type_raw.split())
+        
+        # Получаем все типы контейнеров
+        if '*I*' in container_type_raw:
+            container_types = [ct.strip() for ct in container_type_raw.split('*I*')]
+        else:
+            container_types = [container_type_raw]
+        
+        # Нормализуем первый тип (ВАЖНО: каждое слово с заглавной буквы)
+        first_type = ' '.join(word.capitalize() for word in container_types[0].split()) if container_types else None
+        
+        if first_type:
+            print(f"[DEBUG] Looking for container photo: '{first_type}'")  # Для отладки
+            photo_data = await db.get_container_photo(first_type)
+            
+            if photo_data:
+                try:
+                    print(f"[DEBUG] Found photo for container: '{first_type}'")
+                    # Отправляем фото с полной информацией в подписи
+                    await message.answer_photo(
+                        photo=photo_data['file_id'],
+                        caption=response_text,
+                        parse_mode="HTML"
+                    )
+                    
+                    # Если есть еще контейнеры - отправляем их дополнительными фото
+                    if len(container_types) > 1:
+                        for ct in container_types[1:]:
+                            # ВАЖНО: нормализуем каждый тип
+                            ct_normalized = ' '.join(word.capitalize() for word in ct.split())
+                            print(f"[DEBUG] Looking for additional container: '{ct_normalized}'")
+                            photo_data = await db.get_container_photo(ct_normalized)
+                            if photo_data:
+                                try:
+                                    caption = f"🧪 Дополнительный контейнер: {ct_normalized}"
+                                    if photo_data.get('description'):
+                                        caption += f"\n📝 {photo_data['description']}"
+                                    
+                                    await message.answer_photo(
+                                        photo=photo_data['file_id'],
+                                        caption=caption,
+                                        parse_mode="HTML"
+                                    )
+                                except Exception as e:
+                                    print(f"[ERROR] Failed to send additional photo: {e}")
+                    return True
+                except Exception as e:
+                    print(f"[ERROR] Failed to send photo with caption: {e}")
+            else:
+                print(f"[DEBUG] No photo found for container: '{first_type}'")
+    
+    # Если фото нет - отправляем обычное текстовое сообщение
+    await message.answer(response_text, parse_mode="HTML", disable_web_page_preview=True)
+    return False
 
 async def show_container_photos(message: Message, test_data: Dict):
     """Показывает все фото контейнеров для теста"""
@@ -1970,35 +2023,36 @@ async def handle_dialog(message: Message, state: FSMContext):
         
 async def send_test_info_with_photo(message: Message, test_data: Dict, response_text: str):
     """Отправляет информацию о тесте с фото контейнера если оно есть"""
-    # Получаем номера контейнеров
-    container_numbers = db.parse_container_numbers(str(test_data.get('container_number', '')))
+    container_type = str(test_data.get('container_type', '')).strip()
     
-    if container_numbers:
-        # Получаем фото первого контейнера
-        first_photo = await db.get_container_photo(container_numbers[0])
+    if container_type and container_type.lower() not in ['не указан', 'нет', '-', '']:
+        # Получаем первый тип контейнера (если их несколько)
+        first_type = container_type.split('*I*')[0].strip()
         
-        if first_photo:
+        photo_data = await db.get_container_photo(first_type)
+        
+        if photo_data:
             try:
                 # Отправляем фото с полной информацией в подписи
                 await message.answer_photo(
-                    photo=first_photo,
+                    photo=photo_data['file_id'],
                     caption=response_text,
                     parse_mode="HTML"
                 )
                 
                 # Если есть еще контейнеры - отправляем их дополнительными фото
-                if len(container_numbers) > 1:
-                    for num in container_numbers[1:]:
-                        photo_id = await db.get_container_photo(num)
-                        if photo_id:
-                            try:
-                                await message.answer_photo(
-                                    photo=photo_id,
-                                    caption=f"🧪 Дополнительный контейнер №{num}",
-                                    parse_mode="HTML"
-                                )
-                            except:
-                                pass
+                other_types = [ct.strip() for ct in container_type.split('*I*')[1:] if ct.strip()]
+                for ct in other_types:
+                    photo_data = await db.get_container_photo(ct)
+                    if photo_data:
+                        try:
+                            await message.answer_photo(
+                                photo=photo_data['file_id'],
+                                caption=f"🧪 Дополнительный контейнер: {ct}",
+                                parse_mode="HTML"
+                            )
+                        except:
+                            pass
                 return True
             except Exception as e:
                 print(f"[ERROR] Failed to send photo with caption: {e}")
@@ -2039,6 +2093,6 @@ __all__ = [
     'create_test_link',
     'BOT_USERNAME',
     'normalize_test_code',
-    'simple_translit',
-    'reverse_translit'
+    'encode_test_code_for_url', 
+    'decode_test_code_from_url' 
 ]

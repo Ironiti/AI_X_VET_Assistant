@@ -11,6 +11,43 @@ class Database:
         self.db_path = db_path
         self.test_processor = DataProcessor()
         
+    async def get_unique_container_types(self) -> list[str]:
+        """Получает уникальные типы контейнеров из базы тестов"""
+        try:
+            if not self.test_processor.vector_store:
+                self.test_processor.load_vector_store()
+            
+            all_tests = self.test_processor.search_test(query="", top_k=2000)
+            
+            container_types = set()
+            
+            for doc, _ in all_tests:
+                container_type_raw = doc.metadata.get('container_type', '').strip()
+                
+                if not container_type_raw or container_type_raw.lower() in ['не указан', 'нет', '-', '']:
+                    continue
+                
+                # Убираем переносы строк, лишние пробелы и кавычки
+                container_type_raw = container_type_raw.replace('"', '').replace('\n', ' ')
+                container_type_raw = ' '.join(container_type_raw.split())
+                
+                # Разбиваем по *I* если есть несколько контейнеров
+                parts = container_type_raw.split('*I*')
+                
+                for part in parts:
+                    container_type = part.strip()
+                    if container_type:
+                        # ВАЖНО: Нормализуем - первая буква каждого слова заглавная
+                        normalized = ' '.join(word.capitalize() for word in container_type.split())
+                        container_types.add(normalized)
+            
+            # Возвращаем отсортированный список
+            return sorted(list(container_types))
+            
+        except Exception as e:
+            print(f"[ERROR] Failed to get container types: {e}")
+            return []
+        
     async def update_poll_media(self, poll_id, media_file_id, media_type):
         """Добавление благодарственного медиа к опросу"""
         async with aiosqlite.connect(self.db_path) as db:
@@ -654,66 +691,107 @@ class Database:
             await db.commit()
             
             return deleted
-
-    # НОВЫЕ МЕТОДЫ ДЛЯ РАБОТЫ С ФОТО КОНТЕЙНЕРОВ
-    def parse_container_numbers(self, container_string: str) -> list[int]:
-        """Парсит строку с номерами контейнеров (например: '836 *I* 800' -> [836, 800])"""
-        # Находим все числа в строке
-        numbers = re.findall(r'\d+', str(container_string))
-        return [int(n) for n in numbers]
-
-    async def add_container_photo(self, container_number: int, file_id: str, uploaded_by: int, description: str = None):
-        """Добавляет или обновляет фото контейнера с описанием"""
+        
+    async def ensure_container_photos_table(self):
+        """Создает таблицу container_photos если её нет"""
         async with aiosqlite.connect(self.db_path) as db:
-            # Сначала проверяем, есть ли колонка description
-            cursor = await db.execute("PRAGMA table_info(container_photos)")
-            columns = await cursor.fetchall()
-            column_names = [col[1] for col in columns]
-            
-            if 'description' not in column_names:
-                await db.execute('ALTER TABLE container_photos ADD COLUMN description TEXT')
-            
             await db.execute('''
-                INSERT OR REPLACE INTO container_photos (container_number, file_id, uploaded_by, description)
-                VALUES (?, ?, ?, ?)
-            ''', (container_number, file_id, uploaded_by, description))
+                CREATE TABLE IF NOT EXISTS container_photos (
+                    container_type TEXT PRIMARY KEY,
+                    file_id TEXT NOT NULL,
+                    description TEXT,
+                    uploaded_by INTEGER,
+                    upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (uploaded_by) REFERENCES users(telegram_id)
+                )
+            ''')
             await db.commit()
-            return True
+            
+    async def add_container_photo(self, container_type: str, file_id: str, uploaded_by: int, description: str = None):
+        """Добавляет или обновляет фото для типа контейнера"""
+        try:
+            await self.ensure_container_photos_table()
+            # Нормализуем тип контейнера при сохранении (каждое слово с заглавной буквы)
+            normalized_type = ' '.join(word.capitalize() for word in container_type.split())
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    INSERT OR REPLACE INTO container_photos 
+                    (container_type, file_id, uploaded_by, description, upload_date)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (normalized_type, file_id, uploaded_by, description, datetime.now()))
+                
+                await db.commit()
+                print(f"[INFO] Saved photo for container: '{normalized_type}'")
+                return True
+        except Exception as e:
+            print(f"[ERROR] Failed to add container photo: {e}")
+            return False
 
-    async def delete_container_photo(self, container_number: int):
-        """Удаляет фото контейнера"""
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute('DELETE FROM container_photos WHERE container_number = ?', (container_number,))
-            await db.commit()
-            return True
+    async def get_container_photo(self, container_type: str):
+        """Получает фото контейнера по типу"""
+        try:
+            await self.ensure_container_photos_table()
+            # Нормализуем тип контейнера при поиске
+            normalized_type = ' '.join(word.capitalize() for word in container_type.split())
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute(
+                    'SELECT file_id, description FROM container_photos WHERE container_type = ?',
+                    (normalized_type,)
+                )
+                row = await cursor.fetchone()
+                
+                # Если не нашли точное совпадение, пробуем без учета регистра
+                if not row:
+                    cursor = await db.execute(
+                        'SELECT file_id, description FROM container_photos WHERE LOWER(container_type) = LOWER(?)',
+                        (container_type.strip(),)
+                    )
+                    row = await cursor.fetchone()
+                
+                if row:
+                    return {'file_id': row[0], 'description': row[1]}
+                
+                # Для отладки
+                print(f"[DEBUG] No photo found for container type: '{normalized_type}'")
+                return None
+        except Exception as e:
+            print(f"[ERROR] Failed to get container photo: {e}")
+            return None
 
-    async def get_container_photo(self, container_number: int):
-        """Получает фото контейнера по номеру"""
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute(
-                'SELECT file_id FROM container_photos WHERE container_number = ?',
-                (container_number,)
-            )
-            row = await cursor.fetchone()
-            return row[0] if row else None
+    async def delete_container_photo(self, container_type: str):
+        """Удаляет фото контейнера по типу"""
+        try:
+            await self.ensure_container_photos_table()
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute(
+                    'DELETE FROM container_photos WHERE container_type = ?', 
+                    (container_type,)
+                )
+                deleted = cursor.rowcount > 0
+                await db.commit()
+                return deleted
+        except Exception as e:
+            print(f"[ERROR] Failed to delete container photo: {e}")
+            return False
 
     async def get_all_container_photos(self):
         """Получает все фото контейнеров"""
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute('''
-                SELECT container_number, file_id, upload_date 
-                FROM container_photos 
-                ORDER BY container_number
-            ''')
-            rows = await cursor.fetchall()
-            return [
-                {
-                    'container_number': row[0],
-                    'file_id': row[1],
-                    'upload_date': row[2]
-                }
-                for row in rows
-            ]
+        try:
+            await self.ensure_container_photos_table()
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute('''
+                    SELECT container_type, file_id, upload_date, description, uploaded_by
+                    FROM container_photos 
+                    ORDER BY container_type
+                ''')
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
+        except Exception as e:
+            print(f"[ERROR] Failed to get all container photos: {e}")
+            return []   
         
     async def initialize(self):
         """Initialize database and vector store"""
@@ -722,6 +800,18 @@ class Database:
     
     async def create_tables(self):
         async with aiosqlite.connect(self.db_path) as db:
+            # ПРАВИЛЬНАЯ версия таблицы container_photos
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS container_photos (
+                    container_type TEXT PRIMARY KEY,
+                    file_id TEXT NOT NULL,
+                    description TEXT,
+                    uploaded_by INTEGER,
+                    upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (uploaded_by) REFERENCES users(telegram_id)
+                )
+            ''')
+            
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS search_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -731,19 +821,6 @@ class Database:
                     search_type TEXT CHECK(search_type IN ('code', 'text', 'voice')),
                     success BOOLEAN DEFAULT TRUE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (user_id) REFERENCES users(telegram_id)
-                )
-            ''')
-            
-            # Таблица частых тестов пользователя
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS user_frequent_tests (
-                    user_id INTEGER,
-                    test_code TEXT,
-                    test_name TEXT,
-                    frequency INTEGER DEFAULT 1,
-                    last_accessed TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (user_id, test_code),
                     FOREIGN KEY (user_id) REFERENCES users(telegram_id)
                 )
             ''')
