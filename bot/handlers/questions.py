@@ -143,8 +143,7 @@ def create_test_link(test_code: str) -> str:
     
     encoded_code = encode_test_code_for_url(test_code)
     link = f"https://t.me/{BOT_USERNAME}?start=test_{encoded_code}"
-    
-    print(f"[DEBUG] Created link: {test_code} -> {encoded_code} -> {link}")
+
     return link
 
 def normalize_test_code(text: str) -> str:
@@ -202,10 +201,57 @@ async def get_test_container_photos(test_data: Dict) -> List[Dict]:
     return photos
 
 async def send_test_info_with_photo(message: Message, test_data: Dict, response_text: str):
-    """Отправляет информацию о тесте с фото контейнера если оно есть"""
+    """Отправляет информацию о тесте с кнопкой для показа фото контейнеров"""
     container_type_raw = str(test_data.get('container_type', '')).strip()
     
-    if container_type_raw and container_type_raw.lower() not in ['не указан', 'нет', '-', '']:
+    # Проверяем, есть ли контейнеры для показа
+    has_containers = (container_type_raw and 
+                     container_type_raw.lower() not in ['не указан', 'нет', '-', ''])
+    
+    keyboard = None
+    
+    if has_containers:
+        # Создаем кнопку для показа фото
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="📷 Показать фото контейнеров", 
+                callback_data=f"show_container_photos:{test_data['test_code']}"
+            )]
+        ])
+    
+    # Отправляем текстовую информацию с кнопкой
+    await message.answer(
+        response_text, 
+        parse_mode="HTML", 
+        disable_web_page_preview=True,
+        reply_markup=keyboard
+    )
+    return True
+
+@questions_router.callback_query(F.data.startswith("show_container_photos:"))
+async def handle_show_container_photos_callback(callback: CallbackQuery):
+    """Обработчик для показа фото контейнеров"""
+    await callback.answer()
+    
+    # Извлекаем код теста
+    test_code = callback.data.split(":", 1)[1]
+    
+    try:
+        # Ищем тест в базе
+        processor = DataProcessor()
+        processor.load_vector_store()
+        
+        results = processor.search_test(filter_dict={"test_code": test_code})
+        
+        if not results:
+            await callback.message.answer("❌ Тест не найден")
+            return
+        
+        doc = results[0][0] if isinstance(results[0], tuple) else results[0]
+        test_data = format_test_data(doc.metadata)
+        
+        container_type_raw = str(test_data.get('container_type', '')).strip()
+        
         # Убираем кавычки и нормализуем
         container_type_raw = container_type_raw.replace('"', '').replace('\n', ' ')
         container_type_raw = ' '.join(container_type_raw.split())
@@ -216,52 +262,136 @@ async def send_test_info_with_photo(message: Message, test_data: Dict, response_
         else:
             container_types = [container_type_raw]
         
-        # Нормализуем первый тип (ВАЖНО: каждое слово с заглавной буквы)
-        first_type = ' '.join(word.capitalize() for word in container_types[0].split()) if container_types else None
+        # Собираем все фото контейнеров
+        found_photos = []
         
-        if first_type:
-            print(f"[DEBUG] Looking for container photo: '{first_type}'")  # Для отладки
-            photo_data = await db.get_container_photo(first_type)
+        for ct in container_types:
+            # Нормализуем каждый тип
+            ct_normalized = ' '.join(word.capitalize() for word in ct.split())
             
+            photo_data = await db.get_container_photo(ct_normalized)
             if photo_data:
-                try:
-                    print(f"[DEBUG] Found photo for container: '{first_type}'")
-                    # Отправляем фото с полной информацией в подписи
-                    await message.answer_photo(
-                        photo=photo_data['file_id'],
-                        caption=response_text,
-                        parse_mode="HTML"
-                    )
+                found_photos.append(photo_data['file_id'])
+        
+        # Если есть фото - отправляем
+        if found_photos:
+            message_ids = []
+            
+            # Отправляем все фото по отдельности
+            for i, file_id in enumerate(found_photos):
+                is_last = (i == len(found_photos) - 1)
+                
+                if is_last:
+                    # Последнее фото с кнопкой
+                    hide_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(
+                            text="🙈 Скрыть фото", 
+                            callback_data=f"hide_photos:{test_code}:placeholder"
+                        )]
+                    ])
                     
-                    # Если есть еще контейнеры - отправляем их дополнительными фото
-                    if len(container_types) > 1:
-                        for ct in container_types[1:]:
-                            # ВАЖНО: нормализуем каждый тип
-                            ct_normalized = ' '.join(word.capitalize() for word in ct.split())
-                            print(f"[DEBUG] Looking for additional container: '{ct_normalized}'")
-                            photo_data = await db.get_container_photo(ct_normalized)
-                            if photo_data:
-                                try:
-                                    caption = f"🧪 Дополнительный контейнер: {ct_normalized}"
-                                    if photo_data.get('description'):
-                                        caption += f"\n📝 {photo_data['description']}"
-                                    
-                                    await message.answer_photo(
-                                        photo=photo_data['file_id'],
-                                        caption=caption,
-                                        parse_mode="HTML"
-                                    )
-                                except Exception as e:
-                                    print(f"[ERROR] Failed to send additional photo: {e}")
-                    return True
-                except Exception as e:
-                    print(f"[ERROR] Failed to send photo with caption: {e}")
-            else:
-                print(f"[DEBUG] No photo found for container: '{first_type}'")
+                    sent_msg = await callback.message.answer_photo(
+                        photo=file_id,
+                        reply_markup=hide_keyboard
+                    )
+                else:
+                    # Остальные фото без кнопки
+                    sent_msg = await callback.message.answer_photo(
+                        photo=file_id
+                    )
+                
+                message_ids.append(sent_msg.message_id)
+            
+            # Обновляем callback_data последнего сообщения со всеми ID
+            if message_ids:
+                hide_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(
+                        text="🙈 Скрыть фото", 
+                        callback_data=f"hide_photos:{test_code}:{','.join(map(str, message_ids))}"
+                    )]
+                ])
+                
+                # Редактируем кнопку последнего сообщения
+                await callback.bot.edit_message_reply_markup(
+                    chat_id=callback.message.chat.id,
+                    message_id=message_ids[-1],
+                    reply_markup=hide_keyboard
+                )
+            
+        else:
+            await callback.message.answer("❌ Фото контейнеров не найдены в базе")
+            
+    except Exception as e:
+        print(f"[ERROR] Failed to show container photos: {e}")
+        await callback.message.answer("❌ Ошибка при загрузке фото")
+
+
+@questions_router.callback_query(F.data.startswith("hide_photos:"))
+async def handle_hide_photos_callback(callback: CallbackQuery):
+    """Обработчик для скрытия фото контейнеров"""
+    await callback.answer("Фото скрыты")
     
-    # Если фото нет - отправляем обычное текстовое сообщение
-    await message.answer(response_text, parse_mode="HTML", disable_web_page_preview=True)
-    return False
+    try:
+        # Парсим данные: hide_photos:test_code:photo_msg_ids
+        parts = callback.data.split(":", 2)
+        photo_msg_ids = [int(msg_id) for msg_id in parts[2].split(",")]
+        
+        # Удаляем все сообщения с фото (включая последнее с кнопкой)
+        for msg_id in photo_msg_ids:
+            try:
+                await callback.bot.delete_message(
+                    chat_id=callback.message.chat.id,
+                    message_id=msg_id
+                )
+            except:
+                pass
+            
+    except Exception as e:
+        print(f"[ERROR] Failed to hide photos: {e}")
+        await callback.answer("❌ Ошибка при скрытии фото", show_alert=True)
+
+
+# Добавляем обработчик для одиночного фото
+@questions_router.callback_query(F.data.startswith("hide_single:"))
+async def handle_hide_single_photo(callback: CallbackQuery):
+    """Обработчик для скрытия одиночного фото с кнопкой"""
+    await callback.answer("Фото скрыто")
+    
+    try:
+        # Удаляем сообщение с фото и кнопкой
+        await callback.message.delete()
+    except Exception as e:
+        print(f"[ERROR] Failed to hide single photo: {e}")
+
+
+@questions_router.callback_query(F.data.startswith("hide_photos:"))
+async def handle_hide_photos_callback(callback: CallbackQuery):
+    """Обработчик для скрытия фото контейнеров"""
+    await callback.answer("Фото скрыты")  # Только всплывающее уведомление
+    
+    try:
+        # Парсим данные: hide_photos:test_code:photo_msg_ids
+        parts = callback.data.split(":", 2)
+        photo_msg_ids = [int(msg_id) for msg_id in parts[2].split(",")]
+        
+        for msg_id in photo_msg_ids:
+            try:
+                await callback.bot.delete_message(
+                    chat_id=callback.message.chat.id,
+                    message_id=msg_id
+                )
+            except:
+                pass
+        
+        try:
+            await callback.message.delete()
+        except:
+            pass
+            
+    except Exception as e:
+        print(f"[ERROR] Failed to hide photos: {e}")
+        # Ошибку показываем только во всплывающем уведомлении
+        await callback.answer("❌ Ошибка при скрытии фото", show_alert=True)
 
 async def show_container_photos(message: Message, test_data: Dict):
     """Показывает все фото контейнеров для теста"""
@@ -778,6 +908,11 @@ def calculate_phonetic_score(query: str, test_code: str) -> float:
     base_score = (matches / max_len) * 100
     return max(0, base_score - digit_penalty)
 
+async def get_user_name_for_greeting(user_id: int) -> str:
+    """Асинхронная функция для получения имени пользователя для приветствия"""
+    user = await db.get_user(user_id)
+    return get_user_first_name(user)
+
 async def smart_test_search(processor, original_query: str) -> Optional[tuple]:
     """Умный поиск с учетом различных вариантов написания."""
     
@@ -867,6 +1002,7 @@ def get_time_based_farewell(user_name: str = None):
     tz = pytz.timezone('Europe/Minsk')
     current_hour = datetime.now(tz).hour
     
+    # Проверяем, что имя не пустое и не дефолтное
     name_part = f", {user_name}" if user_name and user_name != 'друг' else ""
     
     if 4 <= current_hour < 12:
@@ -878,18 +1014,73 @@ def get_time_based_farewell(user_name: str = None):
     else:
         return f"Рад был помочь{name_part}! Доброй ночи 🌙"
     
+async def get_user_greeting_name(user_id: int) -> str:
+    """Получает правильное имя для обращения к пользователю"""
+    user = await db.get_user(user_id)
+    if not user:
+        return "друг"
+    
+    # Для сотрудников используем только имя
+    if user.get('user_type') == 'employee':
+        # Приоритет: first_name, затем первое слово из name
+        if user.get('first_name'):
+            return user['first_name']
+        elif user.get('name'):
+            # Fallback для старых записей
+            parts = user['name'].split()
+            # Для сотрудников предполагаем формат "Фамилия Имя"
+            return parts[1] if len(parts) > 1 else parts[0]
+    
+    # Для клиентов используем первое слово из полного имени
+    if user.get('name'):
+        name_parts = user['name'].split()
+        return name_parts[0]
+    
+    return "друг"
+
+
+    
 def get_user_first_name(user):
+    """Универсальная функция получения имени для обращения"""
     if not user:
         return 'друг'
-    # Совместимость с dict и aiosqlite.Row
-    name = user['name'] if 'name' in user.keys() else None
-    if not name:
+    
+    # Обработка sqlite3.Row или dict
+    try:
+        # Пробуем как словарь (для dict)
+        user_type = user.get('user_type') if hasattr(user, 'get') else user['user_type']
+    except (KeyError, TypeError):
         return 'друг'
-    full_name = name.strip()
-    name_parts = full_name.split()
-    if len(name_parts) >= 2 and ('user_type' in user.keys() and user['user_type'] == 'employee'):
-        return name_parts[1]  # Для сотрудников: Фамилия Имя
-    return name_parts[0]  # Для клиентов или однословных имен
+    
+    if user_type == 'employee':
+        # Для сотрудников используем first_name
+        try:
+            first_name = user.get('first_name') if hasattr(user, 'get') else user['first_name']
+            if first_name:
+                return first_name
+        except (KeyError, TypeError):
+            pass
+        
+        # Fallback на разбор полного имени для старых записей
+        try:
+            name = user.get('name') if hasattr(user, 'get') else user['name']
+            if name:
+                parts = name.strip().split()
+                # Предполагаем формат "Фамилия Имя" для сотрудников
+                return parts[1] if len(parts) > 1 else parts[0]
+        except (KeyError, TypeError):
+            pass
+    else:
+        # Для клиентов используем первое слово из name
+        try:
+            name = user.get('name') if hasattr(user, 'get') else user['name']
+            if name:
+                parts = name.strip().split()
+                return parts[0]
+        except (KeyError, TypeError):
+            pass
+    
+    return 'друг'
 
 def format_test_data(metadata: Dict) -> Dict:
     """Extract and format test metadata into standardized dictionary."""
@@ -1255,11 +1446,11 @@ async def handle_show_test_callback(callback: CallbackQuery, state: FSMContext):
         await state.set_state(QuestionStates.in_dialog)
         await state.update_data(current_test=test_data, last_viewed_test=test_data['test_code'])
         
-        # Показываем клавиатуру для продолжения диалога
-        await callback.message.answer(
-            "Можете задать вопрос об этом тесте или выбрать действие:",
-            reply_markup=get_dialog_kb()
-        )
+        # # Показываем клавиатуру для продолжения диалога
+        # await callback.message.answer(
+        #     "Можете задать вопрос об этом тесте или выбрать действие:",
+        #     reply_markup=get_dialog_kb()
+        # )
         
     except Exception as e:
         print(f"[ERROR] Callback handling failed: {e}")
@@ -1411,11 +1602,11 @@ async def handle_quick_test_selection(callback: CallbackQuery, state: FSMContext
         await state.set_state(QuestionStates.in_dialog)
         await state.update_data(current_test=test_data, last_viewed_test=test_data['test_code'])
         
-        # Показываем клавиатуру для продолжения диалога
-        await callback.message.answer(
-            "Можете задать вопрос об этом тесте или выбрать действие:",
-            reply_markup=get_dialog_kb()
-        )
+        # # Показываем клавиатуру для продолжения диалога
+        # await callback.message.answer(
+        #     "Можете задать вопрос об этом тесте или выбрать действие:",
+        #     reply_markup=get_dialog_kb()
+        # )
         
     except Exception as e:
         print(f"[ERROR] Quick test selection failed: {e}")
@@ -1440,6 +1631,7 @@ async def start_question(message: Message, state: FSMContext):
         await message.answer("Для использования этой функции необходимо пройти регистрацию.\nИспользуйте команду /start")
         return
 
+    # Используем обновленную функцию
     user_name = get_user_first_name(user)
     
     prompt = f"""Привет, {user_name} 👋
@@ -1465,12 +1657,22 @@ async def start_question(message: Message, state: FSMContext):
 async def handle_end_dialog(message: Message, state: FSMContext):
     current_state = await state.get_state()
     user = await db.get_user(message.from_user.id)
-    role = user['role'] if 'role' in user.keys() else 'staff'
+    
+    # Исправленная обработка role
+    if user:
+        try:
+            role = user['role'] if user['role'] else 'user'
+        except (KeyError, TypeError):
+            role = 'user'
+    else:
+        role = 'user'
+    
+    # Используем обновленную функцию
     user_name = get_user_first_name(user)
     
     # Исключение: если пользователь нажал "задать вопрос ассистенту" и не ввел вопрос
     if current_state == QuestionStates.waiting_for_search_type:
-        # Возвращаем в главное меню без прощания
+        # Возвращаем в главное меню
         await state.clear()
         farewell = get_time_based_farewell(user_name)
         await message.answer(farewell, reply_markup=get_menu_by_role(role))
@@ -1481,6 +1683,7 @@ async def handle_end_dialog(message: Message, state: FSMContext):
     farewell = get_time_based_farewell(user_name)
     await message.answer(farewell, reply_markup=get_menu_by_role(role))
     return
+
 
 # Обработчик для старой кнопки (для совместимости)
 @questions_router.message(F.text == "🔙 Вернуться в главное меню")
@@ -1663,10 +1866,10 @@ async def handle_code_search(message: Message, state: FSMContext):
         # ИЗМЕНЕНО: Отправляем информацию с фото
         await send_test_info_with_photo(message, test_data, response)
         
-        await message.answer(
-            "Можете задать вопрос об этом тесте или выбрать действие:", 
-            reply_markup=get_dialog_kb()
-        )
+        # await message.answer(
+        #     "Можете задать вопрос об этом тесте или выбрать действие:", 
+        #     reply_markup=get_dialog_kb()
+        # )
         
         await state.set_state(QuestionStates.in_dialog)
         await state.update_data(current_test=test_data, last_viewed_test=test_data['test_code'])
@@ -1883,11 +2086,11 @@ async def handle_name_search(message: Message, state: FSMContext):
             # ИЗМЕНЕНО: Отправляем с фото
             await send_test_info_with_photo(message, test_data, response)
             
-            # Показываем клавиатуру диалога
-            await message.answer(
-                "Можете задать вопрос об этом тесте или выбрать действие:",
-                reply_markup=get_dialog_kb()
-            )
+            # # Показываем клавиатуру диалога
+            # await message.answer(
+            #     "Можете задать вопрос об этом тесте или выбрать действие:",
+            #     reply_markup=get_dialog_kb()
+            # )
         
         # Сохраняем последний найденный тест для диалога
         await state.set_state(QuestionStates.in_dialog)
@@ -2020,46 +2223,6 @@ async def handle_dialog(message: Message, state: FSMContext):
         if animation_task and not animation_task.cancelled():
             animation_task.cancel()
         await safe_delete_message(gif_msg)
-        
-async def send_test_info_with_photo(message: Message, test_data: Dict, response_text: str):
-    """Отправляет информацию о тесте с фото контейнера если оно есть"""
-    container_type = str(test_data.get('container_type', '')).strip()
-    
-    if container_type and container_type.lower() not in ['не указан', 'нет', '-', '']:
-        # Получаем первый тип контейнера (если их несколько)
-        first_type = container_type.split('*I*')[0].strip()
-        
-        photo_data = await db.get_container_photo(first_type)
-        
-        if photo_data:
-            try:
-                # Отправляем фото с полной информацией в подписи
-                await message.answer_photo(
-                    photo=photo_data['file_id'],
-                    caption=response_text,
-                    parse_mode="HTML"
-                )
-                
-                # Если есть еще контейнеры - отправляем их дополнительными фото
-                other_types = [ct.strip() for ct in container_type.split('*I*')[1:] if ct.strip()]
-                for ct in other_types:
-                    photo_data = await db.get_container_photo(ct)
-                    if photo_data:
-                        try:
-                            await message.answer_photo(
-                                photo=photo_data['file_id'],
-                                caption=f"🧪 Дополнительный контейнер: {ct}",
-                                parse_mode="HTML"
-                            )
-                        except:
-                            pass
-                return True
-            except Exception as e:
-                print(f"[ERROR] Failed to send photo with caption: {e}")
-    
-    # Если фото нет - отправляем обычное текстовое сообщение
-    await message.answer(response_text, parse_mode="HTML")
-    return False
 
 async def handle_context_switch(message: Message, state: FSMContext, new_query: str):
     """Обрабатывает переключение контекста на новый тест."""

@@ -13,7 +13,7 @@ from bot.handlers.questions import (
     smart_test_search, format_test_data, format_test_info,
     fuzzy_test_search, format_similar_tests_with_links,
     QuestionStates, get_dialog_kb, send_test_info_with_photo,
-    decode_test_code_from_url,  # Используем новую функцию
+    decode_test_code_from_url,  
     encode_test_code_for_url 
 )
 from src.data_vectorization import DataProcessor
@@ -52,7 +52,8 @@ class RegistrationStates(StatesGroup):
     # Для сотрудников
     waiting_for_region = State()
     waiting_for_custom_region = State()
-    waiting_for_employee_name = State()
+    waiting_for_employee_last_name = State()  
+    waiting_for_employee_first_name = State()  
     waiting_for_department = State()
 
 @registration_router.message(Command("start"))
@@ -456,10 +457,8 @@ async def process_region(message: Message, state: FSMContext):
         await state.set_state(RegistrationStates.waiting_for_custom_region)
         return
     
-    # Получаем данные из state
     data = await state.get_data()
     
-    # Проверяем, что выбран регион из клавиатуры
     if not message.text.startswith("📍"):
         await message.answer(
             "❌ Пожалуйста, выберите регион из списка или введите свой",
@@ -471,10 +470,62 @@ async def process_region(message: Message, state: FSMContext):
     await state.update_data(region=region)
     await message.answer(
         f"📍 Регион: {region}\n\n"
-        "Введите вашу фамилию и имя:",
+        "Введите вашу фамилию:",  # Сначала запрашиваем фамилию
         reply_markup=ReplyKeyboardRemove()
     )
-    await state.set_state(RegistrationStates.waiting_for_employee_name)
+    await state.set_state(RegistrationStates.waiting_for_employee_last_name)
+    
+@registration_router.message(RegistrationStates.waiting_for_employee_last_name)
+async def process_employee_last_name(message: Message, state: FSMContext):
+    last_name = message.text.strip()
+
+    if len(last_name) < 2 or len(last_name) > 50:
+        await message.answer(
+            "❌ Фамилия должна содержать от 2 до 50 символов.\nПопробуйте еще раз:"
+        )
+        return
+    
+    # Проверяем, что введены только буквы и дефис
+    if not all(c.isalpha() or c in ['-', ' '] for c in last_name):
+        await message.answer(
+            "❌ Фамилия может содержать только буквы, пробел и дефис.\nПопробуйте еще раз:"
+        )
+        return
+
+    await state.update_data(last_name=last_name)
+    await message.answer(
+        f"👤 Фамилия: {last_name}\n\n"
+        "Теперь введите ваше имя:",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    await state.set_state(RegistrationStates.waiting_for_employee_first_name)
+
+@registration_router.message(RegistrationStates.waiting_for_employee_first_name)
+async def process_employee_first_name(message: Message, state: FSMContext):
+    first_name = message.text.strip()
+
+    if len(first_name) < 2 or len(first_name) > 50:
+        await message.answer(
+            "❌ Имя должно содержать от 2 до 50 символов.\nПопробуйте еще раз:"
+        )
+        return
+    
+    # Проверяем, что введены только буквы и дефис
+    if not all(c.isalpha() or c in ['-', ' '] for c in first_name):
+        await message.answer(
+            "❌ Имя может содержать только буквы, пробел и дефис.\nПопробуйте еще раз:"
+        )
+        return
+
+    data = await state.get_data()
+    await state.update_data(first_name=first_name)
+    
+    await message.answer(
+        f"👤 {data['last_name']} {first_name}\n\n"
+        "Выберите функцию, которую вы исполняете:",
+        reply_markup=get_department_function_kb()
+    )
+    await state.set_state(RegistrationStates.waiting_for_department)
 
 @registration_router.message(RegistrationStates.waiting_for_custom_region)
 async def process_custom_region(message: Message, state: FSMContext):
@@ -489,28 +540,10 @@ async def process_custom_region(message: Message, state: FSMContext):
     await state.update_data(region=region)
     await message.answer(
         f"📍 Регион: {region}\n\n"
-        "Введите вашу фамилию и имя:",
+        "Введите вашу фамилию:",  # Сначала запрашиваем фамилию
         reply_markup=ReplyKeyboardRemove()
     )
-    await state.set_state(RegistrationStates.waiting_for_employee_name)
-
-@registration_router.message(RegistrationStates.waiting_for_employee_name)
-async def process_employee_name(message: Message, state: FSMContext):
-    name = message.text.strip()
-
-    if len(name) < 3 or len(name) > 100:
-        await message.answer(
-            "❌ Фамилия и имя должно содержать от 3 до 100 символов.\nПопробуйте еще раз:"
-        )
-        return
-
-    await state.update_data(name=name)
-    await message.answer(
-        f"👤 {name}\n\n"
-        "Выберите функцию, которую вы исполняете:",
-        reply_markup=get_department_function_kb()
-    )
-    await state.set_state(RegistrationStates.waiting_for_department)
+    await state.set_state(RegistrationStates.waiting_for_employee_last_name)
 
 @registration_router.message(RegistrationStates.waiting_for_department)
 async def process_department(message: Message, state: FSMContext):
@@ -531,9 +564,11 @@ async def process_department(message: Message, state: FSMContext):
 
     data = await state.get_data()
     
+    # Используем новую версию функции с раздельными именем и фамилией
     success = await db.add_employee(
         telegram_id=user_id,
-        name=data['name'],
+        first_name=data['first_name'],
+        last_name=data['last_name'],
         region=data['region'],
         department_function=department_map[message.text],
         country=data['country']
@@ -543,17 +578,26 @@ async def process_department(message: Message, state: FSMContext):
         await message.answer(await get_tech_support_message())
         await message.answer(
             f"✅ Регистрация завершена успешно!\n\n"
-            f"👤 {data['name']}\n"
+            f"👤 {data['last_name']} {data['first_name']}\n"
             f"📍 Регион: {data['region']}\n"
             f"🏢 Функция: {message.text}\n\n"
             "Теперь вы можете пользоваться всеми функциями бота!",
             reply_markup=get_main_menu_kb()
         )
+        
+        # Проверяем наличие отложенного теста
+        if 'pending_test_code' in data:
+            test_code = data['pending_test_code']
+            await state.clear()
+            await process_test_request(message, state, test_code, user_id)
+        else:
+            await state.clear()
     else:
         await message.answer(
             "❌ Ошибка регистрации. Попробуйте еще раз: /start",
             reply_markup=ReplyKeyboardRemove()
         )
+        await state.clear()
 
 async def finish_registration(message: Message, state: FSMContext, user_type: str):
     """Завершает регистрацию и обрабатывает отложенный тест если есть."""

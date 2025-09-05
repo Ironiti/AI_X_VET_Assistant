@@ -838,18 +838,6 @@ class Database:
                 )
             ''')
             
-            # ТАБЛИЦА ДЛЯ ФОТО КОНТЕЙНЕРОВ
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS container_photos (
-                    container_number INTEGER PRIMARY KEY,
-                    file_id TEXT NOT NULL,
-                    description TEXT,
-                    uploaded_by INTEGER,
-                    upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (uploaded_by) REFERENCES users(telegram_id)
-                )
-            ''')
-            
             # Обновленная таблица пользователей
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS users (
@@ -857,17 +845,19 @@ class Database:
                     user_type TEXT CHECK(user_type IN ('client', 'employee')),
                     
                     -- Общие поля
-                    name TEXT,
+                    name TEXT,  -- Для клиентов - полное имя
                     country TEXT DEFAULT 'BY',
                     registration_date TIMESTAMP,
                     role TEXT DEFAULT 'user',
                     is_active BOOLEAN DEFAULT TRUE,
                     
                     -- Поля для клиентов (ветеринарные клиники)
-                    client_code TEXT,  -- Убрали UNIQUE, так как в одной клинике может быть много врачей
+                    client_code TEXT,
                     specialization TEXT,
                     
                     -- Поля для сотрудников
+                    first_name TEXT,  -- Имя сотрудника
+                    last_name TEXT,   -- Фамилия сотрудника
                     region TEXT,
                     department_function TEXT CHECK(department_function IN ('laboratory', 'sales', 'support', NULL))
                 )
@@ -941,17 +931,19 @@ class Database:
             except aiosqlite.IntegrityError:
                 return False
     
-    async def add_employee(self, telegram_id: int, name: str, region: str, 
-                          department_function: str, country: str = 'BY'):
-        """Добавление сотрудника"""
+    async def add_employee(self, telegram_id: int, first_name: str, last_name: str, region: str, department_function: str, country: str = 'BY'):
+        """Добавление сотрудника с отдельными полями для имени и фамилии"""
         async with aiosqlite.connect(self.db_path) as db:
             try:
+                # Создаем полное имя для совместимости
+                full_name = f"{last_name} {first_name}"
+                
                 await db.execute('''
-                    INSERT INTO users (telegram_id, user_type, name, region, 
-                                     department_function, country, registration_date, role)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (telegram_id, 'employee', name, region, department_function, 
-                     country, datetime.now(), 'user'))
+                    INSERT INTO users (telegram_id, user_type, name, first_name, last_name,
+                                    region, department_function, country, registration_date, role)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (telegram_id, 'employee', full_name, first_name, last_name, 
+                    region, department_function, country, datetime.now(), 'user'))
                 await db.commit()
                 return True
             except aiosqlite.IntegrityError:
@@ -964,7 +956,11 @@ class Database:
                 'SELECT * FROM users WHERE telegram_id = ?', 
                 (telegram_id,)
             )
-            return await cursor.fetchone()
+            row = await cursor.fetchone()
+            # Преобразуем Row в словарь для удобства
+            if row:
+                return dict(row)
+            return None
     
     async def get_user_role(self, telegram_id: int):
         user = await self.get_user(telegram_id)
@@ -988,6 +984,22 @@ class Database:
                 WHERE code = ? AND is_used = FALSE
             ''', (code.upper(),))
             return await cursor.fetchone()
+    
+    async def get_user_greeting_name(self, telegram_id: int) -> str:
+        """Получает имя пользователя для обращения"""
+        user = await self.get_user(telegram_id)
+        if not user:
+            return "пользователь"
+        
+        if user['user_type'] == 'employee' and user.get('first_name'):
+            # Для сотрудников используем только имя
+            return user['first_name']
+        elif user.get('name'):
+            # Для клиентов используем полное имя или только первое слово
+            name_parts = user['name'].split()
+            return name_parts[0] if name_parts else user['name']
+        
+        return "пользователь"
     
     async def use_activation_code(self, code: str, user_id: int):
         """Использование кода активации"""
