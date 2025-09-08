@@ -35,3 +35,6 @@ data/vet_clinic.db
 .vscode/
 
 .DS_Store
+
+# DB 
+data/chroma_db/*

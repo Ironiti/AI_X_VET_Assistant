@@ -16,7 +16,7 @@ if str(project_root) not in sys.path:
 
 
 class DataProcessor:
-    def __init__(self, file_path: str = 'data/processed/data.xlsx'):
+    def __init__(self, file_path: str = 'data/processed/data_with_abbreviations2.xlsx'):
         self.file_path = Path(file_path)
         self.df = None
         self.vector_store = None
@@ -139,6 +139,6 @@ class DataProcessor:
 
 
 if __name__ == "__main__":
-    processor = DataProcessor(file_path='data/processed/data_with_abbreviations.xlsx')
+    processor = DataProcessor(file_path='data/processed/data_with_abbreviations2.xlsx')
     processor.create_vector_store(persist_path="data/chroma_db", reset=True)
     print("[INFO] Vector store successfully created and saved.")
