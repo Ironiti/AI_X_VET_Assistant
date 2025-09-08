@@ -1086,20 +1086,20 @@ def get_user_first_name(user):
 def format_test_data(metadata: Dict) -> Dict:
     """Extract and format test metadata into standardized dictionary."""
     return {
-        'type': metadata['type'],
-        'test_code': metadata['test_code'],
-        'test_name': metadata['test_name'],
-        'department': metadata['department'],
-        'patient_preparation': metadata['patient_preparation'],
-        'biomaterial_type': metadata['biomaterial_type'],
-        'primary_container_type': metadata['primary_container_type'],
-        'container_type': metadata['container_type'],
-        'container_number': metadata['container_number'],
-        'preanalytics': metadata['preanalytics'],
-        'storage_temp': metadata['storage_temp'],	
-        'poss_postorder_container': metadata['poss_postorder_container'],
-        'form_link': metadata['form_link'],
-        'additional_information_link': metadata['additional_information_link']
+        'type': metadata.get('type'),
+        'test_code': metadata.get('test_code'),
+        'test_name': metadata.get('test_name'),
+        'department': metadata.get('department'),
+        'patient_preparation': metadata.get('patient_preparation'),
+        'biomaterial_type': metadata.get('biomaterial_type'),
+        'primary_container_type': metadata.get('primary_container_type'),
+        'container_type': metadata.get('container_type'),
+        'container_number': metadata.get('container_number'),
+        'preanalytics': re.sub(r'\s*(\d+\.)\s*', r'\n\t\t\1 ', metadata.get('preanalytics')),
+        'storage_temp': metadata.get('storage_temp'),	
+        'poss_postorder_container': metadata.get('poss_postorder_container'),
+        'form_link': metadata.get('form_link'),
+        'additional_information_link': metadata.get('additional_information_link')
         
     }
 
@@ -1107,8 +1107,8 @@ def format_test_info_brief(test_data: Dict) -> str:
     """Format brief test information for initial search results."""
     t_type = 'Тест' if test_data['type'] == 'Тесты' else 'Профиль'
     # Экранируем HTML символы в названии теста
-    test_name = html.escape(test_data['test_name'])
-    department = html.escape(test_data['department'])
+    test_name = html.escape(test_data.get('test_name'))
+    department = html.escape(test_data.get('department'))
     
     return (
         emoji_manager.format_message(f"test_name <b>{t_type}: {test_data['test_code']} - {test_name}</b>\n\n") +
@@ -1116,37 +1116,36 @@ def format_test_info_brief(test_data: Dict) -> str:
     )
 
 def format_test_info(test_data: Dict) -> str:
-    """Format full test information from metadata using HTML tags."""
-    t_type = 'Тест' if test_data['type'] == 'Тесты' else 'Профиль'
-    
-    # Экранируем HTML символы во всех полях
-    test_name = html.escape(test_data['test_name'])
-    department = html.escape(test_data['department'])
-    patient_preparation = html.escape(test_data['patient_preparation'])
-    biomaterial_type = html.escape(test_data['biomaterial_type'])
-    primary_container_type = html.escape(test_data['primary_container_type'])
-    container_type = html.escape(test_data['container_type'])
-    container_number = html.escape(str(test_data['container_number']))
-    preanalytics = re.sub(r'\s*(\d+\.)\s*', r'\n\t\t\1 ', html.escape(test_data['preanalytics']))
-    storage_temp = html.escape(test_data['storage_temp'])
-    poss_postorder_container = html.escape(test_data['poss_postorder_container'])
-    form_link = html.escape(test_data['form_link'])
-    additional_information_link = html.escape(test_data['additional_information_link'])
+    t_type = 'Тест' if test_data.get('type') == 'Тесты' else 'Профиль'
 
-    return (
-        emoji_manager.format_message(f"test_name <b>{t_type}: {test_data['test_code']} - {test_name}</b>\n\n") + 
-        emoji_manager.format_message(f"🧬department <b>Вид исследования:</b> {department}\n") +
-        emoji_manager.format_message(f"📝patient_preparation <b>Важная информация для подготовки животного:</b> {patient_preparation}\n") +
-        emoji_manager.format_message(f"🧫biomaterial_type <b>Исследуемый биоматериал:</b> {biomaterial_type}\n") +
-        emoji_manager.format_message(f"🧰primary_container_type <b>Тип первичного контейнера:</b> {primary_container_type}\n") +
-        emoji_manager.format_message(f"🧪container_type <b>Тип контейнера для хранения и транспортировки:</b> {container_type}\n") + 
-        emoji_manager.format_message(f"🔢container_number <b>Номер контейнера для хранения и транспортировки:</b> {container_number}\n") +
-        emoji_manager.format_message(f"📋preanalytics <b>Преаналитика:</b> {preanalytics}\n") +
-        emoji_manager.format_message(f"❄️storage_temp <b>Температура:</b> {storage_temp}\n") +
-        emoji_manager.format_message(f"⏱️poss_postorder_container <b>Возможность дозаказа с момента взятия биоматериала:</b> {poss_postorder_container}\n") +
-        emoji_manager.format_message(f"📃form_link <b>Ссылка скачивания бланка:</b> {form_link}\n") + 
-        emoji_manager.format_message(f"📒additional_information_link <b>Ссылка для скачивания дополнительной информации:</b> {additional_information_link}\n")
-    )
+    field_templates = {
+        'department': ('🧬department', 'Вид исследования'),
+        'patient_preparation': ('📝patient_preparation', 'Важная информация для подготовки животного'),
+        'biomaterial_type': ('🧫biomaterial_type', 'Исследуемый биоматериал'),
+        'primary_container_type': ('🧰primary_container_type', 'Тип первичного контейнера'),
+        'container_type': ('🧪container_type', 'Тип контейнера для хранения и транспортировки'),
+        'container_number': ('🔢container_number', 'Номер контейнера для хранения и транспортировки'),
+        'preanalytics': ('📋preanalytics', 'Преаналитика'),
+        'storage_temp': ('❄️storage_temp', 'Температура'),
+        'poss_postorder_container': ('⏱️poss_postorder_container', 'Возможность дозаказа с момента взятия биоматериала'),
+        'form_link': ('📃form_link', 'Ссылка скачивания бланка'),
+        'additional_information_link': ('📒additional_information_link', 'Ссылка для скачивания дополнительной информации')
+    }
+
+    message_parts = [
+        emoji_manager.format_message(
+            f"test_name <b>{t_type}: {test_data['test_code']} - {test_data['test_name']}</b>\n\n"
+        )
+    ]
+
+    # Process other fields
+    for field, (emoji, display_name) in field_templates.items():
+        if value := test_data.get(field):
+            escaped_value = html.escape(str(value))
+            message_parts.append(emoji_manager.format_message(f"{emoji} <b>{display_name}:</b> {escaped_value}\n"))
+    
+    return ''.join(message_parts)
+
     
 async def handle_general_question(message: Message, state: FSMContext, question_text: str):
     """Обработка общих вопросов через LLM."""
