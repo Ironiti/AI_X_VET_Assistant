@@ -1,7 +1,7 @@
 import re
-from aiogram import Router, F
+from aiogram import Router
 from aiogram.types import Message, ReplyKeyboardRemove
-from aiogram.filters import Command, StateFilter
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from bot.keyboards import (
@@ -13,11 +13,9 @@ from bot.handlers.questions import (
     smart_test_search, format_test_data, format_test_info,
     fuzzy_test_search, format_similar_tests_with_links,
     QuestionStates, get_dialog_kb, send_test_info_with_photo,
-    decode_test_code_from_url,  
-    encode_test_code_for_url 
 )
+from bot.handlers.utils import decode_test_code_from_url 
 from src.data_vectorization import DataProcessor
-
 from src.database.db_init import db
 
 registration_router = Router()

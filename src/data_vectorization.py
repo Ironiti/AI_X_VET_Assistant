@@ -16,7 +16,7 @@ if str(project_root) not in sys.path:
 
 
 class DataProcessor:
-    def __init__(self, file_path: str = 'data/processed/data_with_abbreviations2.xlsx'):
+    def __init__(self, file_path: str = 'data/processed/joined_data.xlsx'):
         self.file_path = Path(file_path)
         self.df = None
         self.vector_store = None
@@ -40,9 +40,9 @@ class DataProcessor:
             shutil.rmtree(persist_path)
 
         print('[INFO] Creating vector store...')
-        records = self.df.dropna(subset=["test_name"]).copy()
+        records = self.df.dropna(subset=["column_for_embeddings"]).copy()
 
-        texts = records["test_name"].tolist()
+        texts = records["column_for_embeddings"].tolist()
         metadatas = records.to_dict(orient="records")
 
         self.vector_store = Chroma.from_texts(
@@ -139,6 +139,6 @@ class DataProcessor:
 
 
 if __name__ == "__main__":
-    processor = DataProcessor(file_path='data/processed/data_with_abbreviations2.xlsx')
+    processor = DataProcessor(file_path='data/processed/joined_data.xlsx')
     processor.create_vector_store(persist_path="data/chroma_db", reset=True)
     print("[INFO] Vector store successfully created and saved.")
