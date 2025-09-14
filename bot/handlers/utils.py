@@ -211,3 +211,56 @@ def transliterate_abbreviation(abbr: str) -> str:
             result.append(letter)
     
     return ''.join(result)
+
+def is_profile_test(test_code: str) -> bool:
+    """Проверяет, является ли тест профилем (заканчивается на ОБС)"""
+    if not test_code:
+        return False
+    return test_code.upper().strip().endswith("ОБС")
+
+def check_profile_request(query: str) -> tuple[bool, str]:
+    """
+    Определяет, запрашивает ли пользователь профили и очищает запрос
+    
+    Returns:
+        (is_profile_request, cleaned_query)
+    """
+    query_lower = query.lower()
+    
+    profile_keywords = [
+        "профиль",
+        "профили", 
+        "профил",
+    ]
+    
+    is_profile = any(keyword in query_lower for keyword in profile_keywords)
+    
+    # Очищаем запрос от ключевых слов профилей
+    cleaned_query = query
+    if is_profile:
+        for keyword in profile_keywords:
+            cleaned_query = re.sub(rf'\b{keyword}\w*\b', '', cleaned_query, flags=re.IGNORECASE)
+        cleaned_query = ' '.join(cleaned_query.split())  # Убираем лишние пробелы
+    
+    return is_profile, cleaned_query.strip()
+
+
+def filter_results_by_type(results: List[Tuple], show_profiles: bool = False) -> List[Tuple]:
+    """
+    Фильтрует результаты по типу (профили или обычные тесты)
+    
+    Args:
+        results: Список результатов поиска
+        show_profiles: True - показать только профили, False - только обычные тесты
+    """
+    filtered = []
+    for item in results:
+        doc = item[0] if isinstance(item, tuple) else item
+        test_code = doc.metadata.get("test_code", "")
+        
+        is_profile = is_profile_test(test_code)
+        
+        if show_profiles == is_profile:
+            filtered.append(item)
+    
+    return filtered

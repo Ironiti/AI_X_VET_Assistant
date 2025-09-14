@@ -7,7 +7,7 @@ import re
 from typing import Dict, List, Tuple
 from datetime import datetime
 from src.database.db_init import db
-from bot.handlers.utils import create_test_link
+from bot.handlers.utils import create_test_link, is_profile_test
 
 BOT_USERNAME = "AL_VET_UNION_BOT"
 
@@ -76,27 +76,26 @@ def format_similar_tests_text(
 
 
 def format_similar_tests_with_links(
-    similar_tests: List[Tuple[Document, float]], max_display: int = 5
+    similar_tests: List[Tuple[Document, float]], 
+    max_display: int = 5
 ) -> str:
-    """Форматирует текст с кликабельными ссылками на похожие тесты."""
+    """Форматирует список похожих тестов с кликабельными ссылками"""
     if not similar_tests:
         return ""
-
-    text = "\n<b>📋 Похожие тесты (нажмите на код):</b>\n"
-    for doc, score in similar_tests[:max_display]:
+    
+    response = "\n\n🔍 <b>Похожие тесты:</b>\n"
+    
+    for i, (doc, score) in enumerate(similar_tests[:max_display], 1):
         test_code = doc.metadata.get("test_code", "")
-        test_name = doc.metadata.get("test_name", "")
-        if len(test_name) > 40:
-            test_name = test_name[:37] + "..."
-
-        # Создаем кликабельную ссылку
+        test_name = html.escape(doc.metadata.get("test_name", ""))[:50]
+        
+        # Добавляем метку для профилей
+        type_label = "🔬" if is_profile_test(test_code) else "🧪"
+        
         link = create_test_link(test_code)
-        text += f"• <a href='{link}'>{test_code}</a> - {test_name}\n"
-
-    if len(similar_tests) > max_display:
-        text += f"\n<i>Показаны {max_display} из {len(similar_tests)} найденных</i>"
-
-    return text
+        response += f"{i}. {type_label} <a href='{link}'>{test_code}</a> - {test_name}...\n"
+    
+    return response
 
 
 def get_time_based_farewell(user_name: str = None):

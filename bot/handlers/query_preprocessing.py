@@ -423,4 +423,15 @@ def post_process_results(expanded_query: str, original_query: str) -> str:
     
     return result
 
-
+def check_profile_request(query: str) -> bool:
+    """Определяет, запрашивает ли пользователь профили"""
+    query_lower = query.lower()
+    
+    profile_keywords = [
+        "профиль",
+        "профили", 
+        "обс",
+        "обследование"
+    ]
+    
+    return any(keyword in query_lower for keyword in profile_keywords)
