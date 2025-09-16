@@ -9,6 +9,7 @@ import unicodedata
 import string
 from fuzzywuzzy import process, fuzz
 import json
+import os
 
 def load_disease_dictionary(excel_file_path: str) -> Tuple[Dict[str, str], Dict[str, List[str]]]:
     try:
@@ -58,24 +59,24 @@ def load_disease_dictionary(excel_file_path: str) -> Tuple[Dict[str, str], Dict[
                         # Добавляем оригинальную аббревиатуру
                         abbr_to_official[abbr_clean] = official_name
                         
-                        # ДОБАВЛЯЕМ ОПЕЧАТКИ ДЛЯ ОРИГИНАЛЬНОЙ АББРЕВИАТУРЫ
-                        original_typos = generate_common_typos(abbr_clean, is_russian=False)
-                        for typo in original_typos:
-                            # Пропускаем опечатки, которые совпадают с реальными аббревиатурами
-                            if typo not in all_official_abbrs:
-                                abbr_to_official[typo] = official_name
+                        # # ДОБАВЛЯЕМ ОПЕЧАТКИ ДЛЯ ОРИГИНАЛЬНОЙ АББРЕВИАТУРЫ
+                        # original_typos = generate_common_typos(abbr_clean, is_russian=False)
+                        # for typo in original_typos:
+                        #     # Пропускаем опечатки, которые совпадают с реальными аббревиатурами
+                        #     if typo not in all_official_abbrs:
+                        #         abbr_to_official[typo] = official_name
 
                         # ДОБАВЛЯЕМ ТРАНСЛИТЕРИРОВАННУЮ ВЕРСИЮ
                         transliterated = transliterate_abbreviation(abbr_clean)
                         if transliterated and transliterated != abbr_clean:
                             abbr_to_official[transliterated] = official_name
                             
-                            # ДОБАВЛЯЕМ ОПЕЧАТКИ ДЛЯ ТРАНСЛИТЕРИРОВАННОЙ ВЕРСИИ
-                            transliterated_typos = generate_common_typos(transliterated, is_russian=True)
-                            for typo in transliterated_typos:
-                                # Пропускаем опечатки, которые совпадают с реальными аббревиатурами
-                                if typo not in all_official_abbrs:
-                                    abbr_to_official[typo] = official_name
+                            # # ДОБАВЛЯЕМ ОПЕЧАТКИ ДЛЯ ТРАНСЛИТЕРИРОВАННОЙ ВЕРСИИ
+                            # transliterated_typos = generate_common_typos(transliterated, is_russian=True)
+                            # for typo in transliterated_typos:
+                            #     # Пропускаем опечатки, которые совпадают с реальными аббревиатурами
+                            #     if typo not in all_official_abbrs:
+                            #         abbr_to_official[typo] = official_name
         
         with open('data/speaking_abbreviations.json', 'w', encoding='utf-8') as f:
             json.dump(abbr_to_official, f, ensure_ascii=False, indent=2)
@@ -250,20 +251,19 @@ def find_matches_with_context(tokens: List[Tuple[str, int, int]],
     # ЕСЛИ точных совпадений нет - ищем ВСЕ похожие аббревиатуры
     all_possible_matches = set()
     
-    for token, start, end in tokens:
-        token_upper = token.upper()
+    # for token, start, end in tokens:
+    #     token_upper = token.upper()
         
-        # Для аббревиатур (2-6 символов)
-        if 2 <= len(token_upper) <= 6 and token_upper.isalnum():
-            # Ищем ВСЕ похожие аббревиатуры с высоким порогом
-            possible_abbrs = list(abbr_to_official.keys())
-            matches = process.extract(token_upper, possible_abbrs, 
-                                    scorer=fuzz.ratio, limit=10)
+    #     if 2 <= len(token_upper) <= 6 and token_upper.isalnum():
+    #         # Ищем ВСЕ похожие аббревиатуры с высоким порогом
+    #         possible_abbrs = list(abbr_to_official.keys())
+    #         matches = process.extract(token_upper, possible_abbrs, 
+    #                                 scorer=fuzz.ratio, limit=10)
             
-            for match, score in matches:
-                if score >= 80:  # Высокий порог для похожих аббревиатур
-                    official = abbr_to_official[match]
-                    all_possible_matches.add(official)
+    #         for match, score in matches:
+    #             if score >= 10000:  # Высокий порог для похожих аббревиатур
+    #                 official = abbr_to_official[match]
+    #                 all_possible_matches.add(official)
     
     # Если нашли похожие аббревиатуры - возвращаем ВСЕ
     if all_possible_matches:
@@ -281,7 +281,7 @@ def find_matches_with_context(tokens: List[Tuple[str, int, int]],
                                     scorer=fuzz.WRatio, limit=5)
             
             for match, score in matches:
-                if score >= 70:  # Средний порог для названий
+                if score >= 98:  # Средний порог для названий
                     official = colloquial_to_official[match]
                     all_possible_matches.add(official)
     
@@ -349,7 +349,7 @@ def handle_ambiguity(matched_officials: Set[str], query: str, colloquial_to_offi
             if not word_found:
                 # Ищем частичное совпадение
                 for term in terms:
-                    if fuzz.partial_ratio(word, term) > 85:
+                    if fuzz.partial_ratio(word, term) > 80:
                         total_score += 15  # Меньший бонус за частичное совпадение
                         matches_count += 1
                         break
@@ -366,7 +366,7 @@ def handle_ambiguity(matched_officials: Set[str], query: str, colloquial_to_offi
     # Возвращаем все болезни с score > 150 или топ-3
     best_diseases = set()
     for disease, score in sorted_diseases[:3]:
-        if score > 150:
+        if score > 160:
             best_diseases.add(disease)
     
     return best_diseases if best_diseases else matched_officials

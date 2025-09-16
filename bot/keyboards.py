@@ -209,6 +209,25 @@ def get_search_type_kb():
         resize_keyboard=True
     )
 
+def get_confirmation_kb():
+    """Клавиатура для подтверждения типа поиска"""
+    kb = [
+        [KeyboardButton(text="✅ Да"), KeyboardButton(text="❌ Нет")],
+        [KeyboardButton(text="❌ Завершить диалог")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
+def get_search_type_clarification_kb():
+    """Клавиатура для уточнения типа поиска"""
+    kb = [
+        [KeyboardButton(text="🔢 Поиск по коду теста")],
+        [KeyboardButton(text="📝 Поиск по названию")],
+        [KeyboardButton(text="🔬 Поиск профиля тестов")],
+        [KeyboardButton(text="❓ Общий вопрос")],
+        [KeyboardButton(text="❌ Завершить диалог")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
 # Для совместимости
 get_client_menu_kb = get_main_menu_kb
 get_staff_menu_kb = get_main_menu_kb
