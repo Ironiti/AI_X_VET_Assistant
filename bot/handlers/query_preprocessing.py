@@ -17,22 +17,6 @@ def load_disease_dictionary(excel_file_path: str) -> Tuple[Dict[str, str], Dict[
         
         colloquial_to_official = {}
         abbr_to_official = {}
-        all_official_abbrs = set()  
-        
-        for _, row in df.iterrows():
-            official_name = normalize_text(row['Название на русском'])
-            if not official_name:
-                continue
-                
-            abbr_text = str(row['Разговорная аббревиатура']).strip()
-            if abbr_text:
-                for abbr in abbr_text.split(','):
-                    abbr_clean = abbr.strip().upper()
-                    if abbr_clean:
-                        all_official_abbrs.add(abbr_clean)
-                        transliterated = transliterate_abbreviation(abbr_clean)
-                        if transliterated and transliterated != abbr_clean:
-                            all_official_abbrs.add(transliterated)
         
         for _, row in df.iterrows():
             official_name = normalize_text(row['Название на русском'])
@@ -42,41 +26,56 @@ def load_disease_dictionary(excel_file_path: str) -> Tuple[Dict[str, str], Dict[
             # Добавляем официальное название
             colloquial_to_official[official_name] = official_name
             
-            # Обработка разговорных названий
+            # Обработка РАЗГОВОРНЫХ НАЗВАНИЙ - извлекаем все аббревиатуры
             colloquial_text = normalize_text(row['Разговорное название'])
             if colloquial_text:
                 for term in colloquial_text.split(','):
                     term = term.strip()
                     if term:
+                        # Добавляем термин как есть
                         colloquial_to_official[term] = official_name
+                        
+                        # Извлекаем все возможные аббревиатуры из термина
+                        potential_abbrs = extract_abbreviations_from_text(term)
+                        for abbr in potential_abbrs:
+                            if len(abbr) >= 2:
+                                # Добавляем в оба словаря для перекрестного поиска
+                                abbr_to_official[abbr] = official_name
+                                colloquial_to_official[abbr] = official_name
+                                colloquial_to_official[abbr.lower()] = official_name
             
-            # Обработка аббревиатур 
+            # Обработка ОФИЦИАЛЬНЫХ АББРЕВИАТУР
             abbr_text = str(row['Разговорная аббревиатура']).strip()
             if abbr_text:
                 for abbr in abbr_text.split(','):
                     abbr_clean = abbr.strip().upper()
                     if abbr_clean:
-                        # Добавляем оригинальную аббревиатуру
+                        # Оригинальная аббревиатура
                         abbr_to_official[abbr_clean] = official_name
+                        colloquial_to_official[abbr_clean] = official_name
+                        colloquial_to_official[abbr_clean.lower()] = official_name
                         
-                        # # ДОБАВЛЯЕМ ОПЕЧАТКИ ДЛЯ ОРИГИНАЛЬНОЙ АББРЕВИАТУРЫ
-                        # original_typos = generate_common_typos(abbr_clean, is_russian=False)
-                        # for typo in original_typos:
-                        #     # Пропускаем опечатки, которые совпадают с реальными аббревиатурами
-                        #     if typo not in all_official_abbrs:
-                        #         abbr_to_official[typo] = official_name
-
-                        # ДОБАВЛЯЕМ ТРАНСЛИТЕРИРОВАННУЮ ВЕРСИЮ
-                        transliterated = transliterate_abbreviation(abbr_clean)
-                        if transliterated and transliterated != abbr_clean:
-                            abbr_to_official[transliterated] = official_name
-                            
-                            # # ДОБАВЛЯЕМ ОПЕЧАТКИ ДЛЯ ТРАНСЛИТЕРИРОВАННОЙ ВЕРСИИ
-                            # transliterated_typos = generate_common_typos(transliterated, is_russian=True)
-                            # for typo in transliterated_typos:
-                            #     # Пропускаем опечатки, которые совпадают с реальными аббревиатурами
-                            #     if typo not in all_official_abbrs:
-                            #         abbr_to_official[typo] = official_name
+                        # Создаем все возможные варианты для смешанных раскладок
+                        mixed_variants = detect_and_normalize_mixed_abbreviations(abbr_clean)
+                        for variant in mixed_variants:
+                            if len(variant) >= 2:
+                                abbr_to_official[variant] = official_name
+                                colloquial_to_official[variant] = official_name
+                                colloquial_to_official[variant.lower()] = official_name
+        
+        # Убираем распространенные русские слова из аббревиатур
+        common_russian_words = {
+            'ОТ', 'ДО', 'ПО', 'НА', 'ЗА', 'ИЗ', 'С', 'У', 'В', 'К', 'НО', 'ДА',
+            'НЕТ', 'АГА', 'ОЙ', 'АХ', 'ЭХ', 'НУ', 'ВОТ', 'ЭТО', 'ТО', 'ТАК', 'КАК'
+        }
+        
+        for word in common_russian_words:
+            if word in abbr_to_official:
+                del abbr_to_official[word]
+            if word in colloquial_to_official and len(word) <= 3:
+                # Удаляем только если это короткое слово и не официальное название
+                if colloquial_to_official[word] != word:
+                    del colloquial_to_official[word]
         
         with open('data/speaking_abbreviations.json', 'w', encoding='utf-8') as f:
             json.dump(abbr_to_official, f, ensure_ascii=False, indent=2)
@@ -85,6 +84,7 @@ def load_disease_dictionary(excel_file_path: str) -> Tuple[Dict[str, str], Dict[
         
     except Exception as e:
         raise Exception(f"Ошибка загрузки словаря: {e}")
+
 
 
 def generate_common_typos(abbr: str, is_russian: bool) -> List[str]:
@@ -212,7 +212,6 @@ def advanced_query_tokenization(query: str) -> List[Tuple[str, int, int]]:
     return tokens
 
 
-
 def find_matches_with_context(tokens: List[Tuple[str, int, int]], 
                              colloquial_to_official: Dict[str, str],
                              abbr_to_official: Dict[str, str],
@@ -220,9 +219,7 @@ def find_matches_with_context(tokens: List[Tuple[str, int, int]],
     
     matched_officials = set()
     used_positions = set()
-    query_upper = query.upper()
     
-    # Сначала ищем точные совпадения
     for token, start, end in tokens:
         if any(pos in used_positions for pos in range(start, end)):
             continue
@@ -230,62 +227,53 @@ def find_matches_with_context(tokens: List[Tuple[str, int, int]],
         token_lower = token.lower()
         token_upper = token.upper()
         
-        # 1. ТОЧНОЕ совпадение в разговорных названиях
+        # Пропускаем слишком короткие токены
+        if len(token_upper) < 2:
+            continue
+            
+        # 1. Ищем в разговорных названиях (все регистры)
         if token_lower in colloquial_to_official:
             official = colloquial_to_official[token_lower]
             matched_officials.add(official)
             used_positions.update(range(start, end))
             continue
+            
+        if token_upper in colloquial_to_official:
+            official = colloquial_to_official[token_upper]
+            matched_officials.add(official)
+            used_positions.update(range(start, end))
+            continue
         
-        # 2. ТОЧНОЕ совпадение в аббревиатурах (включая опечатки)
+        # 2. Ищем в аббревиатурах
         if token_upper in abbr_to_official:
             official = abbr_to_official[token_upper]
             matched_officials.add(official)
             used_positions.update(range(start, end))
             continue
-    
-    # Если нашли точные совпадения - возвращаем их
-    if matched_officials:
-        return matched_officials
-    
-    # ЕСЛИ точных совпадений нет - ищем ВСЕ похожие аббревиатуры
-    all_possible_matches = set()
-    
-    # for token, start, end in tokens:
-    #     token_upper = token.upper()
         
-    #     if 2 <= len(token_upper) <= 6 and token_upper.isalnum():
-    #         # Ищем ВСЕ похожие аббревиатуры с высоким порогом
-    #         possible_abbrs = list(abbr_to_official.keys())
-    #         matches = process.extract(token_upper, possible_abbrs, 
-    #                                 scorer=fuzz.ratio, limit=10)
+        # 3. Для токенов, которые выглядят как аббревиатуры, создаем варианты
+        if (2 <= len(token_upper) <= 6 and token_upper.isalpha() and
+            (any(c.isascii() for c in token_upper) or 
+             any(c in 'АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ' for c in token_upper))):
             
-    #         for match, score in matches:
-    #             if score >= 10000:  # Высокий порог для похожих аббревиатур
-    #                 official = abbr_to_official[match]
-    #                 all_possible_matches.add(official)
-    
-    # Если нашли похожие аббревиатуры - возвращаем ВСЕ
-    if all_possible_matches:
-        return all_possible_matches
-    
-    # Если не нашли аббревиатур - ищем похожие разговорные названия
-    for token, start, end in tokens:
-        token_lower = token.lower()
-        
-        # Для разговорных названий (от 3 символов)
-        if len(token_lower) >= 3:
-            # Ищем ВСЕ похожие названия
-            possible_terms = list(colloquial_to_official.keys())
-            matches = process.extract(token_lower, possible_terms, 
-                                    scorer=fuzz.WRatio, limit=5)
+            # Создаем все возможные варианты аббревиатуры
+            possible_variants = detect_and_normalize_mixed_abbreviations(token_upper)
             
-            for match, score in matches:
-                if score >= 98:  # Средний порог для названий
-                    official = colloquial_to_official[match]
-                    all_possible_matches.add(official)
+            for variant in possible_variants:
+                # Проверяем в обоих словарях
+                if variant in abbr_to_official:
+                    official = abbr_to_official[variant]
+                    matched_officials.add(official)
+                    used_positions.update(range(start, end))
+                    break
+                    
+                if variant in colloquial_to_official:
+                    official = colloquial_to_official[variant]
+                    matched_officials.add(official)
+                    used_positions.update(range(start, end))
+                    break
     
-    return all_possible_matches
+    return matched_officials
 
 
 def handle_ambiguity(matched_officials: Set[str], query: str, colloquial_to_official: Dict[str, str]) -> Set[str]:
@@ -423,15 +411,112 @@ def post_process_results(expanded_query: str, original_query: str) -> str:
     
     return result
 
-def check_profile_request(query: str) -> bool:
-    """Определяет, запрашивает ли пользователь профили"""
-    query_lower = query.lower()
+
+def detect_and_normalize_mixed_abbreviations(text: str) -> List[str]:
+
+    variants = set()
     
-    profile_keywords = [
-        "профиль",
-        "профили", 
-        "обс",
-        "обследование"
-    ]
+    # Если текст слишком короткий или не содержит букв
+    if len(text) < 2 or not any(c.isalpha() for c in text):
+        return [text.upper()]
     
-    return any(keyword in query_lower for keyword in profile_keywords)
+    text_upper = text.upper()
+    variants.add(text_upper)
+    
+    # Словари для транслитерации
+    eng_to_rus = {
+        'A': 'А', 'B': 'В', 'C': 'С', 'D': 'Д', 'E': 'Е', 'F': 'Ф', 'G': 'Г',
+        'H': 'Х', 'I': 'И', 'J': 'ДЖ', 'K': 'К', 'L': 'Л', 'M': 'М', 'N': 'Н',
+        'O': 'О', 'P': 'П', 'Q': 'К', 'R': 'Р', 'S': 'С', 'T': 'Т', 'U': 'У',
+        'V': 'В', 'W': 'В', 'X': 'КС', 'Y': 'И', 'Z': 'З'
+    }
+    
+    rus_to_eng = {
+        'А': 'A', 'Б': 'B', 'В': 'V', 'Г': 'G', 'Д': 'D', 'Е': 'E', 'Ё': 'E',
+        'Ж': 'ZH', 'З': 'Z', 'И': 'I', 'Й': 'Y', 'К': 'K', 'Л': 'L', 'М': 'M',
+        'Н': 'H', 'О': 'O', 'П': 'P', 'Р': 'R', 'С': 'S', 'Т': 'T', 'У': 'U',
+        'Ф': 'F', 'Х': 'KH', 'Ц': 'TS', 'Ч': 'CH', 'Ш': 'SH', 'Щ': 'SCH',
+        'Ъ': '', 'Ы': 'Y', 'Ь': '', 'Э': 'E', 'Ю': 'YU', 'Я': 'YA'
+    }
+    
+    # Определяем тип букв в тексте
+    has_english = any(c.isascii() and c.isalpha() for c in text_upper)
+    has_russian = any(c in 'АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ' for c in text_upper)
+    
+    # Если есть обе раскладки - создаем варианты
+    if has_english and has_russian:
+        # Вариант 1: все на английском
+        eng_variant = []
+        for char in text_upper:
+            if char in rus_to_eng:
+                eng_variant.append(rus_to_eng[char])
+            else:
+                eng_variant.append(char)
+        eng_result = ''.join(eng_variant)
+        if eng_result and len(eng_result) >= 2:
+            variants.add(eng_result)
+        
+        # Вариант 2: все на русском
+        rus_variant = []
+        for char in text_upper:
+            if char in eng_to_rus:
+                rus_variant.append(eng_to_rus[char])
+            else:
+                rus_variant.append(char)
+        rus_result = ''.join(rus_variant)
+        if rus_result and len(rus_result) >= 2:
+            variants.add(rus_result)
+    
+    # Также создаем варианты для чисто русских или чисто английских аббревиатур
+    elif has_russian:
+        # Русская аббревиатура -> английский вариант
+        eng_variant = []
+        for char in text_upper:
+            if char in rus_to_eng:
+                eng_variant.append(rus_to_eng[char])
+            else:
+                eng_variant.append(char)
+        eng_result = ''.join(eng_variant)
+        if eng_result and eng_result != text_upper and len(eng_result) >= 2:
+            variants.add(eng_result)
+    
+    elif has_english:
+        # Английская аббревиатура -> русский вариант
+        rus_variant = []
+        for char in text_upper:
+            if char in eng_to_rus:
+                rus_variant.append(eng_to_rus[char])
+            else:
+                rus_variant.append(char)
+        rus_result = ''.join(rus_variant)
+        if rus_result and rus_result != text_upper and len(rus_result) >= 2:
+            variants.add(rus_result)
+    
+    return list(variants)
+
+
+def extract_abbreviations_from_text(text: str) -> List[str]:
+
+    abbreviations = set()
+    
+    # Разбиваем текст на слова
+    words = re.findall(r'\b[\wА-Яа-я]+\b', text)
+    
+    for word in words:
+        word_upper = word.upper()
+        
+        # Критерии для определения аббревиатур:
+        # 1. Длина 2-6 символов
+        # 2. Содержит только буквы
+        # 3. Все буквы в верхнем регистре или смешанный регистр
+        if 2 <= len(word_upper) <= 6 and word_upper.isalpha():
+            # Добавляем как есть
+            abbreviations.add(word_upper)
+            
+            # Добавляем варианты для смешанных аббревиатур
+            mixed_variants = detect_and_normalize_mixed_abbreviations(word_upper)
+            for variant in mixed_variants:
+                if len(variant) >= 2:
+                    abbreviations.add(variant)
+    
+    return list(abbreviations)

@@ -168,6 +168,7 @@ def format_test_data(metadata: Dict) -> Dict:
         "test_code": metadata.get("test_code"),
         "test_name": metadata.get("test_name"),
         "department": metadata.get("department"),
+        "important_information": metadata.get("important_information"),
         "patient_preparation": metadata.get("patient_preparation"),
         "biomaterial_type": metadata.get("biomaterial_type"),
         "primary_container_type": metadata.get("primary_container_type"),
@@ -202,6 +203,7 @@ def format_test_info(test_data: Dict) -> str:
 
     field_templates = {
         "department": ("🧬department", "Вид исследования"),
+        "important_information": ("❗️important_information", "Важная информация"),
         "patient_preparation": (
             "📝patient_preparation",
             "Важная информация для подготовки животного",

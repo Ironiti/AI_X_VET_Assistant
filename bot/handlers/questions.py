@@ -58,7 +58,6 @@ from bot.keyboards import (
 )
 
 
-
 # LOADING_GIF_ID = (
 #     "CgACAgIAAxkBAAMIaGr_qy1Wxaw2VrBrm3dwOAkYji4AAu54AAKmqHlJAtZWBziZvaA2BA"
 # )
@@ -98,6 +97,34 @@ class SearchContext:
         self.clarification_step = 0
         self.filters = {}
 
+
+def _rerank_hits_by_query(hits: List[Tuple[Document, float]], query: str) -> List[Tuple[Document, float]]:
+
+    if not hits:
+        return hits
+    # Выделяем только буквы в верхнем регистре
+    query_alpha = "".join(ch for ch in (query or "") if ch.isalpha()).upper()
+    if len(query_alpha) < 2 or len(query_alpha) > 6:
+        return hits
+
+    rescored: List[Tuple[Document, float]] = []
+    for doc, base_score in hits:
+        code_upper = str(doc.metadata.get("test_code", "")).upper()
+        bonus = 0.0
+
+        if code_upper.startswith(query_alpha):
+            bonus += 0.5
+        elif query_alpha in code_upper:
+            bonus += 0.25
+        else:
+            if base_score < 0.6:
+                bonus -= 0.15
+
+        new_score = max(0.0, min(1.0, base_score + bonus))
+        rescored.append((doc, new_score))
+
+    rescored.sort(key=lambda x: x[1], reverse=True)
+    return rescored
 
 @questions_router.callback_query(F.data.startswith("show_container_photos:"))
 async def handle_show_container_photos_callback(callback: CallbackQuery):
@@ -473,11 +500,11 @@ async def handle_show_test_callback(callback: CallbackQuery, state: FSMContext):
             current_test=test_data, last_viewed_test=test_data["test_code"]
         )
 
-        # # Показываем клавиатуру для продолжения диалога
-        # await callback.message.answer(
-        #     "Можете задать вопрос об этом тесте или выбрать действие:",
-        #     reply_markup=get_dialog_kb()
-        # )
+        # Показываем клавиатуру для продолжения диалога
+        await callback.message.answer(
+            "Можете задать вопрос об этом тесте или выбрать действие:",
+            reply_markup=get_dialog_kb()
+        )
 
     except Exception as e:
         print(f"[ERROR] Callback handling failed: {e}")
@@ -658,11 +685,11 @@ async def handle_quick_test_selection(callback: CallbackQuery, state: FSMContext
             current_test=test_data, last_viewed_test=test_data["test_code"]
         )
 
-        # # Показываем клавиатуру для продолжения диалога
-        # await callback.message.answer(
-        #     "Можете задать вопрос об этом тесте или выбрать действие:",
-        #     reply_markup=get_dialog_kb()
-        # )
+        # Показываем клавиатуру для продолжения диалога
+        await callback.message.answer(
+            "Можете задать вопрос об этом тесте или выбрать действие:",
+            reply_markup=get_dialog_kb()
+        )
 
     except Exception as e:
         print(f"[ERROR] Quick test selection failed: {e}")
@@ -763,13 +790,13 @@ async def handle_universal_search(message: Message, state: FSMContext):
     text = message.text.strip()
     user_id = message.from_user.id
     
-    
+    expanded_query = expand_query_with_abbreviations(text)
     # Проверяем, не кнопка ли это возврата
     if text == "🔙 Вернуться в главное меню" or text == "❌ Завершить диалог":
         return
     
     # Используем классификатор для определения типа запроса
-    query_type, confidence, metadata = await ultimate_classifier.classify_with_certainty(text)
+    query_type, confidence, metadata = await ultimate_classifier.classify_with_certainty(expanded_query)
     
     # Сохраняем информацию о классификации
     await state.update_data(
@@ -786,27 +813,31 @@ async def handle_universal_search(message: Message, state: FSMContext):
         await _process_confident_query(message, state, query_type, text, metadata)
     else:
         # Если уверенность средняя (0.7-0.85) - просим подтверждение
-        await _ask_confirmation(message, state, query_type, text, confidence)
+        await _ask_confirmation(message, state, query_type, expanded_query, confidence)
     
     # Если уверенность низкая (<0.7) - используем LLM для уточнения
     if confidence < 0.7:
-        await _clarify_with_llm(message, state, text, query_type, confidence)
+        await _clarify_with_llm(message, state, expanded_query, query_type, confidence)
 
 async def _process_confident_query(message: Message, state: FSMContext, query_type: str, text: str, metadata: Dict):
-    """Обработка запроса с высокой уверенностью"""
+    user_id = message.from_user.id
+    expanded_query = expand_query_with_abbreviations(text)
+
     if query_type == "code":
         await state.set_state(QuestionStates.waiting_for_code)
-        await handle_code_search_with_text(message, state, text)
+        await handle_code_search_with_text(message, state, expanded_query)
     elif query_type == "name":
         await state.set_state(QuestionStates.waiting_for_name)
-        await handle_name_search_with_text(message, state, expand_query_with_abbreviations(text))
+        await handle_name_search_with_text(message, state, expanded_query)
     elif query_type == "profile":
-        # Обрабатываем как поиск по названию с флагом профиля
         await state.update_data(show_profiles=True)
         await state.set_state(QuestionStates.waiting_for_name)
-        await handle_name_search_with_text(message, state, expand_query_with_abbreviations(text))
+        await handle_name_search_with_text(message, state, expanded_query)
     else:  # general
-        await handle_general_question(message, state, expand_query_with_abbreviations(text))
+        await db.add_request_stat(
+            user_id=user_id, request_type="question", request_text=text
+        )
+        await handle_general_question(message, state, expanded_query)
 
 async def _ask_confirmation(message: Message, state: FSMContext, query_type: str, text: str, confidence: float):
     """Запрос подтверждения типа поиска"""
@@ -847,6 +878,8 @@ async def _clarify_with_llm(message: Message, state: FSMContext, text: str, init
 
 @questions_router.message(QuestionStates.confirming_search_type)
 async def handle_search_confirmation(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+
     text = message.text.strip()
     data = await state.get_data()
     classification = data.get("query_classification", {})
@@ -855,59 +888,93 @@ async def handle_search_confirmation(message: Message, state: FSMContext):
         # Пользователь подтвердил - обрабатываем запрос
         query_type = classification.get("type", "general")
         original_query = classification.get("original_query", "")
+        expanded_query = expand_query_with_abbreviations(original_query)
         
         # Убираем клавиатуру подтверждения
-        await message.answer("✅ Принято! Обрабатываю запрос...")
+        await message.answer("✅ Принято! Обрабатываю запрос...", reply_markup=get_dialog_kb())
         
         if query_type == "code":
             await state.set_state(QuestionStates.waiting_for_code)
             await handle_code_search_with_text(message, state, original_query)
         elif query_type == "name":
             await state.set_state(QuestionStates.waiting_for_name)
-            await handle_name_search_with_text(message, state, expand_query_with_abbreviations(original_query))
+            await handle_name_search_with_text(message, state, expanded_query)
         elif query_type == "profile":
             await state.update_data(show_profiles=True)
             await state.set_state(QuestionStates.waiting_for_name)
-            await handle_name_search_with_text(message, state, expand_query_with_abbreviations(original_query))
+            await handle_name_search_with_text(message, state, expanded_query)
         else:
-            await handle_general_question(message, state, expand_query_with_abbreviations(original_query))
+            await db.add_request_stat(
+                user_id=user_id, request_type="question", request_text=text
+            )
+            await handle_general_question(message, state, expanded_query)
             
     elif text == "❌ Нет":
         # Пользователь не подтвердил - предлагаем выбрать тип
-        await message.answer("❌ Понятно! Уточните тип поиска:")
+        await message.answer("❌ Понятно! Уточните тип поиска:", reply_markup=get_dialog_kb())
+
+        await state.set_state(QuestionStates.clarifying_search)
+
         await _clarify_with_llm(
             message, state, 
             classification.get("original_query", ""),
             classification.get("type", "general"),
             classification.get("confidence", 0.5)
         )
+        
     elif text == "❌ Завершить диалог":
         await handle_end_dialog(message, state)
     else:
         await message.answer("Пожалуйста, используйте кнопки для ответа.")
 
+@questions_router.message(QuestionStates.clarifying_search, F.text)
+async def handle_text_input_during_clarification(message: Message, state: FSMContext):
+    """Обработчик текстового ввода во время уточнения типа поиска"""
+    text = message.text.strip()
+    
+    # Если пользователь ввел текст вместо выбора кнопки, обрабатываем как новый запрос
+    if text and text not in ["🔢 Поиск по коду теста", "📝 Поиск по названию", 
+                           "🔬 Поиск профиля тестов", "❓ Общий вопрос", "❌ Завершить диалог"]:
+        
+        # Очищаем состояние уточнения
+        await state.set_state(QuestionStates.waiting_for_search_type)
+        
+        # Обрабатываем как новый запрос
+        await handle_universal_search(message, state)
+    else:
+        # Если это одна из кнопок, передаем обработку основному обработчику
+        await handle_search_clarification(message, state)
+
 @questions_router.message(QuestionStates.clarifying_search)
 async def handle_search_clarification(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+
     text = message.text.strip()
     data = await state.get_data()
     original_query = data.get("query_classification", {}).get("original_query", "")
+    expanded_query = expand_query_with_abbreviations(original_query)
+    
     
     if text == "🔢 Поиск по коду теста":
-        await message.answer("✅ Ищу по коду...")
+        await message.answer("✅ Ищу по коду...", reply_markup=get_dialog_kb())
         await state.set_state(QuestionStates.waiting_for_code)
         await handle_code_search_with_text(message, state, original_query)
     elif text == "📝 Поиск по названию":
-        await message.answer("✅ Ищу по названию...")
+        await message.answer("✅ Ищу по названию...", reply_markup=get_dialog_kb())
         await state.set_state(QuestionStates.waiting_for_name)
-        await handle_name_search_with_text(message, state, expand_query_with_abbreviations(original_query))
+        await handle_name_search_with_text(message, state, expanded_query)
     elif text == "🔬 Поиск профиля тестов":
-        await message.answer("✅ Ищу профили тестов...")
+        await message.answer("✅ Ищу профили тестов...", reply_markup=get_dialog_kb())
+
         await state.update_data(show_profiles=True)
         await state.set_state(QuestionStates.waiting_for_name)
-        await handle_name_search_with_text(message, state, expand_query_with_abbreviations(original_query))
+        await handle_name_search_with_text(message, state, expanded_query)
     elif text == "❓ Общий вопрос":
-        await message.answer("✅ Отвечаю на вопрос...")
-        await handle_general_question(message, state, expand_query_with_abbreviations(original_query))
+        await db.add_request_stat(
+            user_id=user_id, request_type="question", request_text=text
+        )
+        await message.answer("✅ Отвечаю на вопрос...", reply_markup=get_dialog_kb())
+        await handle_general_question(message, state, expanded_query)
     elif text == "❌ Завершить диалог":
         await handle_end_dialog(message, state)
     else:
@@ -975,7 +1042,6 @@ async def handle_name_search(message: Message, state: FSMContext):
     await _handle_name_search_internal(message, state)
 
 
-
 @questions_router.message(QuestionStates.in_dialog)
 async def handle_dialog(message: Message, state: FSMContext):
     text = message.text.strip()
@@ -988,17 +1054,15 @@ async def handle_dialog(message: Message, state: FSMContext):
     data = await state.get_data()
     test_data = data.get("current_test")
 
-    text = expand_query_with_abbreviations(text)
-    last_viewed = data.get("last_viewed_test")
-
+    expanded_query = expand_query_with_abbreviations(text)
     # Используем классификатор для определения типа нового запроса
-    query_type, confidence, metadata = await ultimate_classifier.classify_with_certainty(text)
-    
+    query_type, confidence, metadata = await ultimate_classifier.classify_with_certainty(expanded_query)
+
     # Проверяем, нужен ли новый поиск (не общий вопрос о текущем тесте)
-    needs_new_search = await _should_initiate_new_search(text, test_data, query_type, confidence)
-    
+    needs_new_search = await _should_initiate_new_search(expanded_query, test_data, query_type, confidence)
+
     if needs_new_search:
-        # Сохраняем информацию о классификации
+        # Сохраняем информацию о классификации для последующих шагов
         await state.update_data(
             query_classification={
                 "type": query_type,
@@ -1007,31 +1071,20 @@ async def handle_dialog(message: Message, state: FSMContext):
                 "original_query": text
             }
         )
-        
-        # Обрабатываем как новый поиск
-        if confidence > 0.8:
-            if query_type == "code":
-                await state.set_state(QuestionStates.waiting_for_code)
-                await handle_code_search(message, state)
-            elif query_type in ["name", "profile"]:
-                if query_type == "profile":
-                    await state.update_data(show_profiles=True)
-                await state.set_state(QuestionStates.waiting_for_name)
-                await handle_name_search(message, state)
-            else:
-                # Для общих вопросов в диалоге обрабатываем в контексте текущего теста
-                await _handle_contextual_question(message, state, expand_query_with_abbreviations(text), test_data)
+
+        # Высокая уверенность — сразу маршрутизируем
+        if confidence > 0.85:
+            await _process_confident_query(message, state, query_type, expanded_query, metadata)
         else:
-            # Просим уточнение для неясных запросов
-            await _ask_dialog_clarification(message, state, expand_query_with_abbreviations(text), query_type, confidence)
+            # Средняя уверенность — спросить подтверждение
+            await _ask_confirmation(message, state, query_type, expanded_query, confidence)
+            # Низкая уверенность — дополнительное уточнение через LLM
+            if confidence < 0.7:
+                await _clarify_with_llm(message, state, expanded_query, query_type, confidence)
         return
 
-    # Если это вопрос о текущем тесте - обрабатываем через LLM
-    await _handle_contextual_question(message, state, expand_query_with_abbreviations(text), test_data)
-    
-    await state.set_state(QuestionStates.waiting_for_search_type)
-    if last_viewed:
-        await state.update_data(last_viewed_test=last_viewed)
+    # Вопрос относится к текущему тесту — обрабатываем в контексте, остаёмся в in_dialog
+    await _handle_contextual_question(message, state, expanded_query, test_data)
 
 
 async def _should_initiate_new_search(text: str, current_test_data: Dict, query_type: str, confidence: float) -> bool:
@@ -1087,8 +1140,6 @@ async def _ask_dialog_clarification(message: Message, state: FSMContext, text: s
         f"Запрос: <b>{html.escape(text)}</b>"
     )
     
-
-    
     keyboard = InlineKeyboardMarkup(
         keyboard=[
             [InlineKeyboardButton(text="❓ Вопрос о текущем тесте")],
@@ -1114,27 +1165,67 @@ async def _handle_contextual_question(message: Message, state: FSMContext, quest
     animation_task = None
 
     try:
-        gif_msg = await message.answer_animation(LOADING_GIF_ID, caption="")
+        # Показ загрузки (не падаем, если GIF недоступен)
+        try:
+            gif_msg = await message.answer_animation(LOADING_GIF_ID, caption="")
+        except Exception:
+            gif_msg = None
         loading_msg = await message.answer("Обрабатываю ваш вопрос...")
         animation_task = asyncio.create_task(animate_loading(loading_msg))
 
         system_msg = SystemMessage(
             content=f"""
-            Ты - ассистент лаборатории VetUnion. Отвечай только в области ветеринарии.
+            Ты - ассистент лаборатории VetUnion и отвечаешь только в области ветеринарии. 
             
             Текущий тест:
             Код: {test_data['test_code']}
             Название: {test_data['test_name']}
             
-            Отвечай на вопросы пользователя кратко и по существу.
-            Если вопрос не относится к текущему тесту, вежливо предложи начать новый поиск.
-            """
+            ВАЖНОЕ ПРАВИЛО:
+            Если пользователь спрашивает про ДРУГОЙ тест или анализ (упоминает другой код, название или тип анализа),
+            ты ДОЛЖЕН ответить ТОЧНО так:
+            "NEED_NEW_SEARCH: [запрос пользователя]"
+            
+            Если вопрос касается текущего теста или просто пользователь хочет поинтересоваться по другому вопросу, предоставляй всю необходимую информацию в области ветеринарии с пониманием профессионального сленга.
+        """
         )
 
+        # Запрашиваем ответ у LLM
         response = await llm.agenerate([[system_msg, HumanMessage(content=question)]])
         answer = response.generations[0][0].text.strip()
-        answer = fix_bold(answer)
 
+        # Проверка на необходимость нового поиска
+        if answer.startswith("NEED_NEW_SEARCH:"):
+            # Отменяем анимацию и удаляем лоадеры
+            if animation_task:
+                animation_task.cancel()
+            await safe_delete_message(loading_msg)
+            await safe_delete_message(gif_msg)
+
+            search_query = answer.replace("NEED_NEW_SEARCH:", "").strip() or question
+
+            # Классифицируем новый запрос
+            query_type, confidence, metadata = await ultimate_classifier.classify_with_certainty(search_query)
+
+            await state.update_data(
+                query_classification={
+                    "type": query_type,
+                    "confidence": confidence,
+                    "metadata": metadata,
+                    "original_query": search_query
+                }
+            )
+
+            if confidence > 0.85:
+                await _process_confident_query(message, state, query_type, search_query, metadata)
+            else:
+                await _ask_confirmation(message, state, query_type, search_query, confidence)
+                if confidence < 0.7:
+                    await _clarify_with_llm(message, state, search_query, query_type, confidence)
+            return
+
+        # Обычный ответ по текущему тесту
+        answer = fix_bold(answer)
         await loading_msg.edit_text(answer, parse_mode="HTML")
         await message.answer("Выберите действие:", reply_markup=get_dialog_kb())
 
@@ -1144,13 +1235,15 @@ async def _handle_contextual_question(message: Message, state: FSMContext, quest
             animation_task.cancel()
         await safe_delete_message(loading_msg)
         await safe_delete_message(gif_msg)
-        await message.answer("⚠️ Не удалось обработать вопрос. Попробуйте переформулировать.")
-
+        
+        await state.set_state(QuestionStates.waiting_for_name)
+        await handle_name_search(message, state)
     finally:
         if animation_task and not animation_task.cancelled():
             animation_task.cancel()
         await safe_delete_message(gif_msg)
 
+    
 async def handle_context_switch(message: Message, state: FSMContext, new_query: str):
     """Обрабатывает переключение контекста на новый тест."""
 
@@ -1167,7 +1260,7 @@ async def handle_context_switch(message: Message, state: FSMContext, new_query: 
     if is_test_code_pattern(new_query):
         await state.set_state(QuestionStates.waiting_for_code)
         message.text = new_query  # Подменяем текст для обработчика
-        await handle_code_search(message, state)
+        await handle_code_search_with_text(message, state, new_query)
     else:
         await state.set_state(QuestionStates.waiting_for_name)
         message.text = new_query
@@ -1319,14 +1412,22 @@ async def handle_general_question(
 ):
     user = await db.get_user(message.from_user.id)
     
-    loading_msg = await message.answer("🤔 Анализирую вопрос...")
+    gif_msg = None
+    loading_msg = None
+    animation_task = None
+    try:
+        gif_msg = await message.answer_animation(LOADING_GIF_ID, caption="")
+    except Exception:
+        gif_msg = None
+    loading_msg = await message.answer("🤔 Анализирую вопрос...", reply_markup=get_dialog_kb())
+    animation_task = asyncio.create_task(animate_loading(loading_msg))
 
     try:
         processor = DataProcessor()
         processor.load_vector_store()
         
         # 1. Сначала ищем релевантные тесты для КОНКРЕТНОГО вопроса
-        relevant_docs = processor.search_test(query=question_text, top_k=50)
+        relevant_docs = processor.search_test(query=question_text, top_k=100)
         relevant_tests = [doc for doc, score in relevant_docs if score > 0.3]
         
         # 2. Собираем ТОЛЬКО релевантную информацию
@@ -1415,10 +1516,10 @@ async def handle_general_question(
                 matches = re.finditer(pattern, text, re.IGNORECASE)
                 for match in matches:
                     found_code = match.group()
-                    normalized_code = normalize_test_code(found_code)
+                    normalized = normalize_test_code(found_code)
                     
                     if normalized_code.upper() in all_test_codes:
-                        link = create_test_link(normalized_code)
+                        link = create_test_link(normalized)
                         html_link = f'<a href="{link}">{found_code}</a>'
                         text = text.replace(found_code, html_link)
             
@@ -1438,10 +1539,12 @@ async def handle_general_question(
             inline_keyboard=[
                 [
                     InlineKeyboardButton(
-                        text="🔢 Найти тест по коду", callback_data="search_by_code"
+                        text="🔢 Найти тест по коду", 
+                        callback_data="search_by_code"  
                     ),
                     InlineKeyboardButton(
-                        text="📝 Найти по названию", callback_data="search_by_name"
+                        text="📝 Найти по названию", 
+                        callback_data="search_by_name" 
                     ),
                 ]
             ]
@@ -1453,12 +1556,17 @@ async def handle_general_question(
         import traceback
         traceback.print_exc()
         
-        await loading_msg.delete()
+        if animation_task:
+            animation_task.cancel()
+        await safe_delete_message(loading_msg)
+        await safe_delete_message(gif_msg)
         await message.answer(
             "⚠️ Не удалось обработать вопрос. Попробуйте переформулировать."
         )
-
-
+    finally:
+        if animation_task and not animation_task.cancelled():
+            animation_task.cancel()
+        await safe_delete_message(gif_msg)
 
 async def handle_code_search_with_text(message: Message, state: FSMContext, search_text: str):
     """Wrapper для handle_code_search с передачей текста"""
@@ -1513,6 +1621,9 @@ async def _handle_name_search_internal(message: Message, state: FSMContext, sear
         
         # Фильтруем по типу (профили или обычные тесты)
         filtered_hits = filter_results_by_type(rag_hits, show_profiles)
+
+        # Универсальный реранж с учетом буквенного запроса/префикса
+        filtered_hits = _rerank_hits_by_query(filtered_hits, original_query)
         
         if not filtered_hits:
             await db.add_search_history(
@@ -1871,7 +1982,7 @@ async def _handle_code_search_internal(message: Message, state: FSMContext, sear
         # Найден результат - продолжаем
         doc = result[0]
         test_data = format_test_data(doc.metadata)
-
+        
         # Добавляем информацию о типе
         type_info = ""
         if is_profile_test(test_data["test_code"]):
