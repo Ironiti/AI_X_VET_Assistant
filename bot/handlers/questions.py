@@ -840,6 +840,11 @@ async def handle_universal_search(message: Message, state: FSMContext):
 async def _process_confident_query(message: Message, state: FSMContext, query_type: str, text: str, metadata: Dict):
     user_id = message.from_user.id
     expanded_query = expand_query_with_abbreviations(text)
+    
+    # Дополнительная проверка для профилей
+    profile_keywords = ['обс', 'профили', 'профиль', 'комплексы', 'комплекс', 'панели', 'панель']
+    if any(keyword in text.lower() for keyword in profile_keywords):
+        query_type = "profile"
 
     if query_type == "code":
         await state.set_state(QuestionStates.waiting_for_code)
@@ -1618,7 +1623,7 @@ async def _handle_name_search_internal(message: Message, state: FSMContext, sear
         processor.load_vector_store()
 
         # Ищем по тексту
-        rag_hits = processor.search_test(text, top_k=50)  # Увеличиваем для фильтрации
+        rag_hits = processor.search_test(text, top_k=30)  # Увеличиваем для фильтрации
 
         # Фильтруем по типу (профили или обычные тесты)
         filtered_hits = filter_results_by_type(rag_hits, show_profiles)

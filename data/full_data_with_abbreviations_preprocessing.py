@@ -13,7 +13,7 @@ def join_pcr_data(main_file_path):
         # Ищем буквы в конце строки после цифр
         match = re.search(r'(\d+)([A-Za-zА-Яа-я]+)$', str(code))
         if match:
-            return match.group(2)  # возвращаем буквенную часть
+            return match.group(2).strip()
         return None
     
     # Создаем столбец с буквенными частями кодов для основной таблицы
@@ -21,6 +21,7 @@ def join_pcr_data(main_file_path):
     
     # Создаем столбец с буквенными частями кодов для справочника ПЦР
     pcr_df.rename(columns = {'Аббревиатура': 'code_letters'}, inplace = True)
+    pcr_df['code_letters'] = pcr_df['code_letters'].apply(lambda x: x.strip())
     pcr_df['Расшифровка'] = pcr_df['Расшифровка'].apply(lambda x: ' '.join(x.split("/")))
                                                                                      
     # Объединяем таблицы по буквенным частям кодов
@@ -35,19 +36,23 @@ def join_pcr_data(main_file_path):
     # Удаляем временный столбец (если нужно)    
     merged_df = merged_df.fillna(value = {'form_link': '-'}).replace([' '], None)
 
-    df_unique_code = merged_df.drop_duplicates(subset=['test_code'])
-    df_unique_name = merged_df.drop_duplicates(subset=['test_name'])
+    # df_unique_code = merged_df.drop_duplicates(subset=['test_code'])
+    # df_unique_name = merged_df.drop_duplicates(subset=['test_name'])
     
-    merged_df = df_unique_code[df_unique_code.index.isin(df_unique_name.index)].fillna('')
+    # merged_df = df_unique_code[df_unique_code.index.isin(df_unique_name.index)].fillna('')
 
     merged_df['column_for_embeddings'] = (
         merged_df['test_name'].str.cat(
         [
             merged_df['department'],
             merged_df['encoded'],
+            merged_df['encoded'],
             merged_df['code_letters'],
             merged_df['animal_type'],
-            merged_df['biomaterial_type']
+            merged_df['biomaterial_type'],
+            merged_df['container_type'],
+            merged_df['storage_temp']
+            
         ],
         sep = ' ', 
         na_rep = ''

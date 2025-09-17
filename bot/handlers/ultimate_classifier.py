@@ -32,12 +32,36 @@ class UltimateQuestionClassifier:
         
         # Паттерны для профилей
         self.profile_patterns = [
-            (re.compile(r'профиль\s+тест'), 0.97),
-            (re.compile(r'панель\s+тест'), 0.96),
-            (re.compile(r'комплекс\s+анализ'), 0.95),
-            (re.compile(r'обследование\s+на\s+'), 0.94),
-            (re.compile(r'набор\s+тест'), 0.93),
+            # Точные совпадения с высокой уверенностью
+            (re.compile(r'\bОБС\b', re.IGNORECASE), 0.99),  # Общий биохимический скрининг
+            (re.compile(r'\bпрофил[иья]\b', re.IGNORECASE), 0.98),  # "профили" или "профиль"
+            (re.compile(r'\bкомплекс[ыа]?\b', re.IGNORECASE), 0.97),  # "комплексы", "комплекс"
+            (re.compile(r'\bпанел[иья]\b', re.IGNORECASE), 0.96),  # "панели", "панель"
+            
+            # Составные паттерны
+            (re.compile(r'профил[иья]\s+\w+', re.IGNORECASE), 0.95),  # "профили гистология"
+            (re.compile(r'комплекс[ыа]?\s+\w+', re.IGNORECASE), 0.94),  # "комплексы биохимия"
+            (re.compile(r'панел[иья]\s+\w+', re.IGNORECASE), 0.93),  # "панели анализов"
+            
+            # Старые паттерны для совместимости
+            (re.compile(r'профиль\s+тест'), 0.92),
+            (re.compile(r'панель\s+тест'), 0.91),
+            (re.compile(r'комплекс\s+анализ'), 0.90),
+            (re.compile(r'обследование\s+на\s+'), 0.89),
+            (re.compile(r'набор\s+тест'), 0.88),
+            
+            # Дополнительные ключевые слова для профилей
+            (re.compile(r'скрининг', re.IGNORECASE), 0.92),
+            (re.compile(r'чек-ап', re.IGNORECASE), 0.91),
+            (re.compile(r'check-up', re.IGNORECASE), 0.91),
+            (re.compile(r'базов[ыа]е\s+исследован', re.IGNORECASE), 0.90),
         ]
+        
+        # Добавляем список ключевых слов, которые ВСЕГДА указывают на профили
+        self.profile_keywords = {
+            'обс', 'профили', 'профиль', 'комплексы', 'комплекс', 
+            'панели', 'панель', 'скрининг', 'чек-ап', 'check-up'
+        }
         
         # Общие вопросы
         self.general_question_patterns = [
@@ -130,6 +154,17 @@ class UltimateQuestionClassifier:
         """Проверка паттернов профилей"""
         query_lower = query.lower()
         
+        # Сначала проверяем точные ключевые слова
+        words = set(query_lower.split())
+        if words.intersection(self.profile_keywords):
+            return {
+                "type": "profile",
+                "confidence": 0.98,
+                "method": "keyword_match",
+                "matched_keywords": list(words.intersection(self.profile_keywords))
+            }
+        
+        # Затем проверяем паттерны
         for pattern, confidence in self.profile_patterns:
             if pattern.search(query_lower):
                 return {
@@ -140,7 +175,8 @@ class UltimateQuestionClassifier:
                 }
         
         return {"type": "profile", "confidence": 0.0, "method": "none"}
-
+                
+        
     def _check_general_patterns(self, query: str) -> Dict[str, Any]:
         """Проверка паттернов общих вопросов"""
         query_lower = query.lower()
@@ -189,15 +225,16 @@ class UltimateQuestionClassifier:
                 "method": "heuristic"
             }
         
-        # Эвристики для профилей
-        profile_heuristic1 = any(word in query_lower for word in ['профиль', 'панель', 'комплекс', 'обследование', 'набор'])
+        profile_heuristic1 = any(word in query_lower for word in self.profile_keywords)
         profile_heuristic2 = ' нескольких ' in query_lower or ' группу ' in query_lower
+        profile_heuristic3 = any(word in query_lower for word in ['гистология', 'биохимия', 'гематология']) and \
+                            any(word in query_lower for word in ['профил', 'комплекс', 'панел'])
         
-        profile_count = sum([profile_heuristic1, profile_heuristic2])
-        if profile_count >= 2:
+        profile_count = sum([profile_heuristic1, profile_heuristic2, profile_heuristic3])
+        if profile_count >= 1:  # Снижаем порог до 1 для большей чувствительности
             return {
                 "type": "profile",
-                "confidence": 0.78,
+                "confidence": 0.85 if profile_count >= 2 else 0.78,
                 "method": "heuristic"
             }
         
