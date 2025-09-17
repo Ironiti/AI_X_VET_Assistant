@@ -38,7 +38,7 @@ def load_disease_dictionary(excel_file_path: str) -> Tuple[Dict[str, str], Dict[
                         # Извлекаем все возможные аббревиатуры из термина
                         potential_abbrs = extract_abbreviations_from_text(term)
                         for abbr in potential_abbrs:
-                            if len(abbr) >= 2:
+                            if len(abbr) > 2:
                                 # Добавляем в оба словаря для перекрестного поиска
                                 abbr_to_official[abbr] = official_name
                                 colloquial_to_official[abbr] = official_name
@@ -252,7 +252,7 @@ def find_matches_with_context(tokens: List[Tuple[str, int, int]],
             continue
         
         # 3. Для токенов, которые выглядят как аббревиатуры, создаем варианты
-        if (2 <= len(token_upper) <= 6 and token_upper.isalpha() and
+        if (2 <= len(token_upper) <= 4 and token_upper.isalpha() and
             (any(c.isascii() for c in token_upper) or 
              any(c in 'АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ' for c in token_upper))):
             
@@ -506,17 +506,15 @@ def extract_abbreviations_from_text(text: str) -> List[str]:
         word_upper = word.upper()
         
         # Критерии для определения аббревиатур:
-        # 1. Длина 2-6 символов
-        # 2. Содержит только буквы
-        # 3. Все буквы в верхнем регистре или смешанный регистр
-        if 2 <= len(word_upper) <= 6 and word_upper.isalpha():
+
+        if 2 < len(word_upper) <= 4 and word_upper.isalpha():
             # Добавляем как есть
             abbreviations.add(word_upper)
             
             # Добавляем варианты для смешанных аббревиатур
             mixed_variants = detect_and_normalize_mixed_abbreviations(word_upper)
             for variant in mixed_variants:
-                if len(variant) >= 2:
+                if len(variant) > 2:
                     abbreviations.add(variant)
     
     return list(abbreviations)

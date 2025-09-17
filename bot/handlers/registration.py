@@ -23,8 +23,7 @@ registration_router = Router()
 async def get_tech_support_message():
     return (
         "🛠 Техничка VET UNION Assistant\n\n"
-        "У вас возникли технические проблемы с ботом? Обнаружили ошибку или сбой в работе?\n\n"
-        "Присоединяйтесь к нашей технической группе!\n\n"
+        "Отдельный чат техподдержки\n\n"
         "📋 Данная группа предназначена для отправки ошибок в боте.\n\n"
         "🎯 Ваши сообщения об ошибках помогают:\n\n"
         "• Быстро устранять проблемы\n"
@@ -330,7 +329,7 @@ async def process_client_code(message: Message, state: FSMContext):
 
 @registration_router.message(RegistrationStates.waiting_for_client_name)
 async def process_client_name(message: Message, state: FSMContext):
-    name = message.text.strip()
+    name = message.text.strip().title()  # Добавлен .title()
 
     if len(name) < 2 or len(name) > 50:
         await message.answer(
@@ -388,7 +387,6 @@ async def process_specialization(message: Message, state: FSMContext):
     )
 
     if success:
-        await message.answer(await get_tech_support_message())
         await message.answer(
             f"✅ Регистрация завершена успешно!\n\n"
             f"👤 Имя: {data['name']}\n"
@@ -397,6 +395,7 @@ async def process_specialization(message: Message, state: FSMContext):
             "Теперь вы можете пользоваться всеми функциями бота!",
             reply_markup=get_main_menu_kb()
         )
+        await message.answer(await get_tech_support_message())
     else:
         await message.answer(
             "❌ Ошибка регистрации. Возможно, вы уже зарегистрированы.\nПопробуйте еще раз: /start",
@@ -427,7 +426,6 @@ async def process_custom_specialization(message: Message, state: FSMContext):
     )
 
     if success:
-        await message.answer(await get_tech_support_message())
         await message.answer(
             f"✅ Регистрация завершена успешно!\n\n"
             f"👤 Имя: {data['name']}\n"
@@ -436,6 +434,7 @@ async def process_custom_specialization(message: Message, state: FSMContext):
             "Теперь вы можете пользоваться всеми функциями бота!",
             reply_markup=get_main_menu_kb()
         )
+        await message.answer(await get_tech_support_message())
     else:
         await message.answer(
             "❌ Ошибка регистрации. Возможно, вы уже зарегистрированы.\nПопробуйте еще раз: /start",
@@ -475,7 +474,7 @@ async def process_region(message: Message, state: FSMContext):
     
 @registration_router.message(RegistrationStates.waiting_for_employee_last_name)
 async def process_employee_last_name(message: Message, state: FSMContext):
-    last_name = message.text.strip()
+    last_name = message.text.strip().title()  # Добавлен .title()
 
     if len(last_name) < 2 or len(last_name) > 50:
         await message.answer(
@@ -500,7 +499,7 @@ async def process_employee_last_name(message: Message, state: FSMContext):
 
 @registration_router.message(RegistrationStates.waiting_for_employee_first_name)
 async def process_employee_first_name(message: Message, state: FSMContext):
-    first_name = message.text.strip()
+    first_name = message.text.strip().title()  # Добавлен .title()
 
     if len(first_name) < 2 or len(first_name) > 50:
         await message.answer(
@@ -573,7 +572,6 @@ async def process_department(message: Message, state: FSMContext):
     )
 
     if success:
-        await message.answer(await get_tech_support_message())
         await message.answer(
             f"✅ Регистрация завершена успешно!\n\n"
             f"👤 {data['last_name']} {data['first_name']}\n"
@@ -582,7 +580,7 @@ async def process_department(message: Message, state: FSMContext):
             "Теперь вы можете пользоваться всеми функциями бота!",
             reply_markup=get_main_menu_kb()
         )
-        
+        await message.answer(await get_tech_support_message())
         # Проверяем наличие отложенного теста
         if 'pending_test_code' in data:
             test_code = data['pending_test_code']

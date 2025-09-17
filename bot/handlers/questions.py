@@ -26,26 +26,26 @@ from src.database.db_init import db
 from src.data_vectorization import DataProcessor
 from models.models_init import Google_Gemini_2_5_Flash_Lite as llm
 from bot.handlers.utils import (
-    fix_bold, 
-    safe_delete_message, 
-    create_test_link, 
-    is_test_code_pattern, 
+    fix_bold,
+    safe_delete_message,
+    create_test_link,
+    is_test_code_pattern,
     normalize_test_code,
-    check_profile_request, 
+    check_profile_request,
     filter_results_by_type,
     is_profile_test
     )
 from bot.handlers.sending_style import (
     animate_loading,
-    format_test_data, 
-    format_test_info, 
-    get_user_first_name, 
+    format_test_data,
+    format_test_info,
+    get_user_first_name,
     get_time_based_farewell,
     format_similar_tests_with_links
 )
 from bot.handlers.score_test import (
     select_best_match,
-    fuzzy_test_search, 
+    fuzzy_test_search,
     smart_test_search
 )
 from bot.keyboards import (
@@ -429,70 +429,72 @@ async def handle_show_test_callback(callback: CallbackQuery, state: FSMContext):
                 test_code_2=test_data["test_code"],
             )
 
-        # Получаем связанные тесты из истории пользователя
-        related_tests = await db.get_user_related_tests(user_id, test_data["test_code"])
-
-        # Ищем похожие тесты для этого теста
-        similar_tests = await fuzzy_test_search(
-            processor, test_data["test_code"], threshold=40
-        )
-
-        # Фильтруем, чтобы не показывать сам тест
-        similar_tests = [
-            (d, s)
-            for d, s in similar_tests
-            if d.metadata.get("test_code") != test_data["test_code"]
-        ]
-
-        # Создаем клавиатуру если есть похожие или связанные
-        reply_markup = None
-        if related_tests or similar_tests:
-            keyboard = []
-            row = []
-
-            # Сначала связанные из истории (приоритет)
-            for related in related_tests[:4]:
-                row.append(
-                    InlineKeyboardButton(
-                        text=f"⭐ {related['test_code']}",
-                        callback_data=TestCallback.pack(
-                            "show_test", related["test_code"]
-                        ),
-                    )
-                )
-                if len(row) >= 2:
-                    keyboard.append(row)
-                    row = []
-
-            # Затем похожие
-            for doc, _ in similar_tests[:4]:
-                if len(keyboard) * 2 + len(row) >= 8:  # Максимум 8 кнопок
-                    break
-                code = doc.metadata.get("test_code")
-                if not any(r["test_code"] == code for r in related_tests):
-                    row.append(
-                        InlineKeyboardButton(
-                            text=code,
-                            callback_data=TestCallback.pack("show_test", code),
-                        )
-                    )
-                    if len(row) >= 2:
-                        keyboard.append(row)
-                        row = []
-
-            if row:
-                keyboard.append(row)
-
-            reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+        # --- Блок рекомендаций закомментирован по запросу ---
+        # # Получаем связанные тесты из истории пользователя
+        # related_tests = await db.get_user_related_tests(user_id, test_data["test_code"])
+        #
+        # # Ищем похожие тесты для этого теста
+        # similar_tests = await fuzzy_test_search(
+        #     processor, test_data["test_code"], threshold=40
+        # )
+        #
+        # # Фильтруем, чтобы не показывать сам тест
+        # similar_tests = [
+        #     (d, s)
+        #     for d, s in similar_tests
+        #     if d.metadata.get("test_code") != test_data["test_code"]
+        # ]
+        #
+        # # Создаем клавиатуру если есть похожие или связанные
+        # reply_markup = None
+        # if related_tests or similar_tests:
+        #     keyboard = []
+        #     row = []
+        #
+        #     # Сначала связанные из истории (приоритет)
+        #     for related in related_tests[:4]:
+        #         row.append(
+        #             InlineKeyboardButton(
+        #                 text=f"⭐ {related['test_code']}",
+        #                 callback_data=TestCallback.pack(
+        #                     "show_test", related["test_code"]
+        #                 ),
+        #             )
+        #         )
+        #         if len(row) >= 2:
+        #             keyboard.append(row)
+        #             row = []
+        #
+        #     # Затем похожие
+        #     for doc, _ in similar_tests[:4]:
+        #         if len(keyboard) * 2 + len(row) >= 8:  # Максимум 8 кнопок
+        #             break
+        #         code = doc.metadata.get("test_code")
+        #         if not any(r["test_code"] == code for r in related_tests):
+        #             row.append(
+        #                 InlineKeyboardButton(
+        #                     text=code,
+        #                     callback_data=TestCallback.pack("show_test", code),
+        #                 )
+        #             )
+        #             if len(row) >= 2:
+        #                 keyboard.append(row)
+        #                 row = []
+        #
+        #     if row:
+        #         keyboard.append(row)
+        #
+        #     reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+        # --- Конец закомментированного блока ---
 
         # Отправляем информацию с фото ТОЛЬКО ОДИН РАЗ
         await send_test_info_with_photo(callback.message, test_data, response)
 
-        # Если есть рекомендации - отправляем их отдельным сообщением
-        if reply_markup:
-            await callback.message.answer(
-                "🎯 Рекомендуем также:", reply_markup=reply_markup
-            )
+        # # Если есть рекомендации - отправляем их отдельным сообщением
+        # if reply_markup:
+        #     await callback.message.answer(
+        #         "🎯 Рекомендуем также:", reply_markup=reply_markup
+        #     )
 
         # Обновляем состояние с текущим тестом
         await state.set_state(QuestionStates.in_dialog)
@@ -614,70 +616,72 @@ async def handle_quick_test_selection(callback: CallbackQuery, state: FSMContext
                 test_code_2=test_data["test_code"],
             )
 
-        # Получаем связанные тесты из истории пользователя
-        related_tests = await db.get_user_related_tests(user_id, test_data["test_code"])
-
-        # Ищем похожие тесты для этого теста
-        similar_tests = await fuzzy_test_search(
-            processor, test_data["test_code"], threshold=40
-        )
-
-        # Фильтруем, чтобы не показывать сам тест
-        similar_tests = [
-            (d, s)
-            for d, s in similar_tests
-            if d.metadata.get("test_code") != test_data["test_code"]
-        ]
-
-        # Создаем клавиатуру если есть похожие или связанные
-        reply_markup = None
-        if related_tests or similar_tests:
-            keyboard = []
-            row = []
-
-            # Сначала связанные из истории (приоритет)
-            for related in related_tests[:4]:
-                row.append(
-                    InlineKeyboardButton(
-                        text=f"⭐ {related['test_code']}",
-                        callback_data=TestCallback.pack(
-                            "show_test", related["test_code"]
-                        ),
-                    )
-                )
-                if len(row) >= 2:
-                    keyboard.append(row)
-                    row = []
-
-            # Затем похожие
-            for doc, _ in similar_tests[:4]:
-                if len(keyboard) * 2 + len(row) >= 8:  # Максимум 8 кнопок
-                    break
-                code = doc.metadata.get("test_code")
-                if not any(r["test_code"] == code for r in related_tests):
-                    row.append(
-                        InlineKeyboardButton(
-                            text=code,
-                            callback_data=TestCallback.pack("show_test", code),
-                        )
-                    )
-                    if len(row) >= 2:
-                        keyboard.append(row)
-                        row = []
-
-            if row:
-                keyboard.append(row)
-
-            reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+        # --- Блок рекомендаций закомментирован по запросу ---
+        # # Получаем связанные тесты из истории пользователя
+        # related_tests = await db.get_user_related_tests(user_id, test_data["test_code"])
+        #
+        # # Ищем похожие тесты для этого теста
+        # similar_tests = await fuzzy_test_search(
+        #     processor, test_data["test_code"], threshold=40
+        # )
+        #
+        # # Фильтруем, чтобы не показывать сам тест
+        # similar_tests = [
+        #     (d, s)
+        #     for d, s in similar_tests
+        #     if d.metadata.get("test_code") != test_data["test_code"]
+        # ]
+        #
+        # # Создаем клавиатуру если есть похожие или связанные
+        # reply_markup = None
+        # if related_tests or similar_tests:
+        #     keyboard = []
+        #     row = []
+        #
+        #     # Сначала связанные из истории (приоритет)
+        #     for related in related_tests[:4]:
+        #         row.append(
+        #             InlineKeyboardButton(
+        #                 text=f"⭐ {related['test_code']}",
+        #                 callback_data=TestCallback.pack(
+        #                     "show_test", related["test_code"]
+        #                 ),
+        #             )
+        #         )
+        #         if len(row) >= 2:
+        #             keyboard.append(row)
+        #             row = []
+        #
+        #     # Затем похожие
+        #     for doc, _ in similar_tests[:4]:
+        #         if len(keyboard) * 2 + len(row) >= 8:  # Максимум 8 кнопок
+        #             break
+        #         code = doc.metadata.get("test_code")
+        #         if not any(r["test_code"] == code for r in related_tests):
+        #             row.append(
+        #                 InlineKeyboardButton(
+        #                     text=code,
+        #                     callback_data=TestCallback.pack("show_test", code),
+        #                 )
+        #             )
+        #             if len(row) >= 2:
+        #                 keyboard.append(row)
+        #                 row = []
+        #
+        #     if row:
+        #         keyboard.append(row)
+        #
+        #     reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+        # --- Конец закомментированного блока ---
 
         # Отправляем информацию с фото ТОЛЬКО ОДИН РАЗ
         await send_test_info_with_photo(callback.message, test_data, response)
 
-        # Если есть рекомендации - отправляем их отдельным сообщением
-        if reply_markup:
-            await callback.message.answer(
-                "🎯 Рекомендуем также:", reply_markup=reply_markup
-            )
+        # # Если есть рекомендации - отправляем их отдельным сообщением
+        # if reply_markup:
+        #     await callback.message.answer(
+        #         "🎯 Рекомендуем также:", reply_markup=reply_markup
+        #     )
 
         # Обновляем состояние с текущим тестом
         await state.set_state(QuestionStates.in_dialog)
@@ -723,14 +727,28 @@ async def start_question(message: Message, state: FSMContext):
     user_name = get_user_first_name(user)
 
     prompt = f"""Привет, {user_name} 👋
-    
-🔬 Я могу помочь с поиском информации по:
-• Лабораторным тестам (введите код, например: AN5)
-• Преаналитическим требованиям
-• Типам контейнеров и условиям хранения
-• Или задайте любой вопрос о лабораторной диагностике
 
-💡 Просто напишите ваш вопрос или код теста:"""
+🔬 Я ассистент ветеринарной лаборатории VetUnion и помогу вам найти информацию о:
+
+📋 <b>Лабораторных тестах и анализах:</b>
+• По коду теста (например: AN116, ан116, АН116 или просто 116)
+• По названию или описанию (например: "общий анализ крови", "биохимия")
+• По профилям тестов (например: "профили биохимия")
+
+🧪 <b>Преаналитических требованиях:</b>
+• Подготовка пациента
+• Правила взятия биоматериала
+• Условия хранения и транспортировки
+• Типы контейнеров для проб
+
+💡 <b>Как мне задать вопрос:</b>
+• Введите код теста: <code>AN116</code> или <code>116</code>
+• Опишите, что ищете: "анализ на глюкозу"
+• Для поиска профилей добавьте слово "профили"
+
+Я автоматически определю тип вашего запроса и найду нужную информацию.
+
+✏️ Просто напишите ваш вопрос или код теста:"""
 
     await db.clear_buffer(user_id)
     await message.answer(prompt, reply_markup=get_back_to_menu_kb())
@@ -789,15 +807,15 @@ async def handle_universal_search(message: Message, state: FSMContext):
     """Универсальный обработчик запросов - автоматически определяет тип поиска."""
     text = message.text.strip()
     user_id = message.from_user.id
-    
+
     expanded_query = expand_query_with_abbreviations(text)
     # Проверяем, не кнопка ли это возврата
     if text == "🔙 Вернуться в главное меню" or text == "❌ Завершить диалог":
         return
-    
+
     # Используем классификатор для определения типа запроса
     query_type, confidence, metadata = await ultimate_classifier.classify_with_certainty(expanded_query)
-    
+
     # Сохраняем информацию о классификации
     await state.update_data(
         query_classification={
@@ -807,14 +825,14 @@ async def handle_universal_search(message: Message, state: FSMContext):
             "original_query": text
         }
     )
-    
+
     # Если уверенность высокая (>0.85) - сразу обрабатываем
     if confidence > 0.85:
         await _process_confident_query(message, state, query_type, text, metadata)
     else:
         # Если уверенность средняя (0.7-0.85) - просим подтверждение
         await _ask_confirmation(message, state, query_type, expanded_query, confidence)
-    
+
     # Если уверенность низкая (<0.7) - используем LLM для уточнения
     if confidence < 0.7:
         await _clarify_with_llm(message, state, expanded_query, query_type, confidence)
@@ -843,17 +861,17 @@ async def _ask_confirmation(message: Message, state: FSMContext, query_type: str
     """Запрос подтверждения типа поиска"""
     type_descriptions = {
         "code": "поиск по коду теста",
-        "name": "поиск по названию теста", 
+        "name": "поиск по названию теста",
         "profile": "поиск профиля тестов",
         "general": "общий вопрос"
     }
-    
+
     confirmation_text = (
         f"🤔 Я понял ваш запрос как <b>{type_descriptions[query_type]}</b> "
         f"(уверенность: {confidence:.0%}).\n\n"
         f"Это правильный тип поиска?"
     )
-    
+
     await message.answer(
         confirmation_text,
         parse_mode="HTML",
@@ -867,7 +885,7 @@ async def _clarify_with_llm(message: Message, state: FSMContext, text: str, init
         f"Ваш запрос: <b>{html.escape(text)}</b>\n\n"
         f"Пожалуйста, выберите тип поиска:"
     )
-    
+
     await message.answer(
         clarification_text,
         parse_mode="HTML",
@@ -883,16 +901,16 @@ async def handle_search_confirmation(message: Message, state: FSMContext):
     text = message.text.strip()
     data = await state.get_data()
     classification = data.get("query_classification", {})
-    
+
     if text == "✅ Да":
         # Пользователь подтвердил - обрабатываем запрос
         query_type = classification.get("type", "general")
         original_query = classification.get("original_query", "")
         expanded_query = expand_query_with_abbreviations(original_query)
-        
+
         # Убираем клавиатуру подтверждения
         await message.answer("✅ Принято! Обрабатываю запрос...", reply_markup=get_dialog_kb())
-        
+
         if query_type == "code":
             await state.set_state(QuestionStates.waiting_for_code)
             await handle_code_search_with_text(message, state, original_query)
@@ -908,7 +926,7 @@ async def handle_search_confirmation(message: Message, state: FSMContext):
                 user_id=user_id, request_type="question", request_text=text
             )
             await handle_general_question(message, state, expanded_query)
-            
+
     elif text == "❌ Нет":
         # Пользователь не подтвердил - предлагаем выбрать тип
         await message.answer("❌ Понятно! Уточните тип поиска:", reply_markup=get_dialog_kb())
@@ -916,12 +934,12 @@ async def handle_search_confirmation(message: Message, state: FSMContext):
         await state.set_state(QuestionStates.clarifying_search)
 
         await _clarify_with_llm(
-            message, state, 
+            message, state,
             classification.get("original_query", ""),
             classification.get("type", "general"),
             classification.get("confidence", 0.5)
         )
-        
+
     elif text == "❌ Завершить диалог":
         await handle_end_dialog(message, state)
     else:
@@ -931,14 +949,14 @@ async def handle_search_confirmation(message: Message, state: FSMContext):
 async def handle_text_input_during_clarification(message: Message, state: FSMContext):
     """Обработчик текстового ввода во время уточнения типа поиска"""
     text = message.text.strip()
-    
+
     # Если пользователь ввел текст вместо выбора кнопки, обрабатываем как новый запрос
-    if text and text not in ["🔢 Поиск по коду теста", "📝 Поиск по названию", 
+    if text and text not in ["🔢 Поиск по коду теста", "📝 Поиск по названию",
                            "🔬 Поиск профиля тестов", "❓ Общий вопрос", "❌ Завершить диалог"]:
-        
+
         # Очищаем состояние уточнения
         await state.set_state(QuestionStates.waiting_for_search_type)
-        
+
         # Обрабатываем как новый запрос
         await handle_universal_search(message, state)
     else:
@@ -953,8 +971,8 @@ async def handle_search_clarification(message: Message, state: FSMContext):
     data = await state.get_data()
     original_query = data.get("query_classification", {}).get("original_query", "")
     expanded_query = expand_query_with_abbreviations(original_query)
-    
-    
+
+
     if text == "🔢 Поиск по коду теста":
         await message.answer("✅ Ищу по коду...", reply_markup=get_dialog_kb())
         await state.set_state(QuestionStates.waiting_for_code)
@@ -1091,27 +1109,27 @@ async def _should_initiate_new_search(text: str, current_test_data: Dict, query_
     """Определяет, нужно ли начинать новый поиск"""
     if not current_test_data:
         return True
-    
+
     # Если запрос явно указывает на новый поиск
     if query_type != "general" and confidence > 0.7:
         return True
-    
+
     # Эвристики для определения нового поиска
     text_lower = text.lower()
-    
+
     # Ключевые слова, указывающие на новый поиск
     new_search_keywords = [
         'найди', 'ищи', 'покажи', 'поиск', 'найти',
         'другой', 'еще', 'следующий', 'иной',
         'код', 'тест', 'анализ', 'профиль'
     ]
-    
+
     # Проверяем, содержит ли запрос указание на новый поиск
     has_search_intent = any(keyword in text_lower for keyword in new_search_keywords)
-    
+
     # Проверяем, не упоминается ли код другого теста
     has_other_code = await _contains_other_test_code(text, current_test_data.get("test_code", ""))
-    
+
     return has_search_intent or has_other_code
 
 async def _contains_other_test_code(text: str, current_test_code: str) -> bool:
@@ -1122,7 +1140,7 @@ async def _contains_other_test_code(text: str, current_test_code: str) -> bool:
         r'\b\d+[A-ZА-Я\-]*',
         r'[A-ZА-Я]+\d+[A-ZА-Я\-]*',
     ]
-    
+
     found_codes = set()
     for pattern in code_patterns:
         matches = re.findall(pattern, text, re.IGNORECASE)
@@ -1130,7 +1148,7 @@ async def _contains_other_test_code(text: str, current_test_code: str) -> bool:
             normalized = normalize_test_code(match)
             if normalized and normalized != current_test_code:
                 found_codes.add(normalized)
-    
+
     return len(found_codes) > 0
 
 async def _ask_dialog_clarification(message: Message, state: FSMContext, text: str, query_type: str, confidence: float):
@@ -1139,7 +1157,7 @@ async def _ask_dialog_clarification(message: Message, state: FSMContext, text: s
         f"🔍 Вы хотите задать вопрос о текущем тесте или начать новый поиск?\n\n"
         f"Запрос: <b>{html.escape(text)}</b>"
     )
-    
+
     keyboard = InlineKeyboardMarkup(
         keyboard=[
             [InlineKeyboardButton(text="❓ Вопрос о текущем тесте")],
@@ -1148,7 +1166,7 @@ async def _ask_dialog_clarification(message: Message, state: FSMContext, text: s
         ],
         resize_keyboard=True
     )
-    
+
     await message.answer(clarification_text, parse_mode="HTML", reply_markup=keyboard)
     await state.set_state(QuestionStates.clarifying_search)
 
@@ -1175,17 +1193,17 @@ async def _handle_contextual_question(message: Message, state: FSMContext, quest
 
         system_msg = SystemMessage(
             content=f"""
-            Ты - ассистент лаборатории VetUnion и отвечаешь только в области ветеринарии. 
-            
+            Ты - ассистент лаборатории VetUnion и отвечаешь только в области ветеринарии.
+
             Текущий тест:
             Код: {test_data['test_code']}
             Название: {test_data['test_name']}
-            
+
             ВАЖНОЕ ПРАВИЛО:
             Если пользователь спрашивает про ДРУГОЙ тест или анализ (упоминает другой код, название или тип анализа),
             ты ДОЛЖЕН ответить ТОЧНО так:
             "NEED_NEW_SEARCH: [запрос пользователя]"
-            
+
             Если вопрос касается текущего теста или просто пользователь хочет поинтересоваться по другому вопросу, предоставляй всю необходимую информацию в области ветеринарии с пониманием профессионального сленга.
         """
         )
@@ -1235,7 +1253,7 @@ async def _handle_contextual_question(message: Message, state: FSMContext, quest
             animation_task.cancel()
         await safe_delete_message(loading_msg)
         await safe_delete_message(gif_msg)
-        
+
         await state.set_state(QuestionStates.waiting_for_name)
         await handle_name_search(message, state)
     finally:
@@ -1243,7 +1261,7 @@ async def _handle_contextual_question(message: Message, state: FSMContext, quest
             animation_task.cancel()
         await safe_delete_message(gif_msg)
 
-    
+
 async def handle_context_switch(message: Message, state: FSMContext, new_query: str):
     """Обрабатывает переключение контекста на новый тест."""
 
@@ -1412,22 +1430,14 @@ async def handle_general_question(
 ):
     user = await db.get_user(message.from_user.id)
     
-    gif_msg = None
-    loading_msg = None
-    animation_task = None
-    try:
-        gif_msg = await message.answer_animation(LOADING_GIF_ID, caption="")
-    except Exception:
-        gif_msg = None
-    loading_msg = await message.answer("🤔 Анализирую вопрос...", reply_markup=get_dialog_kb())
-    animation_task = asyncio.create_task(animate_loading(loading_msg))
+    loading_msg = await message.answer("🤔 Анализирую вопрос...")
 
     try:
         processor = DataProcessor()
         processor.load_vector_store()
         
         # 1. Сначала ищем релевантные тесты для КОНКРЕТНОГО вопроса
-        relevant_docs = processor.search_test(query=question_text, top_k=100)
+        relevant_docs = processor.search_test(query=question_text, top_k=50)
         relevant_tests = [doc for doc, score in relevant_docs if score > 0.3]
         
         # 2. Собираем ТОЛЬКО релевантную информацию
@@ -1516,10 +1526,10 @@ async def handle_general_question(
                 matches = re.finditer(pattern, text, re.IGNORECASE)
                 for match in matches:
                     found_code = match.group()
-                    normalized = normalize_test_code(found_code)
+                    normalized_code = normalize_test_code(found_code)
                     
                     if normalized_code.upper() in all_test_codes:
-                        link = create_test_link(normalized)
+                        link = create_test_link(normalized_code)
                         html_link = f'<a href="{link}">{found_code}</a>'
                         text = text.replace(found_code, html_link)
             
@@ -1539,12 +1549,10 @@ async def handle_general_question(
             inline_keyboard=[
                 [
                     InlineKeyboardButton(
-                        text="🔢 Найти тест по коду", 
-                        callback_data="search_by_code"  
+                        text="🔢 Найти тест по коду", callback_data="search_by_code"
                     ),
                     InlineKeyboardButton(
-                        text="📝 Найти по названию", 
-                        callback_data="search_by_name" 
+                        text="📝 Найти по названию", callback_data="search_by_name"
                     ),
                 ]
             ]
@@ -1556,17 +1564,10 @@ async def handle_general_question(
         import traceback
         traceback.print_exc()
         
-        if animation_task:
-            animation_task.cancel()
-        await safe_delete_message(loading_msg)
-        await safe_delete_message(gif_msg)
+        await loading_msg.delete()
         await message.answer(
             "⚠️ Не удалось обработать вопрос. Попробуйте переформулировать."
         )
-    finally:
-        if animation_task and not animation_task.cancelled():
-            animation_task.cancel()
-        await safe_delete_message(gif_msg)
 
 async def handle_code_search_with_text(message: Message, state: FSMContext, search_text: str):
     """Wrapper для handle_code_search с передачей текста"""
@@ -1577,33 +1578,33 @@ async def handle_code_search_with_text(message: Message, state: FSMContext, sear
 async def handle_name_search_with_text(message: Message, state: FSMContext, search_text: str):
     """Wrapper для handle_name_search с передачей текста"""
     await _handle_name_search_internal(message, state, search_text)
-    
+
 async def _handle_name_search_internal(message: Message, state: FSMContext, search_text: str = None):
     """Внутренняя функция обработки поиска по имени"""
     user_id = message.from_user.id
-    
+
     # Получаем данные из состояния
     data = await state.get_data()
     show_profiles = data.get("show_profiles", False)
     original_query = data.get("original_query", message.text if not search_text else search_text)
-    
+
     # Используем переданный текст или текст из сообщения
     text = search_text if search_text else message.text.strip()
     text = expand_query_with_abbreviations(text)
-    
+
     # Сохраняем статистику с оригинальным запросом
     await db.add_request_stat(
         user_id=user_id, request_type="question", request_text=original_query
     )
-    
+
     gif_msg = None
     loading_msg = None
     animation_task = None
-    
+
     try:
         # Определяем что ищем
         search_type = "профили" if show_profiles else "тесты"
-        
+
         if LOADING_GIF_ID:
             gif_msg = await message.answer_animation(LOADING_GIF_ID, caption="")
             loading_msg = await message.answer(
@@ -1612,51 +1613,51 @@ async def _handle_name_search_internal(message: Message, state: FSMContext, sear
             animation_task = asyncio.create_task(animate_loading(loading_msg))
         else:
             loading_msg = await message.answer(f"🔍 Ищу {search_type}...")
-        
+
         processor = DataProcessor()
         processor.load_vector_store()
-        
+
         # Ищем по тексту
         rag_hits = processor.search_test(text, top_k=50)  # Увеличиваем для фильтрации
-        
+
         # Фильтруем по типу (профили или обычные тесты)
         filtered_hits = filter_results_by_type(rag_hits, show_profiles)
 
         # Универсальный реранж с учетом буквенного запроса/префикса
         filtered_hits = _rerank_hits_by_query(filtered_hits, original_query)
-        
+
         if not filtered_hits:
             await db.add_search_history(
-                user_id=user_id, 
-                search_query=original_query, 
-                search_type="text", 
+                user_id=user_id,
+                search_query=original_query,
+                search_type="text",
                 success=False
             )
-            
+
             # Безопасная очистка
             if animation_task:
                 animation_task.cancel()
             await safe_delete_message(loading_msg)
             await safe_delete_message(gif_msg)
-            
+
             not_found_msg = f"❌ {search_type.capitalize()} по запросу '<b>{html.escape(text)}</b>' не найдены.\n\n"
             if show_profiles:
                 not_found_msg += "💡 Попробуйте поиск без слова 'профили' для обычных тестов."
             else:
                 not_found_msg += "💡 Добавьте слово 'профили' в запрос для поиска профилей тестов."
-            
+
             await message.answer(
-                not_found_msg, 
+                not_found_msg,
                 reply_markup=get_back_to_menu_kb(),
                 parse_mode="HTML"
             )
             await state.set_state(QuestionStates.waiting_for_search_type)
             await state.update_data(show_profiles=False, search_text=None)
             return
-        
+
         # Выбираем лучшие совпадения
         selected_docs = await select_best_match(text, filtered_hits[:20])
-        
+
         # Записываем успешный поиск
         for doc in selected_docs[:1]:
             await db.add_search_history(
@@ -1666,51 +1667,51 @@ async def _handle_name_search_internal(message: Message, state: FSMContext, sear
                 search_type="text",
                 success=True
             )
-            
+
             await db.update_user_frequent_test(
                 user_id=user_id,
                 test_code=doc.metadata["test_code"],
                 test_name=doc.metadata["test_name"],
             )
-        
+
         # Безопасная очистка
         if animation_task:
             animation_task.cancel()
         await safe_delete_message(loading_msg)
         await safe_delete_message(gif_msg)
-        
+
         if len(selected_docs) > 1:
             # Показываем несколько результатов
             response = f"Найдено несколько подходящих {search_type}:\n\n"
-            
+
             for i, doc in enumerate(selected_docs, 1):
                 test_data = format_test_data(doc.metadata)
                 test_code = test_data["test_code"]
                 test_name = html.escape(test_data["test_name"])
                 department = html.escape(test_data["department"])
-                
+
                 # Добавляем метку для профилей
                 type_label = "🔬 Профиль" if is_profile_test(test_code) else "🧪 Тест"
-                
+
                 link = create_test_link(test_code)
-                
+
                 response += (
                     f"<b>{i}.</b> {type_label}: <a href='{link}'>{test_code}</a> - {test_name}\n"
                     f"📋 <b>Вид исследования:</b> {department}\n\n"
                 )
-                
+
                 if len(response) > 3500:
                     response += "\n<i>... и другие результаты</i>"
                     break
-            
+
             await message.answer(
                 response, parse_mode="HTML", disable_web_page_preview=True
             )
-            
+
             # Создаем клавиатуру с кнопками
             keyboard = InlineKeyboardMarkup(inline_keyboard=[])
             row = []
-            
+
             for i, doc in enumerate(selected_docs[:15]):
                 test_code = doc.metadata["test_code"]
                 row.append(
@@ -1719,36 +1720,36 @@ async def _handle_name_search_internal(message: Message, state: FSMContext, sear
                         callback_data=TestCallback.pack("show_test", test_code),
                     )
                 )
-                
+
                 if len(row) >= 3:
                     keyboard.inline_keyboard.append(row)
                     row = []
-            
+
             if row:
                 keyboard.inline_keyboard.append(row)
-            
+
             await message.answer(
                 "💡 <b>Нажмите на код теста в сообщении выше или выберите из кнопок:</b>",
                 reply_markup=keyboard,
                 parse_mode="HTML",
             )
-            
+
         else:
             # Один результат
             test_data = format_test_data(selected_docs[0].metadata)
-            
+
             # Добавляем информацию о типе
             type_info = ""
             if is_profile_test(test_data["test_code"]):
                 type_info = "🔬 <b>Это профиль тестов</b>\n\n"
-            
+
             response = type_info + format_test_info(test_data)
-            
+
             # Добавляем похожие тесты того же типа
             similar_tests = await fuzzy_test_search(
                 processor, test_data["test_code"], threshold=40
             )
-            
+
             # Фильтруем похожие по типу
             is_profile = is_profile_test(test_data["test_code"])
             similar_tests = filter_results_by_type(similar_tests, is_profile)
@@ -1757,13 +1758,13 @@ async def _handle_name_search_internal(message: Message, state: FSMContext, sear
                 for d, s in similar_tests
                 if d.metadata.get("test_code") != test_data["test_code"]
             ]
-            
+
             if similar_tests[:5]:
                 response += format_similar_tests_with_links(similar_tests[:5])
-            
+
             # Отправляем с фото
             await send_test_info_with_photo(message, test_data, response)
-            
+
             # Обновляем связанные тесты
             if "last_viewed_test" in data and data["last_viewed_test"] != test_data["test_code"]:
                 await db.update_related_tests(
@@ -1771,60 +1772,62 @@ async def _handle_name_search_internal(message: Message, state: FSMContext, sear
                     test_code_1=data["last_viewed_test"],
                     test_code_2=test_data["test_code"],
                 )
-            
-            # Получаем связанные тесты
-            related_tests = await db.get_user_related_tests(user_id, test_data["test_code"])
-            
-            # Создаем клавиатуру рекомендаций
-            reply_markup = None
-            if related_tests or similar_tests:
-                keyboard = []
-                row = []
-                
-                # Связанные из истории (того же типа)
-                for related in related_tests[:4]:
-                    if is_profile == is_profile_test(related["test_code"]):
-                        row.append(
-                            InlineKeyboardButton(
-                                text=f"⭐ {related['test_code']}",
-                                callback_data=TestCallback.pack(
-                                    "show_test", related["test_code"]
-                                ),
-                            )
-                        )
-                        if len(row) >= 2:
-                            keyboard.append(row)
-                            row = []
-                
-                # Похожие тесты
-                for doc, _ in similar_tests[:4]:
-                    if len(keyboard) * 2 + len(row) >= 8:
-                        break
-                    code = doc.metadata.get("test_code")
-                    if not any(r["test_code"] == code for r in related_tests):
-                        row.append(
-                            InlineKeyboardButton(
-                                text=code,
-                                callback_data=TestCallback.pack("show_test", code),
-                            )
-                        )
-                        if len(row) >= 2:
-                            keyboard.append(row)
-                            row = []
-                
-                if row:
-                    keyboard.append(row)
-                
-                reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
-            
-            # Показываем рекомендации
-            if reply_markup:
-                rec_type = "профили" if is_profile else "тесты"
-                await message.answer(
-                    f"🎯 Рекомендуем также похожие {rec_type}:",
-                    reply_markup=reply_markup
-                )
-        
+
+            # --- Блок рекомендаций закомментирован по запросу ---
+            # # Получаем связанные тесты
+            # related_tests = await db.get_user_related_tests(user_id, test_data["test_code"])
+            #
+            # # Создаем клавиатуру рекомендаций
+            # reply_markup = None
+            # if related_tests or similar_tests:
+            #     keyboard = []
+            #     row = []
+            #
+            #     # Связанные из истории (того же типа)
+            #     for related in related_tests[:4]:
+            #         if is_profile == is_profile_test(related["test_code"]):
+            #             row.append(
+            #                 InlineKeyboardButton(
+            #                     text=f"⭐ {related['test_code']}",
+            #                     callback_data=TestCallback.pack(
+            #                         "show_test", related["test_code"]
+            #                     ),
+            #                 )
+            #             )
+            #             if len(row) >= 2:
+            #                 keyboard.append(row)
+            #                 row = []
+            #
+            #     # Похожие тесты
+            #     for doc, _ in similar_tests[:4]:
+            #         if len(keyboard) * 2 + len(row) >= 8:
+            #             break
+            #         code = doc.metadata.get("test_code")
+            #         if not any(r["test_code"] == code for r in related_tests):
+            #             row.append(
+            #                 InlineKeyboardButton(
+            #                     text=code,
+            #                     callback_data=TestCallback.pack("show_test", code),
+            #                 )
+            #             )
+            #             if len(row) >= 2:
+            #                 keyboard.append(row)
+            #                 row = []
+            #
+            #     if row:
+            #         keyboard.append(row)
+            #
+            #     reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+            #
+            # # Показываем рекомендации
+            # if reply_markup:
+            #     rec_type = "профили" if is_profile else "тесты"
+            #     await message.answer(
+            #         f"🎯 Рекомендуем также похожие {rec_type}:",
+            #         reply_markup=reply_markup
+            #     )
+            # --- Конец закомментированного блока ---
+
         # Сохраняем последний найденный тест
         await state.set_state(QuestionStates.in_dialog)
         if selected_docs:
@@ -1835,17 +1838,17 @@ async def _handle_name_search_internal(message: Message, state: FSMContext, sear
                 show_profiles=False,  # Сбрасываем флаг после поиска
                 search_text=None
             )
-    
+
     except Exception as e:
         print(f"[ERROR] Name search failed: {e}")
         import traceback
         traceback.print_exc()
-        
+
         if animation_task:
             animation_task.cancel()
         await safe_delete_message(loading_msg)
         await safe_delete_message(gif_msg)
-        
+
         error_msg = (
             "❌ Тесты не найдены"
             if str(e) == "Тесты не найдены"
@@ -1854,7 +1857,7 @@ async def _handle_name_search_internal(message: Message, state: FSMContext, sear
         await message.answer(error_msg, reply_markup=get_back_to_menu_kb())
         await state.set_state(QuestionStates.waiting_for_search_type)
         await state.update_data(show_profiles=False, search_text=None)
-        
+
 async def _handle_code_search_internal(message: Message, state: FSMContext, search_text: str = None):
     """Внутренняя функция обработки поиска по коду"""
     data = await state.get_data()
@@ -1868,14 +1871,14 @@ async def _handle_code_search_internal(message: Message, state: FSMContext, sear
     await state.update_data(is_processing=True)
 
     user_id = message.from_user.id
-    
+
     # Используем переданный текст или текст из сообщения
     original_input = search_text if search_text else message.text.strip()
-    
+
     # Получаем флаги из состояния
     show_profiles = data.get("show_profiles", False)
     original_query = data.get("original_query", original_input)
-    
+
     # Сохраняем статистику
     await db.add_request_stat(
         user_id=user_id, request_type="question", request_text=original_query
@@ -1931,7 +1934,7 @@ async def _handle_code_search_internal(message: Message, state: FSMContext, sear
             similar_tests = await fuzzy_test_search(
                 processor, normalized_input, threshold=30
             )
-            
+
             # Фильтруем по типу
             similar_tests = filter_results_by_type(similar_tests, show_profiles)
 
@@ -1982,7 +1985,7 @@ async def _handle_code_search_internal(message: Message, state: FSMContext, sear
         # Найден результат - продолжаем
         doc = result[0]
         test_data = format_test_data(doc.metadata)
-        
+
         # Добавляем информацию о типе
         type_info = ""
         if is_profile_test(test_data["test_code"]):
@@ -2020,77 +2023,79 @@ async def _handle_code_search_internal(message: Message, state: FSMContext, sear
                 test_code_2=test_data["test_code"],
             )
 
-        # Получаем связанные тесты
-        related_tests = await db.get_user_related_tests(user_id, test_data["test_code"])
-
-        # Ищем похожие тесты того же типа
-        similar_tests = await fuzzy_test_search(
-            processor, test_data["test_code"], threshold=40
-        )
-        
-        # Фильтруем по типу
-        is_profile = is_profile_test(test_data["test_code"])
-        similar_tests = filter_results_by_type(similar_tests, is_profile)
-        similar_tests = [
-            (d, s)
-            for d, s in similar_tests
-            if d.metadata.get("test_code") != test_data["test_code"]
-        ]
-
-        # Создаем клавиатуру рекомендаций
-        reply_markup = None
-        if related_tests or similar_tests:
-            keyboard = []
-            row = []
-
-            # Связанные из истории
-            for related in related_tests[:4]:
-                # Проверяем тип связанного теста
-                if is_profile == is_profile_test(related["test_code"]):
-                    row.append(
-                        InlineKeyboardButton(
-                            text=f"⭐ {related['test_code']}",
-                            callback_data=TestCallback.pack(
-                                "show_test", related["test_code"]
-                            ),
-                        )
-                    )
-                    if len(row) >= 2:
-                        keyboard.append(row)
-                        row = []
-
-            # Похожие тесты
-            for doc, _ in similar_tests[:4]:
-                if len(keyboard) * 2 + len(row) >= 8:
-                    break
-                code = doc.metadata.get("test_code")
-                if not any(r["test_code"] == code for r in related_tests):
-                    row.append(
-                        InlineKeyboardButton(
-                            text=code,
-                            callback_data=TestCallback.pack("show_test", code),
-                        )
-                    )
-                    if len(row) >= 2:
-                        keyboard.append(row)
-                        row = []
-
-            if row:
-                keyboard.append(row)
-
-            reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-        # Показываем рекомендации
-        if reply_markup:
-            rec_type = "профили" if is_profile else "тесты"
-            await message.answer(
-                f"🎯 Рекомендуем также похожие {rec_type}:", 
-                reply_markup=reply_markup
-            )
+        # --- Блок рекомендаций закомментирован по запросу ---
+        # # Получаем связанные тесты
+        # related_tests = await db.get_user_related_tests(user_id, test_data["test_code"])
+        #
+        # # Ищем похожие тесты того же типа
+        # similar_tests = await fuzzy_test_search(
+        #     processor, test_data["test_code"], threshold=40
+        # )
+        #
+        # # Фильтруем по типу
+        # is_profile = is_profile_test(test_data["test_code"])
+        # similar_tests = filter_results_by_type(similar_tests, is_profile)
+        # similar_tests = [
+        #     (d, s)
+        #     for d, s in similar_tests
+        #     if d.metadata.get("test_code") != test_data["test_code"]
+        # ]
+        #
+        # # Создаем клавиатуру рекомендаций
+        # reply_markup = None
+        # if related_tests or similar_tests:
+        #     keyboard = []
+        #     row = []
+        #
+        #     # Связанные из истории
+        #     for related in related_tests[:4]:
+        #         # Проверяем тип связанного теста
+        #         if is_profile == is_profile_test(related["test_code"]):
+        #             row.append(
+        #                 InlineKeyboardButton(
+        #                     text=f"⭐ {related['test_code']}",
+        #                     callback_data=TestCallback.pack(
+        #                         "show_test", related["test_code"]
+        #                     ),
+        #                 )
+        #             )
+        #             if len(row) >= 2:
+        #                 keyboard.append(row)
+        #                 row = []
+        #
+        #     # Похожие тесты
+        #     for doc, _ in similar_tests[:4]:
+        #         if len(keyboard) * 2 + len(row) >= 8:
+        #             break
+        #         code = doc.metadata.get("test_code")
+        #         if not any(r["test_code"] == code for r in related_tests):
+        #             row.append(
+        #                 InlineKeyboardButton(
+        #                     text=code,
+        #                     callback_data=TestCallback.pack("show_test", code),
+        #                 )
+        #             )
+        #             if len(row) >= 2:
+        #                 keyboard.append(row)
+        #                 row = []
+        #
+        #     if row:
+        #         keyboard.append(row)
+        #
+        #     reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+        #
+        # # Показываем рекомендации
+        # if reply_markup:
+        #     rec_type = "профили" if is_profile else "тесты"
+        #     await message.answer(
+        #         f"🎯 Рекомендуем также похожие {rec_type}:",
+        #         reply_markup=reply_markup
+        #     )
+        # --- Конец закомментированного блока ---
 
         await state.set_state(QuestionStates.in_dialog)
         await state.update_data(
-            current_test=test_data, 
+            current_test=test_data,
             last_viewed_test=test_data["test_code"],
             show_profiles=False,  # Сбрасываем флаг
             search_text=None
@@ -2107,14 +2112,14 @@ async def _handle_code_search_internal(message: Message, state: FSMContext, sear
         print(f"[ERROR] Code search failed: {e}")
         import traceback
         traceback.print_exc()
-        
+
         if animation_task:
             animation_task.cancel()
         await safe_delete_message(loading_msg)
         await safe_delete_message(gif_msg)
 
         await message.answer(
-            "⚠️ Ошибка при поиске. Попробуйте позже", 
+            "⚠️ Ошибка при поиске. Попробуйте позже",
             reply_markup=get_back_to_menu_kb()
         )
         await state.set_state(QuestionStates.waiting_for_search_type)
