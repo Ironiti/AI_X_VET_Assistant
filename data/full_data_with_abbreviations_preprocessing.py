@@ -40,19 +40,26 @@ def join_pcr_data(main_file_path):
     # df_unique_name = merged_df.drop_duplicates(subset=['test_name'])
     
     # merged_df = df_unique_code[df_unique_code.index.isin(df_unique_name.index)].fillna('')
+    
+    merged_df['test_name_abbreviations'] = merged_df['test_name'].apply(extract_abbreviations_with_positions)
+    merged_df['test_name_abbreviations'] = merged_df['test_name'].apply(lambda x: ' '.join(x))
 
+    # Если нужно первую аббревиатуру отдельно
     merged_df['column_for_embeddings'] = (
         merged_df['test_name'].str.cat(
-        [
+        [   
+            merged_df['test_name_abbreviations'],
             merged_df['department'],
             merged_df['encoded'],
             merged_df['encoded'],
             merged_df['code_letters'],
+            merged_df['code_letters'],
+            merged_df['code_letters'],
             merged_df['animal_type'],
             merged_df['biomaterial_type'],
             merged_df['container_type'],
+            merged_df['container_number'].astype(str),
             merged_df['storage_temp']
-            
         ],
         sep = ' ', 
         na_rep = ''
@@ -60,6 +67,19 @@ def join_pcr_data(main_file_path):
     )
 
     return merged_df
+
+def extract_abbreviations_with_positions(text):
+    if pd.isna(text):
+        return []
+    
+    matches = []
+    for match in re.finditer(r'\(([^()]+)\)', str(text)):
+        matches.append({
+            'abbreviation': match.group(1),
+            'start_pos': match.start(),
+            'end_pos': match.end()
+        })
+    return matches
 
 # Использование функции
 if __name__ == "__main__":

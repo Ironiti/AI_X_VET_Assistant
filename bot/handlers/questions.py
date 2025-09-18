@@ -64,6 +64,8 @@ from bot.keyboards import (
 # )
 LOADING_GIF_ID = "CgACAgIAAxkBAAIBFGiBcXtGY7OZvr3-L1dZIBRNqSztAALueAACpqh5Scn4VmIRb4UjNgQ"
 # LOADING_GIF_ID = "CgACAgIAAxkBAAMMaHSq3vqxq2RuMMj-DIMvldgDjfkAAu54AAKmqHlJCNcCjeoHRJI2BA"
+# Назим
+# LOADING_GIF_ID = "CgACAgIAAxkBAANPaMvCZEN3F6cNDG58zpcLZnhqiDsAAu54AAKmqHlJU1E65w2DvLo2BA"
 
 questions_router = Router()
 
@@ -1535,13 +1537,19 @@ async def handle_general_question(
                     
                     # Добавляем только поля с данными
                     fields = [
-                        ('department', '🏥 Вид исследования'),
-                        ('patient_preparation', '📝 Подготовка'),
-                        ('biomaterial_type', '🧫 Биоматериал'),
-                        ('container_type', '🧪 Контейнер'),
-                        ('storage_temp', '❄️ Хранение'),
-                        ('preanalytics', '🔬 Преаналитика'),
-                        ('species', '🐾 Виды животных')
+                        ('type', 'Тип'),
+                        ('specialization', 'Специализация'),
+                        ('code_letters', 'Аббревиатура в коде теста'),
+                        ('department', 'Вид исследования'),
+                        ('patient_preparation', 'Подготовка'),
+                        ('biomaterial_type', 'Биоматериал'),
+                        ('container_type', 'Контейнер'),
+                        ('container_number', 'Номер контейнера'),
+                        ('storage_temp', 'Хранение'),
+                        ('preanalytics', 'Преаналитика'),
+                        ('animal_type', 'Виды животных'),
+                        ('important_information', 'Важная информация'),
+                        ('poss_postorder_container', 'Возможность дозаказа после взятия биоматериала'),
                     ]
                     
                     for field, label in fields:
@@ -1594,6 +1602,7 @@ async def handle_general_question(
             - Не ставь диагнозы и не интерпретируй результаты
             - При критических вопросах направляй к специалисту нашей лаборатории
             - Не давай советы по лечению
+            - Не задавай вопросов, старайся разобраться сам
         """
 
         # 5. Отправляем в LLM

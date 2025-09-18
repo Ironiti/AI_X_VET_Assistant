@@ -95,7 +95,8 @@ class DataProcessor:
     ):
         """
         Search tests with optional metadata filtering.
-        
+        If see abbreviations try to find exactly the same in tests
+
         Args:
             query: Search query text (empty for pure metadata filtering)
             filter_dict: Optional metadata filters (e.g. {"test_code": "AN5"})
