@@ -40,10 +40,8 @@ class DataProcessor:
             shutil.rmtree(persist_path)
 
         print('[INFO] Creating vector store...')
-        records = self.df.dropna(subset=[
-            "test_name", "department", "encoded", "code_letters", "animal_type", "biomaterial_type", "container_type", "storage_temp"]
-        ).copy()
-    
+        records = self.df.dropna(subset=["column_for_embeddings"]).copy()
+
         texts = records["column_for_embeddings"].tolist()
         metadatas = records.to_dict(orient="records")
 
@@ -97,8 +95,7 @@ class DataProcessor:
     ):
         """
         Search tests with optional metadata filtering.
-        Answer only the most similar tests
-
+        
         Args:
             query: Search query text (empty for pure metadata filtering)
             filter_dict: Optional metadata filters (e.g. {"test_code": "AN5"})

@@ -16,6 +16,7 @@ import asyncio
 import html
 from typing import Optional, Dict, List, Tuple
 from fuzzywuzzy import fuzz
+from typing import Dict, Set, Tuple, List
 from datetime import datetime
 import re
 
@@ -1429,6 +1430,76 @@ def create_similar_tests_keyboard(
 
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
+def replace_test_codes_with_links(text: str, all_test_codes: set) -> tuple[str, dict]:
+    """
+    Заменяет коды тестов в тексте на HTML ссылки.
+    
+    Args:
+        text: Исходный текст
+        all_test_codes: Множество всех доступных кодов тестов
+    
+    Returns:
+        Tuple[str, Dict]: Текст с маркерами и словарь замен
+    """
+    # Находим ВСЕ коды и их позиции
+    all_matches = []
+    
+    patterns = [
+        r'\b[AА][NН]\d+[A-ZА-Я\-]*\b',  # AN116, AN116-X
+        r'\b[A-ZА-Я]+\d+[A-ZА-Я\-]*\b', # ABC123
+        r'\b\d{2,4}[A-ZА-Я]+\b',        # 123ABC
+    ]
+    
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            found_code = match.group()
+            normalized_code = normalize_test_code(found_code)
+            
+            if normalized_code.upper() in all_test_codes:
+                all_matches.append({
+                    'start': match.start(),
+                    'end': match.end(),
+                    'code': found_code,
+                    'normalized': normalized_code
+                })
+    
+    # Удаляем пересекающиеся совпадения (оставляем самые длинные)
+    filtered_matches = []
+    for match in all_matches:
+        overlap = False
+        for other in filtered_matches:
+            # Проверяем пересечение
+            if (match['start'] < other['end'] and match['end'] > other['start']):
+                # Если текущий match короче - пропускаем его
+                if len(match['code']) <= len(other['code']):
+                    overlap = True
+                    break
+                else:
+                    # Если текущий длиннее - удаляем короткий
+                    filtered_matches = [m for m in filtered_matches if m != other]
+        
+        if not overlap:
+            filtered_matches.append(match)
+    
+    # Сортируем по позиции с конца (чтобы не сбивать индексы)
+    filtered_matches.sort(key=lambda x: x['start'], reverse=True)
+    
+    # Заменяем найденные коды на специальные маркеры
+    result = text
+    replacements = {}
+    
+    for i, match in enumerate(filtered_matches):
+        marker = f"{{{{TEST_LINK_{i}_{match['normalized']}}}}}"
+        result = result[:match['start']] + marker + result[match['end']:]
+        
+        link = create_test_link(match['normalized'])
+        # Проверяем что ссылка не пустая
+        if link and link.strip():
+            replacements[marker] = f'<a href="{link}">{html.escape(match["code"])}</a>'
+        else:
+            replacements[marker] = html.escape(match["code"])
+    
+    return result, replacements
 
 async def handle_general_question(
     message: Message, state: FSMContext, question_text: str
@@ -1494,17 +1565,35 @@ async def handle_general_question(
             
             context_info += f"\n📊 Общая статистика: {len(departments)} видов исследований\n"
 
+        # Промпт для LLM
         system_prompt = f"""
-            Ты - ассистент ветеринарной лаборатории. Отвечай на вопросы используя информацию ниже.
-            Пользователя зовут: {user}
+            # Роль: Ассистент ветеринарной лаборатории VetUnion
 
-            {context_info}
+            Ты - профессиональный консультант ветеринарной лаборатории, специализирующийся на лабораторной диагностике животных.
 
-            Инструкции:
-            - Отвечай кратко и по делу
-            - Используй только предоставленную информацию
-            - Для общих вопросов используй общие знания
-            - Указывай коды тестов при ссылках на конкретную информацию
+            ## Источники информации
+            Контекст: {context_info}
+            Постоянно обращайся к пользователю по его имени {user}, без фамилии (если она есть)
+
+            ## Основные принципы работы
+
+            **Точность и безопасность:**
+            - Используй ТОЛЬКО информацию из предоставленного контекста
+            - При недостатке данных честно сообщай об ограничениях
+            - Никогда не давай экстренных медицинских советов - направляй к ветеринару
+            - Не интерпретируй результаты анализов без достаточной информации
+
+            **Качество ответов:**
+            - Адаптируй детализацию к сложности вопроса
+            - Используй профессиональную ветеринарную терминологию
+            - Указывай коды тестов при упоминании конкретных исследований
+            - Структурируй информацию логично (подготовка → процедура → результаты)
+
+            ## Ограничения
+            - Не предоставляй информацию, отсутствующую в контексте
+            - Не ставь диагнозы и не интерпретируй результаты
+            - При критических вопросах направляй к специалисту нашей лаборатории
+            - Не давай советы по лечению
         """
 
         # 5. Отправляем в LLM
@@ -1519,35 +1608,63 @@ async def handle_general_question(
 
         answer = response.generations[0][0].text.strip()
         
-        # Функция для замены кодов тестов на HTML ссылки
-        def replace_test_codes_with_links(text):
-            patterns = [
-                r'\b[AА][NН]\d+[A-ZА-Я\-]*\b',
-                r'\b\d+[A-ZА-Я\-]+\b',
-                r'\b[A-ZА-Я]+\d+[A-ZА-Я\-]*\b',
-            ]
-            
-            for pattern in patterns:
-                matches = re.finditer(pattern, text, re.IGNORECASE)
-                for match in matches:
-                    found_code = match.group()
-                    normalized_code = normalize_test_code(found_code)
-                    
-                    if normalized_code.upper() in all_test_codes:
-                        link = create_test_link(normalized_code)
-                        html_link = f'<a href="{link}">{found_code}</a>'
-                        text = text.replace(found_code, html_link)
-            
-            return text
-
-        # Заменяем коды тестов на ссылки
-        answer_with_links = replace_test_codes_with_links(answer)
-        answer_with_links = fix_bold(answer_with_links)
-
+        # Заменяем коды тестов на маркеры (используем функцию, вынесенную наружу)
+        text_with_markers, replacements = replace_test_codes_with_links(answer, all_test_codes)
+        
+        # Применяем fix_bold к тексту с маркерами
+        text_with_markers = fix_bold(text_with_markers)
+        
+        # Экранируем HTML ПОСЛЕ fix_bold
+        answer_with_links = html.escape(text_with_markers)
+        
+        # Заменяем маркеры на реальные ссылки
+        for marker, link_html in replacements.items():
+            answer_with_links = answer_with_links.replace(html.escape(marker), link_html)
+        
+        # Восстанавливаем теги bold из fix_bold
+        answer_with_links = answer_with_links.replace('&lt;b&gt;', '<b>').replace('&lt;/b&gt;', '</b>')
+        
+        # ОТЛАДКА: выводим проблемные места
+        print(f"[DEBUG] Answer length: {len(answer_with_links)}")
+        
+        # Проверяем на проблемные паттерны
+        problematic_patterns = [
+            '""',
+            '<>',
+            '</>',
+            '< >',
+            '</ >',
+            '<a href="">',
+            '<a href=" ">',
+        ]
+        
+        for pattern in problematic_patterns:
+            if pattern in answer_with_links:
+                print(f"[WARNING] Found problematic pattern '{pattern}' in HTML")
+                # Находим позицию проблемы
+                pos = answer_with_links.find(pattern)
+                print(f"[WARNING] Position: {pos}, context: ...{answer_with_links[max(0, pos-50):pos+50]}...")
+                
+                # Очищаем проблемные паттерны
+                answer_with_links = answer_with_links.replace(pattern, '')
+        
+        # Проверяем корректность HTML тегов
+        # Ищем пустые атрибуты href
+        answer_with_links = re.sub(r'<a\s+href=["\'][\s]*["\']>', '', answer_with_links)
+        answer_with_links = re.sub(r'</a>', '', answer_with_links, count=answer_with_links.count('<a href="">'))
+        
         await loading_msg.delete()
         
-        # Отправляем ответ с HTML разметкой
-        await message.answer(answer_with_links, parse_mode="HTML", disable_web_page_preview=True)
+        try:
+            # Отправляем ответ с HTML разметкой
+            await message.answer(answer_with_links, parse_mode="HTML", disable_web_page_preview=True)
+        except Exception as e:
+            print(f"[ERROR] Failed to send HTML message: {e}")
+            print(f"[ERROR] Problematic HTML fragment: {answer_with_links[:500]}")
+            
+            # Fallback - отправляем без HTML разметки
+            clean_text = re.sub(r'<[^>]+>', '', answer_with_links)
+            await message.answer(clean_text, disable_web_page_preview=True)
 
         # Создаем кнопки для дальнейших действий
         keyboard = InlineKeyboardMarkup(
@@ -1569,7 +1686,7 @@ async def handle_general_question(
         import traceback
         traceback.print_exc()
         
-        await loading_msg.delete()
+        await safe_delete_message(loading_msg)
         await message.answer(
             "⚠️ Не удалось обработать вопрос. Попробуйте переформулировать."
         )

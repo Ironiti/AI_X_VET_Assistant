@@ -5,7 +5,7 @@ from config import OPENROUTER_API_KEY
 MAX_URLS = 5
 
 SEED = 0
-TEMPERATURE = 0.1
+TEMPERATURE = 0
 TOP_P = 1.0
 
 
