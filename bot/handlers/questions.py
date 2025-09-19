@@ -34,7 +34,8 @@ from bot.handlers.utils import (
     normalize_test_code,
     check_profile_request,
     filter_results_by_type,
-    is_profile_test
+    is_profile_test,
+    replace_test_codes_with_links
     )
 from bot.handlers.sending_style import (
     animate_loading,
@@ -1432,76 +1433,6 @@ def create_similar_tests_keyboard(
 
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-def replace_test_codes_with_links(text: str, all_test_codes: set) -> tuple[str, dict]:
-    """
-    Заменяет коды тестов в тексте на HTML ссылки.
-    
-    Args:
-        text: Исходный текст
-        all_test_codes: Множество всех доступных кодов тестов
-    
-    Returns:
-        Tuple[str, Dict]: Текст с маркерами и словарь замен
-    """
-    # Находим ВСЕ коды и их позиции
-    all_matches = []
-    
-    patterns = [
-        r'\b[AА][NН]\d+[A-ZА-Я\-]*\b',  # AN116, AN116-X
-        r'\b[A-ZА-Я]+\d+[A-ZА-Я\-]*\b', # ABC123
-        r'\b\d{2,4}[A-ZА-Я]+\b',        # 123ABC
-    ]
-    
-    for pattern in patterns:
-        for match in re.finditer(pattern, text, re.IGNORECASE):
-            found_code = match.group()
-            normalized_code = normalize_test_code(found_code)
-            
-            if normalized_code.upper() in all_test_codes:
-                all_matches.append({
-                    'start': match.start(),
-                    'end': match.end(),
-                    'code': found_code,
-                    'normalized': normalized_code
-                })
-    
-    # Удаляем пересекающиеся совпадения (оставляем самые длинные)
-    filtered_matches = []
-    for match in all_matches:
-        overlap = False
-        for other in filtered_matches:
-            # Проверяем пересечение
-            if (match['start'] < other['end'] and match['end'] > other['start']):
-                # Если текущий match короче - пропускаем его
-                if len(match['code']) <= len(other['code']):
-                    overlap = True
-                    break
-                else:
-                    # Если текущий длиннее - удаляем короткий
-                    filtered_matches = [m for m in filtered_matches if m != other]
-        
-        if not overlap:
-            filtered_matches.append(match)
-    
-    # Сортируем по позиции с конца (чтобы не сбивать индексы)
-    filtered_matches.sort(key=lambda x: x['start'], reverse=True)
-    
-    # Заменяем найденные коды на специальные маркеры
-    result = text
-    replacements = {}
-    
-    for i, match in enumerate(filtered_matches):
-        marker = f"{{{{TEST_LINK_{i}_{match['normalized']}}}}}"
-        result = result[:match['start']] + marker + result[match['end']:]
-        
-        link = create_test_link(match['normalized'])
-        # Проверяем что ссылка не пустая
-        if link and link.strip():
-            replacements[marker] = f'<a href="{link}">{html.escape(match["code"])}</a>'
-        else:
-            replacements[marker] = html.escape(match["code"])
-    
-    return result, replacements
 
 async def handle_general_question(
     message: Message, state: FSMContext, question_text: str
@@ -1618,10 +1549,10 @@ async def handle_general_question(
         answer = response.generations[0][0].text.strip()
         
         # Заменяем коды тестов на маркеры (используем функцию, вынесенную наружу)
-        text_with_markers, replacements = replace_test_codes_with_links(answer, all_test_codes)
+        answer_with_links, replacements = replace_test_codes_with_links(answer, all_test_codes)
         
         # Применяем fix_bold к тексту с маркерами
-        text_with_markers = fix_bold(text_with_markers)
+        text_with_markers = fix_bold(answer_with_links)
         
         # Экранируем HTML ПОСЛЕ fix_bold
         answer_with_links = html.escape(text_with_markers)
@@ -1632,6 +1563,7 @@ async def handle_general_question(
         
         # Восстанавливаем теги bold из fix_bold
         answer_with_links = answer_with_links.replace('&lt;b&gt;', '<b>').replace('&lt;/b&gt;', '</b>')
+
         
         # ОТЛАДКА: выводим проблемные места
         print(f"[DEBUG] Answer length: {len(answer_with_links)}")
