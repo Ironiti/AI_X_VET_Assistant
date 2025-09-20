@@ -235,6 +235,49 @@ def create_paginated_keyboard(
     
     return InlineKeyboardMarkup(inline_keyboard=keyboard), total_pages, end_idx - start_idx
 
+@questions_router.message(F.text == "🔄 Новый вопрос")
+async def handle_new_question_in_dialog(message: Message, state: FSMContext):
+    """Обработчик для новых вопросов в режиме диалога."""
+    # Сохраняем контекст последних тестов
+    data = await state.get_data()
+    last_viewed = data.get("last_viewed_test")
+
+    await message.answer(
+        "💡 Введите код теста (например: AN5) или опишите, что вы ищете:",
+        reply_markup=get_back_to_menu_kb(),
+    )
+
+    # Показываем персонализированные подсказки
+    await show_personalized_suggestions(message, state)
+
+    # Сохраняем историю просмотров при переходе к новому поиску
+    await state.set_state(QuestionStates.waiting_for_search_type)
+    if last_viewed:
+        await state.update_data(last_viewed_test=last_viewed)
+
+
+@questions_router.callback_query(F.data == "new_search")
+async def handle_new_search(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+
+    # Сохраняем контекст
+    data = await state.get_data()
+    last_viewed = data.get("last_viewed_test")
+
+    await callback.message.answer(
+        "💡 Введите код теста (например: AN5) или опишите, что вы ищете:",
+        reply_markup=get_back_to_menu_kb(),
+    )
+
+    # Показываем персонализированные подсказки
+    message = callback.message
+    message.from_user = callback.from_user
+    await show_personalized_suggestions(message, state)
+
+    await state.set_state(QuestionStates.waiting_for_search_type)
+    if last_viewed:
+        await state.update_data(last_viewed_test=last_viewed)
+
 @questions_router.callback_query(F.data.startswith("page:"))
 async def handle_pagination(callback: CallbackQuery, state: FSMContext):
     """Обработчик переключения страниц"""
@@ -977,6 +1020,10 @@ async def handle_universal_search(message: Message, state: FSMContext):
     text = message.text.strip()
     user_id = message.from_user.id
 
+    if text == "🔄 Новый вопрос":
+        await handle_new_question_in_dialog(message, state)
+        return
+
     expanded_query = expand_query_with_abbreviations(text)
     # Проверяем, не кнопка ли это возврата
     if text == "🔙 Вернуться в главное меню" or text == "❌ Завершить диалог":
@@ -1133,6 +1180,8 @@ async def handle_search_confirmation(message: Message, state: FSMContext):
     else:
         await message.answer("Пожалуйста, используйте кнопки для ответа.")
 
+
+
 @questions_router.message(QuestionStates.clarifying_search, F.text)
 async def handle_text_input_during_clarification(message: Message, state: FSMContext):
     """Обработчик текстового ввода во время уточнения типа поиска"""
@@ -1185,50 +1234,6 @@ async def handle_search_clarification(message: Message, state: FSMContext):
         await handle_end_dialog(message, state)
     else:
         await message.answer("Пожалуйста, выберите тип поиска из предложенных вариантов.")
-
-
-@questions_router.message(QuestionStates.in_dialog, F.text == "🔄 Новый вопрос")
-async def handle_new_question_in_dialog(message: Message, state: FSMContext):
-    """Обработчик для новых вопросов в режиме диалога."""
-    # Сохраняем контекст последних тестов
-    data = await state.get_data()
-    last_viewed = data.get("last_viewed_test")
-
-    await message.answer(
-        "💡 Введите код теста (например: AN5) или опишите, что вы ищете:",
-        reply_markup=get_back_to_menu_kb(),
-    )
-
-    # Показываем персонализированные подсказки
-    await show_personalized_suggestions(message, state)
-
-    # Сохраняем историю просмотров при переходе к новому поиску
-    await state.set_state(QuestionStates.waiting_for_search_type)
-    if last_viewed:
-        await state.update_data(last_viewed_test=last_viewed)
-
-
-@questions_router.callback_query(F.data == "new_search")
-async def handle_new_search(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-
-    # Сохраняем контекст
-    data = await state.get_data()
-    last_viewed = data.get("last_viewed_test")
-
-    await callback.message.answer(
-        "💡 Введите код теста (например: AN5) или опишите, что вы ищете:",
-        reply_markup=get_back_to_menu_kb(),
-    )
-
-    # Показываем персонализированные подсказки
-    message = callback.message
-    message.from_user = callback.from_user
-    await show_personalized_suggestions(message, state)
-
-    await state.set_state(QuestionStates.waiting_for_search_type)
-    if last_viewed:
-        await state.update_data(last_viewed_test=last_viewed)
 
 
 @questions_router.message(QuestionStates.in_dialog, F.text == "📷 Показать контейнер")

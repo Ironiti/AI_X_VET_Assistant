@@ -117,6 +117,7 @@ def get_main_menu_kb():
     """Единое меню для всех пользователей (кроме админа)"""
     kb = [
         [KeyboardButton(text="🔬 Задать вопрос ассистенту")],
+        [KeyboardButton(text="📚 База знаний FAQ")],
         [KeyboardButton(text="📞 Заказать звонок")],
         [KeyboardButton(text="💡 Предложения и пожелания")]
     ]
@@ -128,6 +129,7 @@ def get_admin_menu_kb():
         [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="👥 Пользователи")],
         [KeyboardButton(text="📋 Все обращения"), KeyboardButton(text="🔐 Создать код")],
         [KeyboardButton(text="📥 Выгрузка в Excel"), KeyboardButton(text="📢 Рассылка")],
+        [KeyboardButton(text="📚 База знаний FAQ")],
         [KeyboardButton(text="🔬 Задать вопрос ассистенту"), KeyboardButton(text="📞 Заказать звонок")],
         [KeyboardButton(text="💡 Предложения и пожелания"), KeyboardButton(text="📋 Опросы")],
         [KeyboardButton(text="🔧 Управление системой")]
@@ -225,6 +227,24 @@ def get_search_type_clarification_kb():
         [KeyboardButton(text="🔬 Поиск профиля тестов")],
         [KeyboardButton(text="❓ Общий вопрос")],
         [KeyboardButton(text="❌ Завершить диалог")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
+
+def get_faq_search_kb():
+    """Клавиатура для поиска в FAQ"""
+    kb = [
+        [KeyboardButton(text="🔍 Поиск по базе знаний")],
+        [KeyboardButton(text="📋 Показать все вопросы")],
+        [KeyboardButton(text="🔙 Вернуться в главное меню")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
+def get_faq_back_kb():
+    """Клавиатура для возврата из FAQ"""
+    kb = [
+        [KeyboardButton(text="🔙 Назад к FAQ")],
+        [KeyboardButton(text="🏠 В главное меню")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 

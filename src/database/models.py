@@ -800,6 +800,17 @@ class Database:
     
     async def create_tables(self):
         async with aiosqlite.connect(self.db_path) as db:
+
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS add_faq_history (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER,
+                    faq_id INTEGER,
+                    question TEXT,
+                    viewed_at TIMESTAMP 
+                )
+            ''')
+
             # ПРАВИЛЬНАЯ версия таблицы container_photos
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS container_photos (
@@ -1028,6 +1039,16 @@ class Database:
         user = await self.get_user(telegram_id)
         return user is not None
     
+    async def add_faq_history(self, user_id: int, faq_id: int, question: str):
+            try:
+                query = """
+                    INSERT INTO faq_history (user_id, faq_id, question, viewed_at)
+                    VALUES ($1, $2, $3, NOW())
+                """
+                await self.pool.execute(query, user_id, faq_id, question)
+            except Exception as e:
+                print(f"Ошибка сохранения истории FAQ: {e}")
+
     async def add_request_stat(self, user_id: int, request_type: str, request_text: str):
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute('''
@@ -1255,3 +1276,5 @@ class Database:
         except Exception as e:
             print(f"[ERROR] Failed to search test by code: {e}")
             return None
+    
+        
