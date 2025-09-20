@@ -100,6 +100,10 @@ def decode_test_code_from_url(encoded_code: str) -> str:
 
 def create_test_link(test_code: str) -> str:
     """Создает deep link для теста."""
+    
+    if "AN520" in test_code and "," in test_code:
+        test_code = "AN520ГИЭ"
+    
     if not test_code:
         return f"https://t.me/{BOT_USERNAME}"
 
@@ -278,11 +282,10 @@ def check_profile_request(query: str) -> tuple[bool, str]:
 def filter_results_by_type(results: List[Tuple], show_profiles: bool = False) -> List[Tuple]:
     """
     Фильтрует результаты по типу (профили или обычные тесты)
-    
-    Args:
-        results: Список результатов поиска
-        show_profiles: True - показать только профили, False - только обычные тесты
     """
+    # ДОБАВЬТЕ ДИАГНОСТИКУ
+    print(f"\n[FILTER DEBUG] Input: {len(results)} results, show_profiles={show_profiles}")
+    
     filtered = []
     for item in results:
         doc = item[0] if isinstance(item, tuple) else item
@@ -290,79 +293,12 @@ def filter_results_by_type(results: List[Tuple], show_profiles: bool = False) ->
         
         is_profile = is_profile_test(test_code)
         
+        # ДОБАВЬТЕ ДИАГНОСТИКУ для первых нескольких
+        if len(filtered) < 3 or (is_profile and show_profiles):
+            print(f"  - Code: {test_code}, is_profile: {is_profile}, will_include: {show_profiles == is_profile}")
+        
         if show_profiles == is_profile:
             filtered.append(item)
     
+    print(f"[FILTER DEBUG] Output: {len(filtered)} results after filtering")
     return filtered
-
-
-def replace_test_codes_with_links(text: str, all_test_codes: Set[str]) -> Tuple[str, Dict]:
-    """
-    Заменяет коды тестов в тексте на Telegram-совместимые HTML ссылки.
-    
-    Args:
-        text: Исходный текст
-        all_test_codes: Множество всех доступных кодов тестов (в верхнем регистре)
-    
-    Returns:
-        Tuple[str, Dict]: Текст с маркерами и словарь замен
-    """
-    # Комбинированный паттерн для поиска всех возможных кодов
-    combined_pattern = r'\b(?:[AА][NН]\d+[A-ZА-Я\-]*|[A-ZА-Я]+\d+[A-ZА-Я\-]*|\d{2,4}[A-ZА-Я]*)\b'
-    
-    # Находим все потенциальные коды
-    matches = []
-    for match in re.finditer(combined_pattern, text, re.IGNORECASE):
-        found_code = match.group()
-        
-        # Проверяем паттерн
-        if not is_test_code_pattern(found_code):
-            continue
-            
-        # Нормализуем для сравнения
-        normalized_code = normalize_test_code(found_code)
-        
-        if normalized_code in all_test_codes:
-            matches.append({
-                'start': match.start(),
-                'end': match.end(),
-                'original_code': found_code,
-                'normalized_code': normalized_code
-            })
-    
-    # Убираем пересекающиеся совпадения
-    filtered_matches = []
-    matches.sort(key=lambda x: x['start'])
-    
-    i = 0
-    while i < len(matches):
-        current = matches[i]
-        j = i + 1
-        
-        while j < len(matches) and matches[j]['start'] < current['end']:
-            if len(current['original_code']) < len(matches[j]['original_code']):
-                current = matches[j]
-            j += 1
-        
-        filtered_matches.append(current)
-        i = j
-    
-    # Сортируем по убыванию позиции для замены
-    filtered_matches.sort(key=lambda x: x['start'], reverse=True)
-    
-    # Заменяем найденные коды на маркеры
-    result = text
-    replacements = {}
-    
-    for i, match in enumerate(filtered_matches):
-        marker = f"{{{{TEST_LINK_{i}}}}}"
-        
-        # Заменяем в тексте
-        result = result[:match['start']] + marker + result[match['end']:]
-        
-        # Создаем Telegram deep link
-        link = create_test_link(match['normalized_code'])
-        replacements[marker] = f'<a href="{link}">**{html.escape(match["original_code"])}**</a>'
-    
-    return result, replacements
-

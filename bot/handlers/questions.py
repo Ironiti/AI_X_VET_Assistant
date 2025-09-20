@@ -34,8 +34,7 @@ from bot.handlers.utils import (
     normalize_test_code,
     check_profile_request,
     filter_results_by_type,
-    is_profile_test,
-    replace_test_codes_with_links
+    is_profile_test
     )
 from bot.handlers.sending_style import (
     animate_loading,
@@ -74,13 +73,20 @@ questions_router = Router()
 class TestCallback:
     @staticmethod
     def pack(action: str, test_code: str) -> str:
+        # Обработка проблемного теста
+        if "AN520" in test_code and "," in test_code:
+            test_code = "AN520ГИЭ"
+        
+        # Ограничиваем длину
+        if len(test_code) > 40:
+            test_code = test_code[:40]
+            
         return f"{action}:{test_code}"
 
     @staticmethod
     def unpack(callback_data: str) -> Tuple[str, str]:
         parts = callback_data.split(":", 1)
         return parts[0] if len(parts) > 0 else "", parts[1] if len(parts) > 1 else ""
-
 
 class QuestionStates(StatesGroup):
     waiting_for_search_type = State()
@@ -100,6 +106,20 @@ class SearchContext:
         self.candidate_tests = []
         self.clarification_step = 0
         self.filters = {}
+        
+class PaginationCallback:
+    """Класс для работы с callback данными пагинации"""
+    @staticmethod
+    def pack(action: str, page: int, search_id: str) -> str:
+        return f"page:{action}:{page}:{search_id}"
+    
+    @staticmethod
+    def unpack(callback_data: str) -> Tuple[str, int, str]:
+        parts = callback_data.split(":", 3)
+        action = parts[1] if len(parts) > 1 else ""
+        page = int(parts[2]) if len(parts) > 2 else 0
+        search_id = parts[3] if len(parts) > 3 else ""
+        return action, page, search_id
 
 
 def _rerank_hits_by_query(hits: List[Tuple[Document, float]], query: str) -> List[Tuple[Document, float]]:
@@ -129,6 +149,151 @@ def _rerank_hits_by_query(hits: List[Tuple[Document, float]], query: str) -> Lis
 
     rescored.sort(key=lambda x: x[1], reverse=True)
     return rescored
+
+def create_paginated_keyboard(
+    tests: List[Document],
+    current_page: int = 0,
+    items_per_page: int = 6,
+    search_id: str = None
+) -> Tuple[InlineKeyboardMarkup, int, int]:
+    """
+    Создает клавиатуру с пагинацией для списка тестов
+    
+    Returns:
+        Tuple[keyboard, total_pages, items_shown]
+    """
+    total_items = len(tests)
+    total_pages = (total_items + items_per_page - 1) // items_per_page
+    
+    # Вычисляем индексы для текущей страницы
+    start_idx = current_page * items_per_page
+    end_idx = min(start_idx + items_per_page, total_items)
+    
+    keyboard = []
+    row = []
+    
+    # Добавляем кнопки тестов для текущей страницы
+    for doc in tests[start_idx:end_idx]:
+        test_code = doc.metadata.get("test_code", "")
+        
+        # Санитизируем код для кнопки
+        button_text = sanitize_test_code_for_display(test_code)
+        
+        row.append(
+            InlineKeyboardButton(
+                text=button_text,
+                callback_data=TestCallback.pack("show_test", test_code)  # pack сам обработает
+            )
+        )
+        
+        if len(row) >= 3:  # По 3 кнопки в ряд
+            keyboard.append(row)
+            row = []
+    
+    if row:
+        keyboard.append(row)
+    
+    # Добавляем навигационные кнопки
+    nav_row = []
+    
+    # Кнопка "Назад"
+    if current_page > 0:
+        nav_row.append(
+            InlineKeyboardButton(
+                text="◀️ Назад",
+                callback_data=PaginationCallback.pack("prev", current_page - 1, search_id)
+            )
+        )
+    
+    # Индикатор страниц
+    nav_row.append(
+        InlineKeyboardButton(
+            text=f"📄 {current_page + 1}/{total_pages}",
+            callback_data="ignore"
+        )
+    )
+    
+    # Кнопка "Вперед"
+    if current_page < total_pages - 1:
+        nav_row.append(
+            InlineKeyboardButton(
+                text="Вперед ▶️",
+                callback_data=PaginationCallback.pack("next", current_page + 1, search_id)
+            )
+        )
+    
+    if nav_row and total_pages > 1:
+        keyboard.append(nav_row)
+    
+    # Кнопка закрытия
+    keyboard.append([
+        InlineKeyboardButton(
+            text="❌ Закрыть",
+            callback_data="close_keyboard"
+        )
+    ])
+    
+    return InlineKeyboardMarkup(inline_keyboard=keyboard), total_pages, end_idx - start_idx
+
+@questions_router.callback_query(F.data.startswith("page:"))
+async def handle_pagination(callback: CallbackQuery, state: FSMContext):
+    """Обработчик переключения страниц"""
+    await callback.answer()
+    
+    action, page, search_id = PaginationCallback.unpack(callback.data)
+    
+    # Получаем сохраненные результаты поиска
+    data = await state.get_data()
+    search_results = data.get(f"search_results_{search_id}", [])
+    
+    if not search_results:
+        await callback.answer("Результаты поиска устарели. Выполните новый поиск.", show_alert=True)
+        return
+    
+    # Создаем новую клавиатуру для выбранной страницы
+    keyboard, total_pages, items_shown = create_paginated_keyboard(
+        search_results,
+        current_page=page,
+        items_per_page=6,
+        search_id=search_id
+    )
+    
+    # Формируем текст с результатами для текущей страницы
+    start_idx = page * 6
+    end_idx = start_idx + items_shown
+    
+    response = f"🔍 <b>Результаты поиска (страница {page + 1} из {total_pages}):</b>\n\n"
+    
+    for i, doc in enumerate(search_results[start_idx:end_idx], start=start_idx + 1):
+        test_data = format_test_data(doc.metadata)
+        test_code = sanitize_test_code_for_display(test_data["test_code"])
+        test_name = html.escape(test_data["test_name"])
+        department = html.escape(test_data.get("department", "Не указано"))
+        
+        # Метка для профилей
+        type_label = "🔬 Профиль" if is_profile_test(test_code) else "🧪 Тест"
+        
+        link = create_test_link(test_code)
+        
+        response += (
+            f"<b>{i}.</b> {type_label}: <a href='{link}'>{test_code}</a>\n"
+            f"📝 {test_name}\n"
+            f"📋 {department}\n\n"
+        )
+    
+    response += "\n💡 <i>Нажмите на код теста или выберите из кнопок ниже</i>"
+    
+    # Обновляем сообщение
+    try:
+        await callback.message.edit_text(
+            response,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=keyboard
+        )
+    except Exception as e:
+        print(f"[ERROR] Failed to update message: {e}")
+        await callback.answer("Ошибка обновления сообщения", show_alert=True)
 
 @questions_router.callback_query(F.data.startswith("show_container_photos:"))
 async def handle_show_container_photos_callback(callback: CallbackQuery):
@@ -847,8 +1012,15 @@ async def _process_confident_query(message: Message, state: FSMContext, query_ty
     
     # Дополнительная проверка для профилей
     profile_keywords = ['обс', 'профили', 'профиль', 'комплексы', 'комплекс', 'панели', 'панель']
+    should_show_profiles = any(keyword in text.lower() for keyword in profile_keywords)
+    
+    if should_show_profiles:
+        print(f"[PROFILES] Detected profile keywords, setting show_profiles=True")
+        await state.update_data(show_profiles=True)
+    
     if any(keyword in text.lower() for keyword in profile_keywords):
         query_type = "profile"
+        print(f"[PROFILE DETECTED] Changed query_type to 'profile' for text: {text}")  # ДОБАВЬТЕ ЭТО
 
     if query_type == "code":
         await state.set_state(QuestionStates.waiting_for_code)
@@ -857,7 +1029,14 @@ async def _process_confident_query(message: Message, state: FSMContext, query_ty
         await state.set_state(QuestionStates.waiting_for_name)
         await handle_name_search_with_text(message, state, expanded_query)
     elif query_type == "profile":
+        # ДОБАВЬТЕ ДИАГНОСТИКУ
+        print(f"[PROFILE BRANCH] Setting show_profiles=True for query: {text}")
         await state.update_data(show_profiles=True)
+        
+        # Проверяем, что состояние сохранилось
+        check_data = await state.get_data()
+        print(f"[PROFILE BRANCH] State after update: show_profiles={check_data.get('show_profiles')}")
+        
         await state.set_state(QuestionStates.waiting_for_name)
         await handle_name_search_with_text(message, state, expanded_query)
     else:  # general
@@ -1433,10 +1612,104 @@ def create_similar_tests_keyboard(
 
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
+def sanitize_test_code_for_display(test_code: str) -> str:
+    """Обрезает слишком длинные коды тестов для корректного отображения"""
+    if not test_code:
+        return test_code
+    
+    # Специальная обработка для проблемного теста со сканированием
+    if "AN520" in test_code and "," in test_code:
+        # Берем только первый код из списка
+        return "AN520ГИЭ"
+    
+    # Для остальных - если код слишком длинный, обрезаем
+    if len(test_code) > 20:
+        return test_code[:17] + "..."
+    
+    return test_code
+
+def replace_test_codes_with_links(text: str, all_test_codes: set) -> tuple[str, dict]:
+    """
+    Заменяет коды тестов в тексте на HTML ссылки.
+    
+    Args:
+        text: Исходный текст
+        all_test_codes: Множество всех доступных кодов тестов
+    
+    Returns:
+        Tuple[str, Dict]: Текст с маркерами и словарь замен
+    """
+    # Находим ВСЕ коды и их позиции
+    all_matches = []
+    
+    patterns = [
+        r'\b[AА][NН]\d+[A-ZА-Я\-]*\b',  # AN116, AN116-X
+        r'\b[A-ZА-Я]+\d+[A-ZА-Я\-]*\b', # ABC123
+        r'\b\d{2,4}[A-ZА-Я]+\b',        # 123ABC
+    ]
+    
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            found_code = match.group()
+            normalized_code = normalize_test_code(found_code)
+            
+            # Проверяем что код валидный и существует
+            if normalized_code and normalized_code.upper() in all_test_codes:
+                all_matches.append({
+                    'start': match.start(),
+                    'end': match.end(),
+                    'code': found_code,
+                    'normalized': normalized_code
+                })
+    
+    # Удаляем пересекающиеся совпадения (оставляем самые длинные)
+    filtered_matches = []
+    for match in all_matches:
+        overlap = False
+        for other in filtered_matches:
+            # Проверяем пересечение
+            if (match['start'] < other['end'] and match['end'] > other['start']):
+                # Если текущий match короче - пропускаем его
+                if len(match['code']) <= len(other['code']):
+                    overlap = True
+                    break
+                else:
+                    # Если текущий длиннее - удаляем короткий
+                    filtered_matches = [m for m in filtered_matches if m != other]
+        
+        if not overlap:
+            filtered_matches.append(match)
+    
+    # Сортируем по позиции с конца (чтобы не сбивать индексы)
+    filtered_matches.sort(key=lambda x: x['start'], reverse=True)
+    
+    # Заменяем найденные коды на специальные маркеры
+    result = text
+    replacements = {}
+    
+    for i, match in enumerate(filtered_matches):
+        marker = f"__TEST_LINK_{i}__{match['normalized']}__"  # Изменен формат маркера
+        result = result[:match['start']] + marker + result[match['end']:]
+        
+        # Создаем ссылку и проверяем ее валидность
+        link = create_test_link(match['normalized'])
+        
+        # Убеждаемся что ссылка корректная
+        if link and 'https://t.me/' in link:
+            # Экранируем только отображаемый текст, не саму ссылку
+            display_text = html.escape(match["code"])
+            replacements[marker] = f'<a href="{link}">{display_text}</a>'
+        else:
+            # Если ссылка не сгенерировалась - просто текст
+            replacements[marker] = html.escape(match["code"])
+    
+    return result, replacements
 
 async def handle_general_question(
     message: Message, state: FSMContext, question_text: str
 ):
+    import re
+    
     user = await db.get_user(message.from_user.id)
     
     loading_msg = await message.answer("🤔 Анализирую вопрос...")
@@ -1462,7 +1735,8 @@ async def handle_general_question(
                 
                 if test_code:
                     normalized_code = normalize_test_code(test_code)
-                    all_test_codes.add(normalized_code.upper())
+                    if normalized_code:  # Проверяем что код не пустой
+                        all_test_codes.add(normalized_code.upper())
                     
                     context_info += f"\n🔬 Тест {normalized_code} - {test_data.get('test_name', '')}:\n"
                     
@@ -1526,8 +1800,9 @@ async def handle_general_question(
             - Адаптируй детализацию к сложности вопроса
             - Используй профессиональную ветеринарную терминологию
             - Указывай коды тестов при упоминании конкретных исследований
-            - Структурируй информацию логично (подготовка → процедура → результаты)
-
+            - Структурируй информацию логично
+            - Добавляй в ответ много эмодзи по смыслу
+            
             ## Ограничения
             - Не предоставляй информацию, отсутствующую в контексте
             - Не ставь диагнозы и не интерпретируй результаты
@@ -1548,66 +1823,117 @@ async def handle_general_question(
 
         answer = response.generations[0][0].text.strip()
         
-        # Заменяем коды тестов на маркеры (используем функцию, вынесенную наружу)
-        answer_with_links, replacements = replace_test_codes_with_links(answer, all_test_codes)
+        # УПРОЩЕННАЯ ОБРАБОТКА:
         
-        # Применяем fix_bold к тексту с маркерами
-        text_with_markers = fix_bold(answer_with_links)
+        # 1. Находим все коды тестов и создаем словарь замен
+        code_to_link = {}
         
-        # Экранируем HTML ПОСЛЕ fix_bold
-        answer_with_links = html.escape(text_with_markers)
-        
-        # Заменяем маркеры на реальные ссылки
-        for marker, link_html in replacements.items():
-            answer_with_links = answer_with_links.replace(html.escape(marker), link_html)
-        
-        # Восстанавливаем теги bold из fix_bold
-        answer_with_links = answer_with_links.replace('&lt;b&gt;', '<b>').replace('&lt;/b&gt;', '</b>')
-
-        
-        # ОТЛАДКА: выводим проблемные места
-        print(f"[DEBUG] Answer length: {len(answer_with_links)}")
-        
-        # Проверяем на проблемные паттерны
-        problematic_patterns = [
-            '""',
-            '<>',
-            '</>',
-            '< >',
-            '</ >',
-            '<a href="">',
-            '<a href=" ">',
+        # Паттерны для поиска кодов
+        patterns = [
+            r'\b[AА][NН]\d+[A-ZА-Я\-]*\b',
+            r'\b[A-ZА-Я]+\d+[A-ZА-Я\-]*\b',
+            r'\b\d{2,4}[A-ZА-Я]+\b',
         ]
         
-        for pattern in problematic_patterns:
-            if pattern in answer_with_links:
-                print(f"[WARNING] Found problematic pattern '{pattern}' in HTML")
-                # Находим позицию проблемы
-                pos = answer_with_links.find(pattern)
-                print(f"[WARNING] Position: {pos}, context: ...{answer_with_links[max(0, pos-50):pos+50]}...")
-                
-                # Очищаем проблемные паттерны
-                answer_with_links = answer_with_links.replace(pattern, '')
+        # Находим все коды в тексте
+        found_codes = set()
+        for pattern in patterns:
+            for match in re.finditer(pattern, answer, re.IGNORECASE):
+                code = match.group()
+                normalized = normalize_test_code(code)
+                if normalized and normalized.upper() in all_test_codes:
+                    found_codes.add((code, normalized))
         
-        # Проверяем корректность HTML тегов
-        # Ищем пустые атрибуты href
-        answer_with_links = re.sub(r'<a\s+href=["\'][\s]*["\']>', '', answer_with_links)
-        answer_with_links = re.sub(r'</a>', '', answer_with_links, count=answer_with_links.count('<a href="">'))
+        # Создаем ссылки для найденных кодов
+        for original, normalized in found_codes:
+            link = create_test_link(normalized)
+            if link and 'https://t.me/' in link:
+                code_to_link[original] = f'<a href="{link}">{html.escape(original)}</a>'
+        
+        # 2. Экранируем весь текст
+        processed_text = html.escape(answer)
+        
+        # 3. Применяем форматирование markdown
+        # **текст** -> <b>текст</b>
+        processed_text = re.sub(r'\*\*([^\*]+)\*\*', r'<b>\1</b>', processed_text)
+        
+        # *текст* -> <i>текст</i>
+        processed_text = re.sub(r'(?<!\*)\*([^\*]+)\*(?!\*)', r'<i>\1</i>', processed_text)
+        
+        # 4. Заменяем коды тестов на ссылки
+        # Сортируем по длине (сначала длинные) чтобы избежать частичных замен
+        sorted_codes = sorted(code_to_link.keys(), key=len, reverse=True)
+        
+        for code in sorted_codes:
+            # Экранированная версия кода для поиска
+            escaped_code = html.escape(code)
+            # Заменяем только целые слова
+            pattern = r'\b' + re.escape(escaped_code) + r'\b'
+            processed_text = re.sub(pattern, code_to_link[code], processed_text)
         
         await loading_msg.delete()
         
-        try:
-            # Отправляем ответ с HTML разметкой
-            await message.answer(answer_with_links, parse_mode="HTML", disable_web_page_preview=True)
-        except Exception as e:
-            print(f"[ERROR] Failed to send HTML message: {e}")
-            print(f"[ERROR] Problematic HTML fragment: {answer_with_links[:500]}")
+        # Проверка длины и отправка
+        if len(processed_text) > 4000:
+            # Разбиваем на части по параграфам или строкам
+            parts = []
+            current = ""
             
-            # Fallback - отправляем без HTML разметки
-            clean_text = re.sub(r'<[^>]+>', '', answer_with_links)
-            await message.answer(clean_text, disable_web_page_preview=True)
+            # Разбиваем по двойным переносам (параграфы)
+            paragraphs = processed_text.split('\n\n')
+            
+            for para in paragraphs:
+                if len(current) + len(para) + 2 < 3900:
+                    current += para + '\n\n' if current else para
+                else:
+                    if current:
+                        parts.append(current.rstrip())
+                    current = para
+            
+            if current:
+                parts.append(current.rstrip())
+            
+            # Отправляем части
+            for i, part in enumerate(parts):
+                try:
+                    await message.answer(
+                        part,
+                        parse_mode="HTML",
+                        disable_web_page_preview=True
+                    )
+                    if i < len(parts) - 1:
+                        await asyncio.sleep(0.5)  # Небольшая задержка между частями
+                except Exception as e:
+                    print(f"[ERROR] Failed to send part {i+1}: {e}")
+                    # Очищаем от HTML и отправляем
+                    clean_part = re.sub(r'<[^>]+>', '', part)
+                    await message.answer(clean_part)
+        else:
+            try:
+                await message.answer(
+                    processed_text,
+                    parse_mode="HTML", 
+                    disable_web_page_preview=True
+                )
+            except Exception as e:
+                print(f"[ERROR] Failed to send HTML message: {e}")
+                print(f"[ERROR] Text length: {len(processed_text)}")
+                
+                # Попробуем найти проблемное место
+                if "can't parse entities" in str(e):
+                    # Извлекаем позицию ошибки
+                    import re
+                    match = re.search(r'byte offset (\d+)', str(e))
+                    if match:
+                        offset = int(match.group(1))
+                        print(f"[ERROR] Problem around position {offset}:")
+                        print(f"[ERROR] Context: ...{processed_text[max(0, offset-50):offset+50]}...")
+                
+                # Fallback
+                clean_text = re.sub(r'<[^>]+>', '', answer)
+                await message.answer(clean_text, disable_web_page_preview=True)
 
-        # Создаем кнопки для дальнейших действий
+        # Кнопки для дальнейших действий
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
                 [
@@ -1636,14 +1962,27 @@ async def handle_code_search_with_text(message: Message, state: FSMContext, sear
     """Wrapper для handle_code_search с передачей текста"""
     # Вызываем основной обработчик, но используем переданный текст
     await _handle_code_search_internal(message, state, search_text)
-
+    
+async def cleanup_old_search_results(state: FSMContext, keep_last: int = 3):
+    """Очищает старые результаты поиска из состояния"""
+    data = await state.get_data()
+    search_keys = [k for k in data.keys() if k.startswith("search_results_")]
+    
+    # Если результатов больше, чем нужно хранить
+    if len(search_keys) > keep_last:
+        # Сортируем по времени (ID содержит timestamp)
+        search_keys.sort()
+        
+        # Удаляем старые
+        for key in search_keys[:-keep_last]:
+            await state.update_data(**{key: None})
 
 async def handle_name_search_with_text(message: Message, state: FSMContext, search_text: str):
     """Wrapper для handle_name_search с передачей текста"""
     await _handle_name_search_internal(message, state, search_text)
 
 async def _handle_name_search_internal(message: Message, state: FSMContext, search_text: str = None):
-    """Внутренняя функция обработки поиска по имени"""
+    """Внутренняя функция обработки поиска по имени с пагинацией"""
     user_id = message.from_user.id
 
     # Получаем данные из состояния
@@ -1651,6 +1990,8 @@ async def _handle_name_search_internal(message: Message, state: FSMContext, sear
     show_profiles = data.get("show_profiles", False)
     original_query = data.get("original_query", message.text if not search_text else search_text)
 
+    #Диагностика 
+    print(f"[NAME SEARCH] show_profiles={show_profiles}, original_query={original_query}")
     # Используем переданный текст или текст из сообщения
     text = search_text if search_text else message.text.strip()
     text = expand_query_with_abbreviations(text)
@@ -1681,7 +2022,7 @@ async def _handle_name_search_internal(message: Message, state: FSMContext, sear
         processor.load_vector_store()
 
         # Ищем по тексту
-        rag_hits = processor.search_test(text, top_k=30)  # Увеличиваем для фильтрации
+        rag_hits = processor.search_test(text, top_k=30)
 
         # Фильтруем по типу (профили или обычные тесты)
         filtered_hits = filter_results_by_type(rag_hits, show_profiles)
@@ -1743,62 +2084,79 @@ async def _handle_name_search_internal(message: Message, state: FSMContext, sear
         await safe_delete_message(loading_msg)
         await safe_delete_message(gif_msg)
 
+        # Если найдено несколько результатов - показываем с пагинацией
         if len(selected_docs) > 1:
-            # Показываем несколько результатов
-            response = f"Найдено несколько подходящих {search_type}:\n\n"
-
-            for i, doc in enumerate(selected_docs, 1):
+            # Генерируем уникальный ID для этого поиска
+            import hashlib
+            from datetime import datetime
+            
+            search_id = hashlib.md5(
+                f"{user_id}_{datetime.now().isoformat()}_{text}".encode()
+            ).hexdigest()[:8]
+            
+            # Сохраняем результаты в состоянии
+            await state.update_data(**{f"search_results_{search_id}": selected_docs})
+            
+            # Очищаем старые результаты
+            await cleanup_old_search_results(state)
+            
+            # Показываем первую страницу результатов
+            keyboard, total_pages, items_shown = create_paginated_keyboard(
+                selected_docs,
+                current_page=0,
+                items_per_page=6,
+                search_id=search_id
+            )
+            
+            # Формируем текст для первой страницы
+            total_found = len(selected_docs)
+            response = f"🔍 <b>Найдено {total_found} {search_type}</b>"
+            if total_pages > 1:
+                response += f" <b>(страница 1 из {total_pages}):</b>\n\n"
+            else:
+                response += ":\n\n"
+            
+            for i, doc in enumerate(selected_docs[:items_shown], 1):
                 test_data = format_test_data(doc.metadata)
-                test_code = test_data["test_code"]
+                test_code = sanitize_test_code_for_display(test_data["test_code"])
                 test_name = html.escape(test_data["test_name"])
-                department = html.escape(test_data["department"])
-
+                department = html.escape(test_data.get("department", "Не указано"))
+                
                 # Добавляем метку для профилей
                 type_label = "🔬 Профиль" if is_profile_test(test_code) else "🧪 Тест"
-
+                
                 link = create_test_link(test_code)
-
+                
                 response += (
                     f"<b>{i}.</b> {type_label}: <a href='{link}'>{test_code}</a> - {test_name}\n"
                     f"📋 <b>Вид исследования:</b> {department}\n\n"
                 )
-
-                if len(response) > 3500:
-                    response += "\n<i>... и другие результаты</i>"
-                    break
-
+            
+            # Добавляем подсказку
+            response += "\n💡 <i>Нажмите на код теста в сообщении выше или выберите из кнопок</i>"
+            
+            # Если страниц больше одной, добавляем информацию о навигации
+            if total_pages > 1:
+                response += f"\n📄 <i>Используйте кнопки навигации для просмотра всех результатов</i>"
+            
             await message.answer(
-                response, parse_mode="HTML", disable_web_page_preview=True
-            )
-
-            # Создаем клавиатуру с кнопками
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[])
-            row = []
-
-            for i, doc in enumerate(selected_docs[:15]):
-                test_code = doc.metadata["test_code"]
-                row.append(
-                    InlineKeyboardButton(
-                        text=test_code,
-                        callback_data=TestCallback.pack("show_test", test_code),
-                    )
-                )
-
-                if len(row) >= 3:
-                    keyboard.inline_keyboard.append(row)
-                    row = []
-
-            if row:
-                keyboard.inline_keyboard.append(row)
-
-            await message.answer(
-                "💡 <b>Нажмите на код теста в сообщении выше или выберите из кнопок:</b>",
-                reply_markup=keyboard,
+                response,
                 parse_mode="HTML",
+                disable_web_page_preview=True,
+                reply_markup=keyboard
             )
-
+            
+            # Сохраняем последний найденный тест для контекста
+            last_test_data = format_test_data(selected_docs[0].metadata)
+            await state.update_data(
+                current_test=last_test_data,
+                last_viewed_test=last_test_data["test_code"],
+                show_profiles=False,
+                search_text=None
+            )
+            
         else:
-            # Один результат
+            # Один результат - показываем подробную информацию
             test_data = format_test_data(selected_docs[0].metadata)
 
             # Добавляем информацию о типе
@@ -1822,8 +2180,24 @@ async def _handle_name_search_internal(message: Message, state: FSMContext, sear
                 if d.metadata.get("test_code") != test_data["test_code"]
             ]
 
-            if similar_tests[:5]:
+            # Если есть похожие тесты, показываем их с пагинацией
+            if len(similar_tests) > 5:
+                # Генерируем ID для похожих тестов
+                import hashlib
+                from datetime import datetime
+                
+                similar_search_id = hashlib.md5(
+                    f"{user_id}_{datetime.now().isoformat()}_similar_{test_data['test_code']}".encode()
+                ).hexdigest()[:8]
+                
+                # Сохраняем похожие тесты
+                similar_docs = [doc for doc, _ in similar_tests]
+                await state.update_data(**{f"search_results_{similar_search_id}": similar_docs})
+                
                 response += format_similar_tests_with_links(similar_tests[:5])
+                response += f"\n\n<i>Всего найдено {len(similar_tests)} похожих тестов</i>"
+            elif similar_tests:
+                response += format_similar_tests_with_links(similar_tests)
 
             # Отправляем с фото
             await send_test_info_with_photo(message, test_data, response)
@@ -1836,71 +2210,20 @@ async def _handle_name_search_internal(message: Message, state: FSMContext, sear
                     test_code_2=test_data["test_code"],
                 )
 
-            # --- Блок рекомендаций закомментирован по запросу ---
-            # # Получаем связанные тесты
-            # related_tests = await db.get_user_related_tests(user_id, test_data["test_code"])
-            #
-            # # Создаем клавиатуру рекомендаций
-            # reply_markup = None
-            # if related_tests or similar_tests:
-            #     keyboard = []
-            #     row = []
-            #
-            #     # Связанные из истории (того же типа)
-            #     for related in related_tests[:4]:
-            #         if is_profile == is_profile_test(related["test_code"]):
-            #             row.append(
-            #                 InlineKeyboardButton(
-            #                     text=f"⭐ {related['test_code']}",
-            #                     callback_data=TestCallback.pack(
-            #                         "show_test", related["test_code"]
-            #                     ),
-            #                 )
-            #             )
-            #             if len(row) >= 2:
-            #                 keyboard.append(row)
-            #                 row = []
-            #
-            #     # Похожие тесты
-            #     for doc, _ in similar_tests[:4]:
-            #         if len(keyboard) * 2 + len(row) >= 8:
-            #             break
-            #         code = doc.metadata.get("test_code")
-            #         if not any(r["test_code"] == code for r in related_tests):
-            #             row.append(
-            #                 InlineKeyboardButton(
-            #                     text=code,
-            #                     callback_data=TestCallback.pack("show_test", code),
-            #                 )
-            #             )
-            #             if len(row) >= 2:
-            #                 keyboard.append(row)
-            #                 row = []
-            #
-            #     if row:
-            #         keyboard.append(row)
-            #
-            #     reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
-            #
-            # # Показываем рекомендации
-            # if reply_markup:
-            #     rec_type = "профили" if is_profile else "тесты"
-            #     await message.answer(
-            #         f"🎯 Рекомендуем также похожие {rec_type}:",
-            #         reply_markup=reply_markup
-            #     )
-            # --- Конец закомментированного блока ---
-
-        # Сохраняем последний найденный тест
-        await state.set_state(QuestionStates.in_dialog)
-        if selected_docs:
-            last_test_data = format_test_data(selected_docs[0].metadata)
+            # Обновляем состояние
+            await state.set_state(QuestionStates.in_dialog)
             await state.update_data(
-                current_test=last_test_data,
-                last_viewed_test=last_test_data["test_code"],
-                show_profiles=False,  # Сбрасываем флаг после поиска
+                current_test=test_data,
+                last_viewed_test=test_data["test_code"],
+                show_profiles=False,
                 search_text=None
             )
+
+        # Показываем клавиатуру для продолжения диалога
+        await message.answer(
+            "Можете задать вопрос об этом тесте или выбрать действие:",
+            reply_markup=get_dialog_kb()
+        )
 
     except Exception as e:
         print(f"[ERROR] Name search failed: {e}")
@@ -1922,7 +2245,7 @@ async def _handle_name_search_internal(message: Message, state: FSMContext, sear
         await state.update_data(show_profiles=False, search_text=None)
 
 async def _handle_code_search_internal(message: Message, state: FSMContext, search_text: str = None):
-    """Внутренняя функция обработки поиска по коду"""
+    """Внутренняя функция обработки поиска по коду с пагинацией"""
     data = await state.get_data()
     if data.get("is_processing", False):
         await message.answer(
@@ -2014,25 +2337,64 @@ async def _handle_code_search_internal(message: Message, state: FSMContext, sear
             )
 
             if similar_tests:
-                # Показываем найденные варианты
+                # Показываем найденные варианты с пагинацией
+                import hashlib
+                from datetime import datetime
+                
+                search_id = hashlib.md5(
+                    f"{user_id}_{datetime.now().isoformat()}_similar_{normalized_input}".encode()
+                ).hexdigest()[:8]
+                
+                # Сохраняем только Document объекты (без scores)
+                similar_docs = [doc for doc, _ in similar_tests]
+                await state.update_data(**{f"search_results_{search_id}": similar_docs})
+                
+                # Очищаем старые результаты
+                await cleanup_old_search_results(state)
+                
+                # Создаем клавиатуру с пагинацией
+                keyboard, total_pages, items_shown = create_paginated_keyboard(
+                    similar_docs,
+                    current_page=0,
+                    items_per_page=6,
+                    search_id=search_id
+                )
+                
                 response = (
-                    f"❌ {search_type.capitalize()} с кодом '<code>{normalized_input}</code>' не найден.\n"
+                    f"❌ {search_type.capitalize()} с кодом '<code>{normalized_input}</code>' не найден.\n\n"
+                    f"🔍 <b>Найдены похожие {search_type} ({len(similar_tests)} шт.)</b>"
                 )
-                response += f"\n🔍 <b>Найдены похожие {search_type}:</b>\n"
-                response += format_similar_tests_with_links(
-                    similar_tests, max_display=10
-                )
-
-                keyboard = create_similar_tests_keyboard(similar_tests[:20])
-
+                
+                if total_pages > 1:
+                    response += f" <b>(страница 1 из {total_pages}):</b>\n\n"
+                else:
+                    response += ":\n\n"
+                
+                # Показываем первые элементы
+                for i, (doc, score) in enumerate(similar_tests[:items_shown], 1):
+                    test_data = format_test_data(doc.metadata)
+                    test_code = sanitize_test_code_for_display(test_data["test_code"])
+                    test_name = html.escape(test_data["test_name"])
+                    
+                    link = create_test_link(test_code)
+                    response += (
+                        f"<b>{i}.</b> <a href='{link}'>{test_code}</a> - {test_name}\n"
+                        f"   📊 Схожесть: {score}%\n\n"
+                    )
+                
+                response += "\n💡 <i>Нажмите на код теста или используйте кнопки для выбора</i>"
+                
+                if total_pages > 1:
+                    response += f"\n📄 <i>Используйте навигацию для просмотра всех результатов</i>"
+                
                 await message.answer(
-                    response
-                    + f"\n<i>Нажмите на код теста в сообщении выше или выберите из кнопок ниже:</i>",
+                    response,
                     parse_mode="HTML",
-                    reply_markup=keyboard,
                     disable_web_page_preview=True,
+                    reply_markup=keyboard
                 )
             else:
+                # Ничего не найдено
                 error_msg = f"❌ {search_type.capitalize()} с кодом '{normalized_input}' не найден.\n"
                 if show_profiles:
                     error_msg += "💡 Попробуйте поиск без указания 'профили' для обычных тестов."
@@ -2041,11 +2403,10 @@ async def _handle_code_search_internal(message: Message, state: FSMContext, sear
                 await message.answer(error_msg, reply_markup=get_back_to_menu_kb())
 
             await state.set_state(QuestionStates.waiting_for_search_type)
-            # Сбрасываем флаги после поиска
             await state.update_data(show_profiles=False, search_text=None)
             return
 
-        # Найден результат - продолжаем
+        # Найден точный результат - показываем подробную информацию
         doc = result[0]
         test_data = format_test_data(doc.metadata)
 
@@ -2056,6 +2417,7 @@ async def _handle_code_search_internal(message: Message, state: FSMContext, sear
 
         response = type_info + format_test_info(test_data)
 
+        # Записываем в историю
         await db.add_search_history(
             user_id=user_id,
             search_query=original_query,
@@ -2075,6 +2437,41 @@ async def _handle_code_search_internal(message: Message, state: FSMContext, sear
         await safe_delete_message(loading_msg)
         await safe_delete_message(gif_msg)
 
+        # Добавляем похожие тесты
+        similar_tests = await fuzzy_test_search(
+            processor, test_data["test_code"], threshold=40
+        )
+
+        # Фильтруем по типу
+        is_profile = is_profile_test(test_data["test_code"])
+        similar_tests = filter_results_by_type(similar_tests, is_profile)
+        similar_tests = [
+            (d, s)
+            for d, s in similar_tests
+            if d.metadata.get("test_code") != test_data["test_code"]
+        ]
+
+        # Если похожих тестов много - готовим пагинацию
+        if len(similar_tests) > 5:
+            import hashlib
+            from datetime import datetime
+            
+            similar_search_id = hashlib.md5(
+                f"{user_id}_{datetime.now().isoformat()}_related_{test_data['test_code']}".encode()
+            ).hexdigest()[:8]
+            
+            similar_docs = [doc for doc, _ in similar_tests]
+            await state.update_data(**{f"search_results_{similar_search_id}": similar_docs})
+            
+            # Показываем первые 5 в основном сообщении
+            response += format_similar_tests_with_links(similar_tests[:5])
+            response += f"\n\n<i>Всего найдено {len(similar_tests)} похожих тестов</i>"
+            
+            # Можно добавить кнопку "Показать все похожие"
+            # Это будет отдельное сообщение с пагинацией
+        elif similar_tests:
+            response += format_similar_tests_with_links(similar_tests)
+
         # Отправляем информацию с фото
         await send_test_info_with_photo(message, test_data, response)
 
@@ -2086,82 +2483,36 @@ async def _handle_code_search_internal(message: Message, state: FSMContext, sear
                 test_code_2=test_data["test_code"],
             )
 
-        # --- Блок рекомендаций закомментирован по запросу ---
-        # # Получаем связанные тесты
-        # related_tests = await db.get_user_related_tests(user_id, test_data["test_code"])
-        #
-        # # Ищем похожие тесты того же типа
-        # similar_tests = await fuzzy_test_search(
-        #     processor, test_data["test_code"], threshold=40
-        # )
-        #
-        # # Фильтруем по типу
-        # is_profile = is_profile_test(test_data["test_code"])
-        # similar_tests = filter_results_by_type(similar_tests, is_profile)
-        # similar_tests = [
-        #     (d, s)
-        #     for d, s in similar_tests
-        #     if d.metadata.get("test_code") != test_data["test_code"]
-        # ]
-        #
-        # # Создаем клавиатуру рекомендаций
-        # reply_markup = None
-        # if related_tests or similar_tests:
-        #     keyboard = []
-        #     row = []
-        #
-        #     # Связанные из истории
-        #     for related in related_tests[:4]:
-        #         # Проверяем тип связанного теста
-        #         if is_profile == is_profile_test(related["test_code"]):
-        #             row.append(
-        #                 InlineKeyboardButton(
-        #                     text=f"⭐ {related['test_code']}",
-        #                     callback_data=TestCallback.pack(
-        #                         "show_test", related["test_code"]
-        #                     ),
-        #                 )
-        #             )
-        #             if len(row) >= 2:
-        #                 keyboard.append(row)
-        #                 row = []
-        #
-        #     # Похожие тесты
-        #     for doc, _ in similar_tests[:4]:
-        #         if len(keyboard) * 2 + len(row) >= 8:
-        #             break
-        #         code = doc.metadata.get("test_code")
-        #         if not any(r["test_code"] == code for r in related_tests):
-        #             row.append(
-        #                 InlineKeyboardButton(
-        #                     text=code,
-        #                     callback_data=TestCallback.pack("show_test", code),
-        #                 )
-        #             )
-        #             if len(row) >= 2:
-        #                 keyboard.append(row)
-        #                 row = []
-        #
-        #     if row:
-        #         keyboard.append(row)
-        #
-        #     reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
-        #
-        # # Показываем рекомендации
-        # if reply_markup:
-        #     rec_type = "профили" if is_profile else "тесты"
-        #     await message.answer(
-        #         f"🎯 Рекомендуем также похожие {rec_type}:",
-        #         reply_markup=reply_markup
-        #     )
-        # --- Конец закомментированного блока ---
+        # Если есть много похожих тестов, показываем кнопку для их просмотра
+        if len(similar_tests) > 5:
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text=f"📋 Показать все похожие тесты ({len(similar_tests)})",
+                            callback_data=f"show_all_similar:{similar_search_id}"
+                        )
+                    ]
+                ]
+            )
+            await message.answer(
+                "Найдено больше похожих тестов:",
+                reply_markup=keyboard
+            )
 
+        # Обновляем состояние
         await state.set_state(QuestionStates.in_dialog)
         await state.update_data(
             current_test=test_data,
             last_viewed_test=test_data["test_code"],
-            show_profiles=False,  # Сбрасываем флаг
+            show_profiles=False,
             search_text=None
+        )
+
+        # Показываем клавиатуру для продолжения диалога
+        await message.answer(
+            "Можете задать вопрос об этом тесте или выбрать действие:",
+            reply_markup=get_dialog_kb()
         )
 
     except asyncio.CancelledError:
