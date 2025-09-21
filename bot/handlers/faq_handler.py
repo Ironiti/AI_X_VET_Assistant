@@ -441,7 +441,7 @@ async def handle_new_search_text(message: Message, state: FSMContext):
         reply_markup=get_faq_back_kb()
     )
 
-@faq_router.message(F.text == "🔙 Вернуться в главное меню")
+@faq_router.message(F.text.in_(["🔙 Вернуться в главное меню", "🏠 В главное меню"]))
 async def handle_back_to_menu_legacy(message: Message, state: FSMContext):
     await state.clear()
     user = await db.get_user(message.from_user.id)
