@@ -347,7 +347,7 @@ async def handle_show_container_photos_callback(callback: CallbackQuery):
     test_code = callback.data.split(":", 1)[1]
 
     try:
-        # Ищем тест в базе
+        # Ищем тест в векторной БД
         processor = DataProcessor()
         processor.load_vector_store()
 
@@ -360,84 +360,155 @@ async def handle_show_container_photos_callback(callback: CallbackQuery):
         doc = results[0][0] if isinstance(results[0], tuple) else results[0]
         test_data = format_test_data(doc.metadata)
 
+        # Собираем ВСЕ типы контейнеров из ОБОИХ полей
+        container_types_to_check = []
+        
+        # 1. Проверяем primary_container_type (ПРИОРИТЕТ)
+        primary_container = str(test_data.get("primary_container_type", "")).strip()
+        if primary_container and primary_container.lower() not in ["не указан", "нет", "-", "", "none", "null"]:
+            # Убираем кавычки и нормализуем
+            primary_container = primary_container.replace('"', "").replace("\n", " ")
+            primary_container = " ".join(primary_container.split())
+            
+            # Разбиваем по *I* если есть несколько контейнеров
+            if "*I*" in primary_container:
+                parts = [ct.strip() for ct in primary_container.split("*I*")]
+                container_types_to_check.extend(parts)
+            else:
+                container_types_to_check.append(primary_container)
+        
+        # 2. Проверяем обычный container_type
         container_type_raw = str(test_data.get("container_type", "")).strip()
-
-        # Убираем кавычки и нормализуем
-        container_type_raw = container_type_raw.replace('"', "").replace("\n", " ")
-        container_type_raw = " ".join(container_type_raw.split())
-
-        # Получаем все типы контейнеров
-        if "*I*" in container_type_raw:
-            container_types = [ct.strip() for ct in container_type_raw.split("*I*")]
-        else:
-            container_types = [container_type_raw]
-
+        if container_type_raw and container_type_raw.lower() not in ["не указан", "нет", "-", "", "none", "null"]:
+            # Убираем кавычки и нормализуем
+            container_type_raw = container_type_raw.replace('"', "").replace("\n", " ")
+            container_type_raw = " ".join(container_type_raw.split())
+            
+            # Разбиваем по *I* если есть несколько контейнеров
+            if "*I*" in container_type_raw:
+                parts = [ct.strip() for ct in container_type_raw.split("*I*")]
+                # Добавляем только уникальные
+                for ct in parts:
+                    if ct not in container_types_to_check:
+                        container_types_to_check.append(ct)
+            else:
+                if container_type_raw not in container_types_to_check:
+                    container_types_to_check.append(container_type_raw)
+        
+        # Убираем дубликаты, сохраняя порядок
+        container_types_to_check = list(dict.fromkeys(container_types_to_check))
+        
+        # Если нет контейнеров для проверки
+        if not container_types_to_check:
+            await callback.message.answer("❌ Для этого теста не указаны типы контейнеров")
+            return
+        
         # Собираем все фото контейнеров
         found_photos = []
-
-        for ct in container_types:
-            # Нормализуем каждый тип
+        
+        for ct in container_types_to_check:
+            # Нормализуем каждый тип (первая буква каждого слова заглавная)
             ct_normalized = " ".join(word.capitalize() for word in ct.split())
-
+            
             photo_data = await db.get_container_photo(ct_normalized)
             if photo_data:
-                found_photos.append(photo_data["file_id"])
-
+                found_photos.append({
+                    "container_type": ct_normalized,
+                    "file_id": photo_data["file_id"],
+                    "description": photo_data.get("description")
+                })
+        
         # Если есть фото - отправляем
         if found_photos:
             message_ids = []
-
-            # Отправляем все фото по отдельности
-            for i, file_id in enumerate(found_photos):
+            
+            # Отправляем все фото
+            for i, photo_info in enumerate(found_photos):
                 is_last = i == len(found_photos) - 1
-
-                if is_last:
-                    # Последнее фото с кнопкой
+                
+                # Формируем подпись
+                caption = f"📦 Контейнер: {photo_info['container_type']}"
+                if photo_info.get('description'):
+                    caption += f"\n📝 {photo_info['description']}"
+                
+                if is_last and len(found_photos) > 1:
+                    # Последнее фото с кнопкой скрытия всех
                     hide_keyboard = InlineKeyboardMarkup(
                         inline_keyboard=[
                             [
                                 InlineKeyboardButton(
-                                    text="🙈 Скрыть фото",
+                                    text="🙈 Скрыть все фото",
                                     callback_data=f"hide_photos:{test_code}:placeholder",
                                 )
                             ]
                         ]
                     )
-
                     sent_msg = await callback.message.answer_photo(
-                        photo=file_id, reply_markup=hide_keyboard
+                        photo=photo_info['file_id'],
+                        caption=caption,
+                        reply_markup=hide_keyboard
+                    )
+                elif is_last and len(found_photos) == 1:
+                    # Единственное фото с кнопкой
+                    hide_keyboard = InlineKeyboardMarkup(
+                        inline_keyboard=[
+                            [
+                                InlineKeyboardButton(
+                                    text="🙈 Скрыть фото",
+                                    callback_data=f"hide_single:{test_code}",
+                                )
+                            ]
+                        ]
+                    )
+                    sent_msg = await callback.message.answer_photo(
+                        photo=photo_info['file_id'],
+                        caption=caption,
+                        reply_markup=hide_keyboard
                     )
                 else:
                     # Остальные фото без кнопки
-                    sent_msg = await callback.message.answer_photo(photo=file_id)
-
+                    sent_msg = await callback.message.answer_photo(
+                        photo=photo_info['file_id'],
+                        caption=caption
+                    )
+                
                 message_ids.append(sent_msg.message_id)
-
-            # Обновляем callback_data последнего сообщения со всеми ID
-            if message_ids:
+            
+            # Обновляем callback_data последнего сообщения со всеми ID (если фото больше одного)
+            if len(message_ids) > 1:
                 hide_keyboard = InlineKeyboardMarkup(
                     inline_keyboard=[
                         [
                             InlineKeyboardButton(
-                                text="🙈 Скрыть фото",
+                                text="🙈 Скрыть все фото",
                                 callback_data=f"hide_photos:{test_code}:{','.join(map(str, message_ids))}",
                             )
                         ]
                     ]
                 )
-
+                
                 # Редактируем кнопку последнего сообщения
                 await callback.bot.edit_message_reply_markup(
                     chat_id=callback.message.chat.id,
                     message_id=message_ids[-1],
                     reply_markup=hide_keyboard,
                 )
-
+        
         else:
-            await callback.message.answer("❌ Фото контейнеров не найдены в базе")
+            # Фото не найдены - показываем какие контейнеры искали
+            not_found_msg = "❌ Фото контейнеров не найдены в базе\n\n"
+            not_found_msg += "🔍 Искали контейнеры:\n"
+            for ct in container_types_to_check[:5]:  # Показываем первые 5
+                not_found_msg += f"• {ct}\n"
+            if len(container_types_to_check) > 5:
+                not_found_msg += f"... и еще {len(container_types_to_check) - 5}"
+            
+            await callback.message.answer(not_found_msg)
 
     except Exception as e:
         print(f"[ERROR] Failed to show container photos: {e}")
+        import traceback
+        traceback.print_exc()
         await callback.message.answer("❌ Ошибка при загрузке фото")
 
 
@@ -1544,20 +1615,23 @@ async def send_test_info_with_photo(
     message: Message, test_data: Dict, response_text: str
 ):
     """Отправляет информацию о тесте с кнопкой для показа фото контейнеров"""
-    container_type_raw = str(test_data.get("container_type", "")).strip()
-
-    # Проверяем, есть ли контейнеры для показа
-    has_containers = container_type_raw and container_type_raw.lower() not in [
-        "не указан",
-        "нет",
-        "-",
-        "",
-    ]
-
+    
+    has_containers = False
+    
+    # Проверяем primary_container_type
+    primary_container = str(test_data.get("primary_container_type", "")).strip()
+    if primary_container and primary_container.lower() not in ["не указан", "нет", "-", ""]:
+        has_containers = True
+    
+    # Если primary нет, проверяем обычный container_type
+    if not has_containers:
+        container_type_raw = str(test_data.get("container_type", "")).strip()
+        if container_type_raw and container_type_raw.lower() not in ["не указан", "нет", "-", ""]:
+            has_containers = True
+    
     keyboard = None
-
+    
     if has_containers:
-        # Создаем кнопку для показа фото
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
                 [
@@ -1568,8 +1642,7 @@ async def send_test_info_with_photo(
                 ]
             ]
         )
-
-    # Отправляем текстовую информацию с кнопкой
+    
     await message.answer(
         response_text,
         parse_mode="HTML",

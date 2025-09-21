@@ -12,7 +12,7 @@ class Database:
         self.test_processor = DataProcessor()
         
     async def get_unique_container_types(self) -> list[str]:
-        """Получает уникальные типы контейнеров из базы тестов"""
+        """Получает уникальные типы контейнеров из базы тестов (из обоих полей)"""
         try:
             if not self.test_processor.vector_store:
                 self.test_processor.load_vector_store()
@@ -22,26 +22,34 @@ class Database:
             container_types = set()
             
             for doc, _ in all_tests:
-                container_type_raw = doc.metadata.get('container_type', '').strip()
+                # Получаем типы контейнеров из ОБОИХ полей
+                container_fields = [
+                    doc.metadata.get('primary_container_type', '').strip(),  # ПРИОРИТЕТ
+                    doc.metadata.get('container_type', '').strip()
+                ]
                 
-                if not container_type_raw or container_type_raw.lower() in ['не указан', 'нет', '-', '']:
-                    continue
-                
-                # Убираем переносы строк, лишние пробелы и кавычки
-                container_type_raw = container_type_raw.replace('"', '').replace('\n', ' ')
-                container_type_raw = ' '.join(container_type_raw.split())
-                
-                # Разбиваем по *I* если есть несколько контейнеров
-                parts = container_type_raw.split('*I*')
-                
-                for part in parts:
-                    container_type = part.strip()
-                    if container_type:
-                        # ВАЖНО: Нормализуем - первая буква каждого слова заглавная
-                        normalized = ' '.join(word.capitalize() for word in container_type.split())
-                        container_types.add(normalized)
+                for container_type_raw in container_fields:
+                    if not container_type_raw or container_type_raw.lower() in ['не указан', 'нет', '-', '', 'none', 'null']:
+                        continue
+                    
+                    # Убираем переносы строк, лишние пробелы и кавычки
+                    container_type_raw = container_type_raw.replace('"', '').replace('\n', ' ')
+                    container_type_raw = ' '.join(container_type_raw.split())
+                    
+                    # Разбиваем по *I* если есть несколько контейнеров
+                    if '*I*' in container_type_raw:
+                        parts = container_type_raw.split('*I*')
+                    else:
+                        parts = [container_type_raw]
+                    
+                    for part in parts:
+                        container_type = part.strip()
+                        if container_type:
+                            # ВАЖНО: Нормализуем - первая буква каждого слова заглавная
+                            normalized = ' '.join(word.capitalize() for word in container_type.split())
+                            container_types.add(normalized)
             
-            # Возвращаем отсортированный список
+            # Возвращаем отсортированный список уникальных типов
             return sorted(list(container_types))
             
         except Exception as e:
@@ -186,6 +194,54 @@ class Database:
                     'options': json.loads(row[3]) if row[3] else None
                 })
             return questions
+        
+    async def get_container_photo(self, container_type: str):
+        """Получает фото контейнера по типу"""
+        try:
+            await self.ensure_container_photos_table()
+            # Нормализуем тип контейнера при поиске
+            normalized_type = ' '.join(word.capitalize() for word in container_type.split())
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute(
+                    'SELECT file_id, description FROM container_photos WHERE container_type = ?',
+                    (normalized_type,)
+                )
+                row = await cursor.fetchone()
+                
+                # Если не нашли точное совпадение, пробуем без учета регистра
+                if not row:
+                    cursor = await db.execute(
+                        'SELECT file_id, description FROM container_photos WHERE LOWER(container_type) = LOWER(?)',
+                        (container_type.strip(),)
+                    )
+                    row = await cursor.fetchone()
+                
+                if row:
+                    return {'file_id': row[0], 'description': row[1]}
+                
+                # Для отладки
+                print(f"[DEBUG] No photo found for container type: '{normalized_type}'")
+                return None
+        except Exception as e:
+            print(f"[ERROR] Failed to get container photo: {e}")
+            return None
+
+    async def delete_container_photo(self, container_type: str):
+        """Удаляет фото контейнера по типу"""
+        try:
+            await self.ensure_container_photos_table()
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute(
+                    'DELETE FROM container_photos WHERE container_type = ?', 
+                    (container_type,)
+                )
+                deleted = cursor.rowcount > 0
+                await db.commit()
+                return deleted
+        except Exception as e:
+            print(f"[ERROR] Failed to delete container photo: {e}")
+            return False
 
     async def save_poll_response(self, poll_id, question_id, user_id, answer):
         """Сохранение ответа пользователя на вопрос опроса"""
@@ -776,6 +832,35 @@ class Database:
             print(f"[ERROR] Failed to delete container photo: {e}")
             return False
 
+    async def get_test_by_code(self, code: str) -> Optional[dict]:
+        """
+        Find test by exact code match using ChromaDB.
+        """
+        try:
+            # Search in ChromaDB with test code filter
+            results = self.test_processor.search_test(
+                query="",
+                filter_dict={"test_code": code.upper()},
+                top_k=1
+            )
+            
+            if not results:
+                return None
+                
+            doc = results[0][0] if isinstance(results[0], tuple) else results[0]
+            return {
+                'test_code': doc.metadata['test_code'],
+                'test_name': doc.metadata['test_name'],
+                'container_type': doc.metadata.get('container_type', ''),
+                'primary_container_type': doc.metadata.get('primary_container_type', ''),  # ВАЖНО!
+                'preanalytics': doc.metadata.get('preanalytics', ''),
+                'storage_temp': doc.metadata.get('storage_temp', ''),
+                'department': doc.metadata.get('department', '')
+            }
+        except Exception as e:
+            print(f"[ERROR] Failed to search test by code: {e}")
+            return None 
+        
     async def get_all_container_photos(self):
         """Получает все фото контейнеров"""
         try:
@@ -791,7 +876,7 @@ class Database:
                 return [dict(row) for row in rows]
         except Exception as e:
             print(f"[ERROR] Failed to get all container photos: {e}")
-            return []   
+            return []
         
     async def initialize(self):
         """Initialize database and vector store"""
@@ -1269,6 +1354,7 @@ class Database:
                 'test_code': doc.metadata['test_code'],
                 'test_name': doc.metadata['test_name'],
                 'container_type': doc.metadata['container_type'],
+                'primary_container_type': doc.metadata.get('primary_container_type', ''),
                 'preanalytics': doc.metadata['preanalytics'],
                 'storage_temp': doc.metadata['storage_temp'],
                 'department': doc.metadata['department']

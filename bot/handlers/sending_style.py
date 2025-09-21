@@ -13,29 +13,42 @@ BOT_USERNAME = "AL_VET_UNION_BOT"
 
 async def get_test_container_photos(test_data: Dict) -> List[Dict]:
     """Получает все фото контейнеров для теста"""
-    container_type_raw = str(test_data.get("container_type", "")).strip()
-
-    if not container_type_raw or container_type_raw.lower() in [
-        "не указан",
-        "нет",
-        "-",
-        "",
-    ]:
-        return []
-
-    # Убираем кавычки и нормализуем
-    container_type_raw = container_type_raw.replace('"', "").replace("\n", " ")
-    container_type_raw = " ".join(container_type_raw.split())
-
     photos = []
-
-    # Разбиваем по *I* если есть несколько контейнеров
     container_types = []
-    if "*I*" in container_type_raw:
-        container_types = [ct.strip() for ct in container_type_raw.split("*I*")]
-    else:
-        container_types = [container_type_raw]
-
+    
+    # ✅ ИСПРАВЛЕНИЕ: Проверяем ОБА поля
+    # Сначала проверяем primary_container_type (приоритет)
+    primary_container = str(test_data.get("primary_container_type", "")).strip()
+    if primary_container and primary_container.lower() not in ["не указан", "нет", "-", "", "none", "null"]:
+        # Убираем кавычки и нормализуем
+        primary_container = primary_container.replace('"', "").replace("\n", " ")
+        primary_container = " ".join(primary_container.split())
+        
+        # Разбиваем по *I* если есть несколько контейнеров
+        if "*I*" in primary_container:
+            container_types.extend([ct.strip() for ct in primary_container.split("*I*")])
+        else:
+            container_types.append(primary_container)
+    
+    # Затем проверяем обычный container_type
+    container_type_raw = str(test_data.get("container_type", "")).strip()
+    if container_type_raw and container_type_raw.lower() not in ["не указан", "нет", "-", "", "none", "null"]:
+        # Убираем кавычки и нормализуем
+        container_type_raw = container_type_raw.replace('"', "").replace("\n", " ")
+        container_type_raw = " ".join(container_type_raw.split())
+        
+        # Разбиваем по *I* если есть несколько контейнеров
+        if "*I*" in container_type_raw:
+            new_types = [ct.strip() for ct in container_type_raw.split("*I*")]
+            # Добавляем только те, которых еще нет
+            for ct in new_types:
+                if ct not in container_types:
+                    container_types.append(ct)
+        else:
+            if container_type_raw not in container_types:
+                container_types.append(container_type_raw)
+    
+    # Получаем фото для всех найденных типов контейнеров
     for ct in container_types:
         if ct:
             # Нормализуем каждый тип
@@ -49,7 +62,7 @@ async def get_test_container_photos(test_data: Dict) -> List[Dict]:
                         "description": photo_data.get("description"),
                     }
                 )
-
+    
     return photos
 
 
