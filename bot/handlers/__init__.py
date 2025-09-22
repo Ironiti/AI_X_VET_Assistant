@@ -10,7 +10,7 @@ from bot.handlers.activation import activation_router
 from bot.handlers.questions import questions_router
 from bot.handlers.admin import admin_router
 from bot.handlers.help import help_router
-from bot.handlers.utils import gif_router
+from bot.handlers.utils import gif_router, file_router
 from bot.handlers.faq_handler import faq_router
 # from .questions import questions_router, questions_callbacks_router
 from config import BOT_API_KEY
@@ -33,3 +33,4 @@ dp.include_router(admin_router)
 dp.include_router(faq_router)
 dp.include_router(help_router)
 dp.include_router(gif_router)
+# dp.include_router(file_router)

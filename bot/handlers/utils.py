@@ -9,12 +9,33 @@ from typing import Dict, List, Set, Tuple, Optional
 from collections import defaultdict
 import unicodedata
 import string
+from aiogram.filters import Command
+
 
 
 BOT_USERNAME = "AL_VET_UNION_BOT"
 
 gif_router = Router()
+file_router = Router()
 
+@file_router.message(F.document)
+async def handle_document(message: Message):
+    """Обработчик для документов"""
+    document = message.document
+    
+    file_id = document.file_id
+    file_name = document.file_name or "Без названия"
+    file_size = document.file_size or 0
+    
+    # Формируем ответ
+    response = (
+        f"📄 <b>Информация о файле:</b>\n"
+        f"📁 Имя: {html.escape(file_name)}\n"
+        f"📏 Размер: {file_size} байт\n"
+        f"🆔 File ID: <code>{file_id}</code>\n\n"
+    )
+    
+    await message.answer(response, parse_mode="HTML")
 
 @gif_router.message(F.animation)
 async def get_gif_id(message: Message):

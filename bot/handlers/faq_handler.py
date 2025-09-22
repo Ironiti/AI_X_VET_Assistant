@@ -30,9 +30,9 @@ class FAQHandler:
         try:
             self.faq_data = self.load_or_convert_data()
             self.is_loaded = True
-            print(f"✅ FAQ данные загружены: {len(self.faq_data)} вопросов")
+            print(f"✅ Часто задаваемые вопросы загружены: {len(self.faq_data)} вопросов")
         except Exception as e:
-            print(f"❌ Ошибка загрузки FAQ: {e}")
+            print(f"❌ Ошибка загрузки часто задаваемых вопросов: {e}")
             self.faq_data = []
             self.is_loaded = False
     
@@ -43,10 +43,10 @@ class FAQHandler:
                 with open(self.json_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                 faq_list = data.get("faq", [])
-                print(f"✅ Загружено {len(faq_list)} вопросов FAQ из JSON")
+                print(f"✅ Загружено {len(faq_list)} часто задаваемых вопросов из JSON")
                 return faq_list
             except Exception as e:
-                print(f"❌ Ошибка загрузки JSON FAQ: {e}")
+                print(f"❌ Ошибка загрузки JSON часто задаваемых вопросов: {e}")
         
         return self.convert_excel_to_json()
     
@@ -95,7 +95,7 @@ class FAQHandler:
             with open(self.json_path, 'w', encoding='utf-8') as f:
                 json.dump(data_to_save, f, ensure_ascii=False, indent=2)
             
-            print(f"✅ Конвертировано {len(faq_list)} вопросов FAQ из Excel")
+            print(f"✅ Конвертировано {len(faq_list)} часто задаваемых вопросов из Excel")
             return faq_list
             
         except Exception as e:
@@ -112,7 +112,7 @@ class FAQHandler:
         
         for i in range(start_idx, end_idx):
             item = self.faq_data[i]
-            short_question = item['question'][:50] + "..." if len(item['question']) > 50 else item['question']
+            short_question = item['question'][:120] + "..." if len(item['question']) > 120 else item['question']
             keyboard.append([InlineKeyboardButton(
                 text=f"❓ {i+1}. {short_question}",
                 callback_data=f"faq_item_{i}"
@@ -197,7 +197,7 @@ class FAQHandler:
     async def show_faq_page(self, message: Message, page: int, edit_message: Message = None):
         """Показывает страницу со списком FAQ"""
         if not self.faq_data:
-            await message.answer("❌ База знаний FAQ пуста или не загружена")
+            await message.answer("❌ Часто задаваемые вопросы пусты или не загружены")
             return
         
         total_pages = max(1, (len(self.faq_data) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE)
@@ -209,7 +209,7 @@ class FAQHandler:
         start_idx = page * ITEMS_PER_PAGE
         end_idx = min(start_idx + ITEMS_PER_PAGE, len(self.faq_data))
         
-        message_text = "📚 *База знаний FAQ*\n\n"
+        message_text = "📚 *Часто задаваемые вопросы*\n\n"
         message_text += f"*Всего вопросов:* {len(self.faq_data)}\n"
         message_text += f"*Страница {page + 1} из {total_pages}*\n\n"
         message_text += "*Выберите вопрос для просмотра ответа:*"
@@ -262,11 +262,6 @@ class FAQHandler:
         message += f"❓ *Вопрос:* {item['question']}\n\n"
         message += f"✅ *Ответ:* {item['answer']}\n\n"
         
-        if item.get('category'):
-            message += f"🏷️ *Категория:* {item['category']}\n\n"
-        
-        message += f"🔢 *ID:* {item['id']}"
-        
         # Клавиатура для навигации
         keyboard = self.create_faq_item_keyboard(item_index, len(self.faq_data))
         
@@ -306,11 +301,7 @@ class FAQHandler:
         message = f"📚 *Вопрос #{item_index + 1}*\n\n"
         message += f"❓ *Вопрос:* {item['question']}\n\n"
         message += f"✅ *Ответ:* {item['answer']}\n\n"
-        
-        if item.get('category'):
-            message += f"🏷️ *Категория:* {item['category']}\n\n"
-        
-        message += f"🔢 *ID:* {item['id']}"
+                
         
         # Клавиатура для навигации
         keyboard = self.create_faq_item_keyboard(item_index, len(self.faq_data))
@@ -350,7 +341,7 @@ class FAQHandler:
         
         for i in range(start_index, end_index):
             item = results[i]
-            short_question = item['question'][:35] + "..." if len(item['question']) > 35 else item['question']
+            short_question = item['question'][:50] + "..." if len(item['question']) > 50 else item['question']
             keyboard.append([InlineKeyboardButton(
                 text=f"🔍 {i+1}. {short_question}",
                 callback_data=f"faq_search_{i}"
@@ -449,7 +440,7 @@ async def handle_back_to_menu_legacy(message: Message, state: FSMContext):
     await message.answer("Операция отменена.", reply_markup=get_menu_by_role(role))
     return
 
-@faq_router.message(F.text == "📚 База знаний FAQ")
+@faq_router.message(F.text == "📚 Часто задаваемые вопросы")
 async def handle_faq_button(message: Message, state: FSMContext):
     """Обработчик кнопки FAQ из главного меню"""
     # Инициализируем если еще не загружено
@@ -459,7 +450,7 @@ async def handle_faq_button(message: Message, state: FSMContext):
     user_id = message.from_user.id
     
     if not faq_handler.faq_data:
-        await message.answer("❌ База знаний FAQ пуста или не загружена")
+        await message.answer("❌ Часто задаваемые вопросы пусты или не загружены")
         return
     
     # Сохраняем состояние пользователя
@@ -467,7 +458,7 @@ async def handle_faq_button(message: Message, state: FSMContext):
     
     # Показываем меню FAQ
     await message.answer(
-        "📚 *База знаний FAQ*\n\nВыберите действие:",
+        "📚 *Часто задаваемые вопросы*\n\nВыберите действие:",
         parse_mode='Markdown',
         reply_markup=get_faq_search_kb()
     )
@@ -492,21 +483,21 @@ async def handle_faq_show_all(message: Message, state: FSMContext):
         await faq_handler.initialize()
     
     if not faq_handler.faq_data:
-        await message.answer("❌ База знаний FAQ пуста или не загружена")
+        await message.answer("❌ Часто задаваемые вопросы пусты или не загружены")
         return
     
     # Сохраняем состояние пользователя
     faq_handler.user_sessions[user_id] = {"page": 0, "mode": "list"}
     await faq_handler.show_faq_page(message, 0)
 
-@faq_router.message(F.text == "🔙 Назад к FAQ")
+@faq_router.message(F.text == "🔙 Назад к списку вопросов")
 async def handle_faq_back(message: Message, state: FSMContext):
     """Обработчик возврата к меню FAQ"""
     user_id = message.from_user.id
     faq_handler.user_sessions[user_id] = {"mode": "menu"}
     
     await message.answer(
-        "📚 *База знаний FAQ*\n\nВыберите действие:",
+        "📚 *Часто задаваемые вопросы*\n\nВыберите действие:",
         parse_mode='Markdown',
         reply_markup=get_faq_search_kb()
     )
@@ -563,7 +554,7 @@ async def handle_faq_callbacks(callback: CallbackQuery, state: FSMContext):
                 
                 for i in range(start_index, end_index):
                     item = results[i]
-                    short_question = item['question'][:50] + "..." if len(item['question']) > 50 else item['question']
+                    short_question = item['question'][:120] + "..." if len(item['question']) > 120 else item['question']
                     response += f"{i+1}. {short_question}\n"
                 
                 if len(results) > 5:
@@ -635,9 +626,9 @@ async def handle_faq_search(message: Message, state: FSMContext):
     """Обработчик поиска по FAQ"""
     # Пропускаем команды и системные сообщения
     if (message.text.startswith('/') or 
-        message.text in ["📚 База знаний FAQ", "🔬 Задать вопрос ассистенту",
+        message.text in ["📚 Часто задаваемые вопросы", "🔬 Задать вопрос ассистенту",
                         "🔍 Поиск по базе знаний", "📋 Показать все вопросы",
-                        "🔙 Назад к FAQ", "🏠 В главное меню", "🔍 Новый поиск"] or
+                        "🔙 Назад к списку вопросов", "🏠 В главное меню", "🔍 Новый поиск"] or
         message.text.startswith("❌")):
         return
     
@@ -652,7 +643,7 @@ async def handle_faq_search(message: Message, state: FSMContext):
         await faq_handler.initialize()
     
     if not faq_handler.faq_data:
-        await message.answer("❌ База знаний FAQ пуста или не загружена")
+        await message.answer("❌ Часто задаваемые вопросы пусты или не загружены")
         return
     
     query = message.text.strip()
