@@ -158,7 +158,7 @@ def create_paginated_keyboard(
 ) -> Tuple[InlineKeyboardMarkup, int, int]:
     """
     Создает клавиатуру с пагинацией для списка тестов
-    
+
     Returns:
         Tuple[keyboard, total_pages, items_shown]
     """

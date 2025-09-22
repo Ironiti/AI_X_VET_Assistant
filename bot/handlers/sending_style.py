@@ -9,7 +9,8 @@ from datetime import datetime
 from src.database.db_init import db
 from bot.handlers.utils import create_test_link, is_profile_test
 
-BOT_USERNAME = "AL_VET_UNION_BOT"
+BOT_USERNAME = "AI_VET_Assistant_Bot"
+# BOT_USERNAME = "@idontknow12bot"
 
 async def get_test_container_photos(test_data: Dict) -> List[Dict]:
     """Получает все фото контейнеров для теста"""
@@ -180,7 +181,9 @@ def format_test_data(metadata: Dict) -> Dict:
         "storage_temp": metadata.get("storage_temp"),
         "poss_postorder_container": metadata.get("poss_postorder_container"),
         "form_link": metadata.get("form_link"),
+        "form_name": metadata.get("form_name"),
         "additional_information_link": metadata.get("additional_information_link"),
+        "additional_information_name": metadata.get("additional_information_name"),
     }
 
 
@@ -240,15 +243,45 @@ def format_test_info(test_data: Dict) -> str:
         )
     ]
 
-    # Process other fields
     for field, (emoji, display_name) in field_templates.items():
-        if value := test_data.get(field):
-            escaped_value = html.escape(str(value))
+       
+        if field == "form_link" and (value := test_data.get(field)):
+            value = [part.strip() for part in value.split('*I*') if part.strip()]
+
+            if len(value) == 1:
+                # deep_link = f"https://t.me/{BOT_USERNAME}?start=download_{value[0]}"
+
+                message_parts.append(
+                    emoji_manager.format_message(
+                        f"{emoji} <b>{display_name}:</b> <a href='{value[0]}'> {test_data.get('form_name')} </a>\n"
+                    )
+                )
+            else:
+                # deep_link_f = f"https://t.me/{BOT_USERNAME}?start=download_{value[0]}"
+                # deep_link_s = f"https://t.me/{BOT_USERNAME}?start=download_{value[1]}"
+                
+                names = [part.strip() for part in test_data.get('form_name').split('*I*') if part.strip()]
+                message_parts.append(
+                    emoji_manager.format_message(
+                        f'''{emoji} <b>{display_name}:</b> <a href='{value[0]}'> {names[0]} </a> \t <a href='{value[1]}'> {names[1]} </a>\n'''
+                    )
+                )
+        elif field == "additional_information_link" and (value := test_data.get(field)):
+            # deep_link = f"https://t.me/{BOT_USERNAME}?start=download_{value}"
             message_parts.append(
                 emoji_manager.format_message(
-                    f"{emoji} <b>{display_name}:</b> {escaped_value}\n"
+                    f"{emoji} <b>{display_name}:</b> <a href='{value}'> {test_data.get('additional_information_name')} </a>\n"
                 )
             )
+        else:
+            if value := test_data.get(field):
+                escaped_value = html.escape(str(value))
+                message_parts.append(
+                    emoji_manager.format_message(
+                        f"{emoji} <b>{display_name}:</b> {escaped_value}\n"
+                    )
+                )
+    
 
     return "".join(message_parts)
 
