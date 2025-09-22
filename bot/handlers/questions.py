@@ -4,21 +4,17 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
-    InputMediaPhoto,
     ReplyKeyboardRemove
-
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.filters import Command
 from langchain.schema import SystemMessage, HumanMessage, Document
 import asyncio
 import html
-from typing import Optional, Dict, List, Tuple
-from fuzzywuzzy import fuzz
-from typing import Dict, Set, Tuple, List
+from typing import Dict, List, Tuple
 from datetime import datetime
 import re
+
 
 from bot.handlers.ultimate_classifier import ultimate_classifier
 from bot.handlers.query_preprocessing import expand_query_with_abbreviations
@@ -57,6 +53,7 @@ from bot.keyboards import (
     get_search_type_clarification_kb,
     get_confirmation_kb
 )
+from utils.container_utils import normalize_container_name, deduplicate_container_names
 
 
 # LOADING_GIF_ID = (
@@ -154,7 +151,7 @@ def create_paginated_keyboard(
     tests: List[Document],
     current_page: int = 0,
     items_per_page: int = 6,
-    search_id: str = None
+    search_id: str = ""
 ) -> Tuple[InlineKeyboardMarkup, int, int]:
     """
     Создает клавиатуру с пагинацией для списка тестов
@@ -361,7 +358,7 @@ async def handle_show_container_photos_callback(callback: CallbackQuery):
         test_data = format_test_data(doc.metadata)
 
         # Собираем ВСЕ типы контейнеров из ОБОИХ полей
-        container_types_to_check = []
+        raw_container_types = []
         
         # 1. Проверяем primary_container_type (ПРИОРИТЕТ)
         primary_container = str(test_data.get("primary_container_type", "")).strip()
@@ -373,9 +370,9 @@ async def handle_show_container_photos_callback(callback: CallbackQuery):
             # Разбиваем по *I* если есть несколько контейнеров
             if "*I*" in primary_container:
                 parts = [ct.strip() for ct in primary_container.split("*I*")]
-                container_types_to_check.extend(parts)
+                raw_container_types.extend(parts)
             else:
-                container_types_to_check.append(primary_container)
+                raw_container_types.append(primary_container)
         
         # 2. Проверяем обычный container_type
         container_type_raw = str(test_data.get("container_type", "")).strip()
@@ -387,16 +384,12 @@ async def handle_show_container_photos_callback(callback: CallbackQuery):
             # Разбиваем по *I* если есть несколько контейнеров
             if "*I*" in container_type_raw:
                 parts = [ct.strip() for ct in container_type_raw.split("*I*")]
-                # Добавляем только уникальные
-                for ct in parts:
-                    if ct not in container_types_to_check:
-                        container_types_to_check.append(ct)
+                raw_container_types.extend(parts)
             else:
-                if container_type_raw not in container_types_to_check:
-                    container_types_to_check.append(container_type_raw)
+                raw_container_types.append(container_type_raw)
         
-        # Убираем дубликаты, сохраняя порядок
-        container_types_to_check = list(dict.fromkeys(container_types_to_check))
+        # Используем функцию для удаления дубликатов с нормализацией
+        container_types_to_check = deduplicate_container_names(raw_container_types)
         
         # Если нет контейнеров для проверки
         if not container_types_to_check:
@@ -407,13 +400,11 @@ async def handle_show_container_photos_callback(callback: CallbackQuery):
         found_photos = []
         
         for ct in container_types_to_check:
-            # Нормализуем каждый тип (первая буква каждого слова заглавная)
-            ct_normalized = " ".join(word.capitalize() for word in ct.split())
-            
-            photo_data = await db.get_container_photo(ct_normalized)
+            # Контейнер уже нормализован функцией deduplicate_container_names
+            photo_data = await db.get_container_photo(ct)
             if photo_data:
                 found_photos.append({
-                    "container_type": ct_normalized,
+                    "container_type": ct,
                     "file_id": photo_data["file_id"],
                     "description": photo_data.get("description")
                 })
@@ -427,9 +418,11 @@ async def handle_show_container_photos_callback(callback: CallbackQuery):
                 is_last = i == len(found_photos) - 1
                 
                 # Формируем подпись
-                caption = f"📦 Контейнер: {photo_info['container_type']}"
+                container_name = html.escape(photo_info['container_type'])
+                caption = f"📦 Контейнер: {container_name}"
                 if photo_info.get('description'):
-                    caption += f"\n📝 {photo_info['description']}"
+                    description = html.escape(photo_info['description'])
+                    caption += f"\n📝 {description}"
                 
                 if is_last and len(found_photos) > 1:
                     # Последнее фото с кнопкой скрытия всех
@@ -512,31 +505,8 @@ async def handle_show_container_photos_callback(callback: CallbackQuery):
         await callback.message.answer("❌ Ошибка при загрузке фото")
 
 
-@questions_router.callback_query(F.data.startswith("hide_photos:"))
-async def handle_hide_photos_callback(callback: CallbackQuery):
-    """Обработчик для скрытия фото контейнеров"""
-    await callback.answer("Фото скрыты")
-
-    try:
-        # Парсим данные: hide_photos:test_code:photo_msg_ids
-        parts = callback.data.split(":", 2)
-        photo_msg_ids = [int(msg_id) for msg_id in parts[2].split(",")]
-
-        # Удаляем все сообщения с фото (включая последнее с кнопкой)
-        for msg_id in photo_msg_ids:
-            try:
-                await callback.bot.delete_message(
-                    chat_id=callback.message.chat.id, message_id=msg_id
-                )
-            except:
-                pass
-
-    except Exception as e:
-        print(f"[ERROR] Failed to hide photos: {e}")
-        await callback.answer("❌ Ошибка при скрытии фото", show_alert=True)
 
 
-# Добавляем обработчик для одиночного фото
 @questions_router.callback_query(F.data.startswith("hide_single:"))
 async def handle_hide_single_photo(callback: CallbackQuery):
     """Обработчик для скрытия одиночного фото с кнопкой"""
@@ -547,35 +517,6 @@ async def handle_hide_single_photo(callback: CallbackQuery):
         await callback.message.delete()
     except Exception as e:
         print(f"[ERROR] Failed to hide single photo: {e}")
-
-
-@questions_router.callback_query(F.data.startswith("hide_photos:"))
-async def handle_hide_photos_callback(callback: CallbackQuery):
-    """Обработчик для скрытия фото контейнеров"""
-    await callback.answer("Фото скрыты")  # Только всплывающее уведомление
-
-    try:
-        # Парсим данные: hide_photos:test_code:photo_msg_ids
-        parts = callback.data.split(":", 2)
-        photo_msg_ids = [int(msg_id) for msg_id in parts[2].split(",")]
-
-        for msg_id in photo_msg_ids:
-            try:
-                await callback.bot.delete_message(
-                    chat_id=callback.message.chat.id, message_id=msg_id
-                )
-            except:
-                pass
-
-        try:
-            await callback.message.delete()
-        except:
-            pass
-
-    except Exception as e:
-        print(f"[ERROR] Failed to hide photos: {e}")
-        # Ошибку показываем только во всплывающем уведомлении
-        await callback.answer("❌ Ошибка при скрытии фото", show_alert=True)
 
 
 @questions_router.callback_query(F.data == "close_keyboard")
@@ -1128,6 +1069,25 @@ async def _process_confident_query(message: Message, state: FSMContext, query_ty
     user_id = message.from_user.id
     expanded_query = expand_query_with_abbreviations(text)
     
+    # Дополнительная проверка для общих вопросов
+    general_question_keywords = [
+        'как', 'что', 'где', 'когда', 'почему', 'зачем', 'сколько',
+        'хранить', 'хранение', 'транспортировка', 'подготовка', 'правила',
+        'можно ли', 'нужно ли', 'должен ли', 'следует ли',
+        'температура', 'время', 'срок', 'условия',
+        'рекомендации', 'советы', 'инструкция'
+    ]
+    
+    # Если запрос содержит вопросительные слова и не содержит конкретных кодов тестов
+    text_lower = text.lower()
+    has_general_keywords = any(keyword in text_lower for keyword in general_question_keywords)
+    has_test_code = bool(re.search(r'\b[AА][NН]\d+\b|\b\d{2,4}[A-ZА-Я]+\b', text, re.IGNORECASE))
+    
+    # Переопределяем тип запроса для общих вопросов
+    if has_general_keywords and not has_test_code and query_type in ["name", "code"]:
+        query_type = "general"
+        print(f"[CLASSIFICATION] Overriding to 'general' for question: {text}")
+    
     # Дополнительная проверка для профилей
     profile_keywords = ['обс', 'профили', 'профиль', 'комплексы', 'комплекс', 'панели', 'панель']
     should_show_profiles = any(keyword in text.lower() for keyword in profile_keywords)
@@ -1138,7 +1098,7 @@ async def _process_confident_query(message: Message, state: FSMContext, query_ty
     
     if any(keyword in text.lower() for keyword in profile_keywords):
         query_type = "profile"
-        print(f"[PROFILE DETECTED] Changed query_type to 'profile' for text: {text}")  # ДОБАВЬТЕ ЭТО
+        print(f"[PROFILE DETECTED] Changed query_type to 'profile' for text: {text}")
 
     if query_type == "code":
         await state.set_state(QuestionStates.waiting_for_code)
@@ -1147,11 +1107,9 @@ async def _process_confident_query(message: Message, state: FSMContext, query_ty
         await state.set_state(QuestionStates.waiting_for_name)
         await handle_name_search_with_text(message, state, expanded_query)
     elif query_type == "profile":
-        # ДОБАВЬТЕ ДИАГНОСТИКУ
         print(f"[PROFILE BRANCH] Setting show_profiles=True for query: {text}")
         await state.update_data(show_profiles=True)
         
-        # Проверяем, что состояние сохранилось
         check_data = await state.get_data()
         print(f"[PROFILE BRANCH] State after update: show_profiles={check_data.get('show_profiles')}")
         
@@ -1339,6 +1297,25 @@ async def handle_dialog(message: Message, state: FSMContext):
     expanded_query = expand_query_with_abbreviations(text)
     # Используем классификатор для определения типа нового запроса
     query_type, confidence, metadata = await ultimate_classifier.classify_with_certainty(expanded_query)
+
+    # Дополнительная проверка для общих вопросов в диалоге
+    general_question_keywords = [
+        'как', 'что', 'где', 'когда', 'почему', 'зачем', 'сколько',
+        'хранить', 'хранение', 'транспортировка', 'подготовка', 'правила',
+        'можно ли', 'нужно ли', 'должен ли', 'следует ли',
+        'температура', 'время', 'срок', 'условия',
+        'рекомендации', 'советы', 'инструкция'
+    ]
+    
+    text_lower = text.lower()
+    has_general_keywords = any(keyword in text_lower for keyword in general_question_keywords)
+    has_test_code = bool(re.search(r'\b[AА][NН]\d+\b|\b\d{2,4}[A-ZА-Я]+\b', text, re.IGNORECASE))
+    
+    # Если это общий вопрос без кода теста, обрабатываем как контекстный вопрос
+    if has_general_keywords and not has_test_code and query_type in ["name", "code"]:
+        print(f"[DIALOG] Treating as contextual question: {text}")
+        await _handle_contextual_question(message, state, expanded_query, test_data)
+        return
 
     # Проверяем, нужен ли новый поиск (не общий вопрос о текущем тесте)
     needs_new_search = await _should_initiate_new_search(expanded_query, test_data, query_type, confidence)
@@ -1616,18 +1593,36 @@ async def send_test_info_with_photo(
 ):
     """Отправляет информацию о тесте с кнопкой для показа фото контейнеров"""
     
-    has_containers = False
+    # Собираем все типы контейнеров для проверки
+    raw_container_types = []
     
     # Проверяем primary_container_type
     primary_container = str(test_data.get("primary_container_type", "")).strip()
-    if primary_container and primary_container.lower() not in ["не указан", "нет", "-", ""]:
-        has_containers = True
+    if primary_container and primary_container.lower() not in ["не указан", "нет", "-", "", "none", "null"]:
+        primary_container = primary_container.replace('"', "").replace("\n", " ")
+        primary_container = " ".join(primary_container.split())
+        
+        if "*I*" in primary_container:
+            parts = [ct.strip() for ct in primary_container.split("*I*")]
+            raw_container_types.extend(parts)
+        else:
+            raw_container_types.append(primary_container)
     
-    # Если primary нет, проверяем обычный container_type
-    if not has_containers:
-        container_type_raw = str(test_data.get("container_type", "")).strip()
-        if container_type_raw and container_type_raw.lower() not in ["не указан", "нет", "-", ""]:
-            has_containers = True
+    # Проверяем обычный container_type
+    container_type_raw = str(test_data.get("container_type", "")).strip()
+    if container_type_raw and container_type_raw.lower() not in ["не указан", "нет", "-", "", "none", "null"]:
+        container_type_raw = container_type_raw.replace('"', "").replace("\n", " ")
+        container_type_raw = " ".join(container_type_raw.split())
+        
+        if "*I*" in container_type_raw:
+            parts = [ct.strip() for ct in container_type_raw.split("*I*")]
+            raw_container_types.extend(parts)
+        else:
+            raw_container_types.append(container_type_raw)
+    
+    # Дедуплицируем контейнеры с нормализацией
+    unique_containers = deduplicate_container_names(raw_container_types)
+    has_containers = len(unique_containers) > 0
     
     keyboard = None
     
@@ -2258,24 +2253,9 @@ async def _handle_name_search_internal(message: Message, state: FSMContext, sear
                 if d.metadata.get("test_code") != test_data["test_code"]
             ]
 
-            # Если есть похожие тесты, показываем их с пагинацией
-            if len(similar_tests) > 5:
-                # Генерируем ID для похожих тестов
-                import hashlib
-                from datetime import datetime
-                
-                similar_search_id = hashlib.md5(
-                    f"{user_id}_{datetime.now().isoformat()}_similar_{test_data['test_code']}".encode()
-                ).hexdigest()[:8]
-                
-                # Сохраняем похожие тесты
-                similar_docs = [doc for doc, _ in similar_tests]
-                await state.update_data(**{f"search_results_{similar_search_id}": similar_docs})
-                
+            # Показываем похожие тесты (максимум 5)
+            if similar_tests:
                 response += format_similar_tests_with_links(similar_tests[:5])
-                response += f"\n\n<i>Всего найдено {len(similar_tests)} похожих тестов</i>"
-            elif similar_tests:
-                response += format_similar_tests_with_links(similar_tests)
 
             # Отправляем с фото
             await send_test_info_with_photo(message, test_data, response)
@@ -2529,26 +2509,9 @@ async def _handle_code_search_internal(message: Message, state: FSMContext, sear
             if d.metadata.get("test_code") != test_data["test_code"]
         ]
 
-        # Если похожих тестов много - готовим пагинацию
-        if len(similar_tests) > 5:
-            import hashlib
-            from datetime import datetime
-            
-            similar_search_id = hashlib.md5(
-                f"{user_id}_{datetime.now().isoformat()}_related_{test_data['test_code']}".encode()
-            ).hexdigest()[:8]
-            
-            similar_docs = [doc for doc, _ in similar_tests]
-            await state.update_data(**{f"search_results_{similar_search_id}": similar_docs})
-            
-            # Показываем первые 5 в основном сообщении
+        # Показываем похожие тесты (максимум 5)
+        if similar_tests:
             response += format_similar_tests_with_links(similar_tests[:5])
-            response += f"\n\n<i>Всего найдено {len(similar_tests)} похожих тестов</i>"
-            
-            # Можно добавить кнопку "Показать все похожие"
-            # Это будет отдельное сообщение с пагинацией
-        elif similar_tests:
-            response += format_similar_tests_with_links(similar_tests)
 
         # Отправляем информацию с фото
         await send_test_info_with_photo(message, test_data, response)
@@ -2561,22 +2524,6 @@ async def _handle_code_search_internal(message: Message, state: FSMContext, sear
                 test_code_2=test_data["test_code"],
             )
 
-        # Если есть много похожих тестов, показываем кнопку для их просмотра
-        if len(similar_tests) > 5:
-            keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text=f"📋 Показать все похожие тесты ({len(similar_tests)})",
-                            callback_data=f"show_all_similar:{similar_search_id}"
-                        )
-                    ]
-                ]
-            )
-            await message.answer(
-                "Найдено больше похожих тестов:",
-                reply_markup=keyboard
-            )
 
         # Обновляем состояние
         await state.set_state(QuestionStates.in_dialog)
@@ -2718,3 +2665,4 @@ __all__ = [
     "create_test_link",
     "normalize_test_code",
 ]
+

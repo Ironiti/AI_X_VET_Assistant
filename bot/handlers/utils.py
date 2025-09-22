@@ -11,8 +11,6 @@ import unicodedata
 import string
 from aiogram.filters import Command
 
-
-
 BOT_USERNAME = "AL_VET_UNION_BOT"
 
 gif_router = Router()
@@ -266,6 +264,87 @@ def transliterate_abbreviation(abbr: str) -> Optional[str]:
     
     return transliterated
 
+def normalize_container_name(container_name: str) -> str:
+    """
+    Нормализует название контейнера для устранения дубликатов.
+    
+    Args:
+        container_name: Исходное название контейнера
+        
+    Returns:
+        Нормализованное название контейнера
+    """
+    if not container_name or not isinstance(container_name, str):
+        return ""
+    
+    # Убираем лишние пробелы и переводы строк
+    normalized = " ".join(container_name.strip().split())
+    
+    # Убираем кавычки
+    normalized = normalized.replace('"', "").replace("'", "")
+    
+    # Приводим к нижнему регистру для сравнения
+    normalized_lower = normalized.lower()
+    
+    # Нормализуем общие вариации
+    # Заменяем различные варианты написания цветов
+    color_variations = {
+        r'\b(с\s+)?сиреневой\b': 'с сиреневой',
+        r'\b(с\s+)?фиолетовой\b': 'с сиреневой',  # фиолетовый = сиреневый
+        r'\b(с\s+)?красной\b': 'с красной',
+        r'\b(с\s+)?синей\b': 'с синей',
+        r'\b(с\s+)?зеленой\b': 'с зеленой',
+        r'\b(с\s+)?желтой\b': 'с желтой',
+        r'\b(с\s+)?белой\b': 'с белой',
+        r'\b(с\s+)?серой\b': 'с серой',
+    }
+    
+    for pattern, replacement in color_variations.items():
+        normalized_lower = re.sub(pattern, replacement, normalized_lower, flags=re.IGNORECASE)
+    
+    # Нормализуем варианты написания "крышка/крышкой"
+    normalized_lower = re.sub(r'\bкрышк[аой]\b', 'крышкой', normalized_lower)
+    
+    # Нормализуем "пробирка"
+    normalized_lower = re.sub(r'\bпробирк[аеи]\b', 'пробирка', normalized_lower)
+    
+    # Убираем лишние пробелы после нормализации
+    normalized_lower = " ".join(normalized_lower.split())
+    
+    # Возвращаем с правильным регистром (первая буква каждого слова заглавная)
+    return " ".join(word.capitalize() for word in normalized_lower.split())
+
+
+def deduplicate_container_names(container_names: List[str]) -> List[str]:
+    """
+    Удаляет дубликаты из списка названий контейнеров.
+    
+    Args:
+        container_names: Список названий контейнеров
+        
+    Returns:
+        Список уникальных названий контейнеров
+    """
+    if not container_names:
+        return []
+    
+    seen_normalized = set()
+    unique_containers = []
+    
+    for container in container_names:
+        if not container or not isinstance(container, str):
+            continue
+            
+        # Нормализуем для сравнения
+        normalized = normalize_container_name(container)
+        normalized_key = normalized.lower()
+        
+        # Если такого нормализованного названия еще не было
+        if normalized_key not in seen_normalized and normalized_key.strip():
+            seen_normalized.add(normalized_key)
+            unique_containers.append(normalized)
+    
+    return unique_containers
 
 def is_profile_test(test_code: str) -> bool:
     """Проверяет, является ли тест профилем (заканчивается на ОБС)"""
