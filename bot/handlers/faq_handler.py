@@ -12,7 +12,7 @@ from src.database.db_init import db
 from bot.keyboards import get_back_to_menu_kb, get_menu_by_role, get_faq_search_kb, get_faq_back_kb
 
 ITEMS_PER_PAGE = 10
-EXCEL_FILE_PATH = "data/processed/1_FAQ BOT VET UNION_драфт.xlsx"
+EXCEL_FILE_PATH = "data/processed/data_with_abbreviations_new.xlsx"
 JSON_DATA_FILE = "data/faq_data.json"
 
 faq_router = Router()

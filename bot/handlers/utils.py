@@ -402,3 +402,27 @@ def filter_results_by_type(results: List[Tuple], show_profiles: bool = False) ->
     
     print(f"[FILTER DEBUG] Output: {len(filtered)} results after filtering")
     return filtered
+
+def format_i_pattern_numbered(text: str, indent: str = "\t\t") -> str:
+    """
+    Форматирует текст с паттерном *I* с переносом строки ДО первого элемента.
+    """
+    if not text:
+        return ""
+    
+    # Разделяем по *I*
+    parts = [part.strip() for part in text.split('*I*') if part.strip()]
+    
+    if not parts:
+        return ""
+    
+    if len(parts) == 1:
+        # Если только одна часть - с переносом и номером
+        return f"\n{indent}1. {parts[0]}"
+    
+    # Форматируем с переносом ДО первого элемента
+    formatted_lines = []
+    for i, part in enumerate(parts, 1):
+        formatted_lines.append(f"{indent}{i}. {part}")
+    
+    return '\n' + '\n'.join(formatted_lines)

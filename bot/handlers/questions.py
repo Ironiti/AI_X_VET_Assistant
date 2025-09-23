@@ -53,7 +53,7 @@ from bot.keyboards import (
     get_search_type_clarification_kb,
     get_confirmation_kb
 )
-from utils.container_utils import normalize_container_name, deduplicate_container_names
+from bot.handlers.utils import normalize_container_name, deduplicate_container_names
 
 
 # LOADING_GIF_ID = (

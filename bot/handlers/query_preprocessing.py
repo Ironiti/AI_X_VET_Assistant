@@ -365,7 +365,7 @@ def expand_query_with_abbreviations(query: str) -> str:
         return query
     
     try:
-        excel_file_path = 'data/processed/2_5307599603758040061.xlsx'
+        excel_file_path = 'data/processed/data_with_abbreviations_new.xlsx'
         colloquial_to_official, abbr_to_official = load_disease_dictionary(excel_file_path)
         
         # Токенизация

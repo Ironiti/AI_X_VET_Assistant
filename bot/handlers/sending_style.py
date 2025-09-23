@@ -7,7 +7,7 @@ import re
 from typing import Dict, List, Tuple
 from datetime import datetime
 from src.database.db_init import db
-from bot.handlers.utils import create_test_link, is_profile_test
+from bot.handlers.utils import create_test_link, is_profile_test, format_i_pattern_numbered
 
 BOT_USERNAME = "AI_VET_Assistant_Bot"
 # BOT_USERNAME = "@idontknow12bot"
@@ -174,9 +174,11 @@ def get_user_first_name(user):
 
     return "друг"
 
+['primary_container_type', 'container_type', 'container_number']
 
 def format_test_data(metadata: Dict) -> Dict:
     """Extract and format test metadata into standardized dictionary."""
+
     return {
         "type": metadata.get("type"),
         "test_code": metadata.get("test_code"),
@@ -185,11 +187,14 @@ def format_test_data(metadata: Dict) -> Dict:
         "important_information": metadata.get("important_information"),
         "patient_preparation": metadata.get("patient_preparation"),
         "biomaterial_type": metadata.get("biomaterial_type"),
-        "primary_container_type": metadata.get("primary_container_type"),
-        "container_type": metadata.get("container_type"),
-        "container_number": metadata.get("container_number"),
-        "preanalytics": re.sub(
-            r"\s*(\d+\.)\s*", r"\n\t\t\1 ", metadata.get("preanalytics")
+        "primary_container_type": format_i_pattern_numbered(metadata.get("primary_container_type")),
+        "container_type": format_i_pattern_numbered(metadata.get("container_type")),
+        "container_number": format_i_pattern_numbered(metadata.get("container_number")),
+        "preanalytics": '\n' + re.sub(
+            r'\s*\*I\*\s*', ' ', 
+            re.sub(
+                r"\s*(\d+\.)\s*", r"\n\t\t\1 ", metadata.get("preanalytics")
+            )
         ),
         "storage_temp": metadata.get("storage_temp"),
         "poss_postorder_container": metadata.get("poss_postorder_container"),
@@ -321,6 +326,7 @@ class CustomEmojiManager:
         self.emoji_ids = {
             "test_name": "5328315072840234225",
             "department": "5328315072840234225",
+            "important_information": "5328315072840234225",
             "patient_preparation": "5328176289562004639",
             "biomaterial_type": "5327846616462291750",
             "primary_container_type": "5328063361986887821",
