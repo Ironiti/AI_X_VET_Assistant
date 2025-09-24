@@ -10,9 +10,11 @@ from bot.keyboards import (
     get_region_kb, get_country_kb
 )
 from bot.handlers.questions import (
-    smart_test_search, format_test_data, format_test_info,
-    fuzzy_test_search, format_similar_tests_with_links,
+    smart_test_search, 
+    format_test_data, format_test_info,
+    fuzzy_test_search, 
     QuestionStates, get_dialog_kb, send_test_info_with_photo,
+    # format_similar_tests_with_links,
 )
 from bot.handlers.utils import decode_test_code_from_url 
 from src.data_vectorization import DataProcessor
@@ -152,12 +154,12 @@ async def process_test_request(message: Message, state: FSMContext, test_code: s
             # Формируем ответ
             response = format_test_info(test_data)
             
-            # Находим похожие тесты
-            similar_tests = await fuzzy_test_search(processor, test_data['test_code'], threshold=40)
-            similar_tests = [(d, s) for d, s in similar_tests if d.metadata.get('test_code') != test_data['test_code']]
+            # # Находим похожие тесты
+            # similar_tests = await fuzzy_test_search(processor, test_data['test_code'], threshold=40)
+            # similar_tests = [(d, s) for d, s in similar_tests if d.metadata.get('test_code') != test_data['test_code']]
             
-            if similar_tests:
-                response += format_similar_tests_with_links(similar_tests[:5])
+            # if similar_tests:
+            #     response += format_similar_tests_with_links(similar_tests[:5])
             
             # Отправляем с фото
             await send_test_info_with_photo(message, test_data, response)

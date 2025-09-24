@@ -67,49 +67,49 @@ async def get_test_container_photos(test_data: Dict) -> List[Dict]:
     return photos
 
 
-def format_similar_tests_text(
-    similar_tests: List[Tuple[Document, float]], max_display: int = 5
-) -> str:
-    """Форматирует текст с информацией о похожих тестах."""
-    if not similar_tests:
-        return ""
+# def format_similar_tests_text(
+#     similar_tests: List[Tuple[Document, float]], max_display: int = 5
+# ) -> str:
+#     """Форматирует текст с информацией о похожих тестах."""
+#     if not similar_tests:
+#         return ""
 
-    text = "\n<b>📋 Похожие тесты:</b>\n"
-    for doc, score in similar_tests[:max_display]:
-        test_code = doc.metadata.get("test_code", "")
-        test_name = doc.metadata.get("test_name", "")
-        # Сокращаем название если слишком длинное
-        if len(test_name) > 50:
-            test_name = test_name[:47] + "..."
-        text += f"• <code>{test_code}</code> - {test_name}\n"
+#     text = "\n<b>📋 Похожие тесты:</b>\n"
+#     for doc, score in similar_tests[:max_display]:
+#         test_code = doc.metadata.get("test_code", "")
+#         test_name = doc.metadata.get("test_name", "")
+#         # Сокращаем название если слишком длинное
+#         if len(test_name) > 50:
+#             test_name = test_name[:47] + "..."
+#         text += f"• <code>{test_code}</code> - {test_name}\n"
 
-    if len(similar_tests) > max_display:
-        text += f"\n<i>Показаны {max_display} из {len(similar_tests)} найденных</i>"
+#     if len(similar_tests) > max_display:
+#         text += f"\n<i>Показаны {max_display} из {len(similar_tests)} найденных</i>"
 
-    return text
+#     return text
 
 
-def format_similar_tests_with_links(
-    similar_tests: List[Tuple[Document, float]], 
-    max_display: int = 5
-) -> str:
-    """Форматирует список похожих тестов с кликабельными ссылками"""
-    if not similar_tests:
-        return ""
+# def format_similar_tests_with_links(
+#     similar_tests: List[Tuple[Document, float]], 
+#     max_display: int = 5
+# ) -> str:
+#     """Форматирует список похожих тестов с кликабельными ссылками"""
+#     if not similar_tests:
+#         return ""
     
-    response = "\n\n🔍 <b>Похожие тесты:</b>\n"
+#     response = "\n\n🔍 <b>Похожие тесты:</b>\n"
     
-    for i, (doc, score) in enumerate(similar_tests[:max_display], 1):
-        test_code = doc.metadata.get("test_code", "")
-        test_name = html.escape(doc.metadata.get("test_name", ""))[:50]
+#     for i, (doc, score) in enumerate(similar_tests[:max_display], 1):
+#         test_code = doc.metadata.get("test_code", "")
+#         test_name = html.escape(doc.metadata.get("test_name", ""))[:50]
         
-        # Добавляем метку для профилей
-        type_label = "🔬" if is_profile_test(test_code) else "🧪"
+#         # Добавляем метку для профилей
+#         type_label = "🔬" if is_profile_test(test_code) else "🧪"
         
-        link = create_test_link(test_code)
-        response += f"{i}. {type_label} <a href='{link}'>{test_code}</a> - {test_name}...\n"
+#         link = create_test_link(test_code)
+#         response += f"{i}. {type_label} <a href='{link}'>{test_code}</a> - {test_name}...\n"
     
-    return response
+#     return response
 
 
 def get_time_based_farewell(user_name: str = None):

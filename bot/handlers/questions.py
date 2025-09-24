@@ -38,7 +38,7 @@ from bot.handlers.sending_style import (
     format_test_info,
     get_user_first_name,
     get_time_based_farewell,
-    format_similar_tests_with_links
+    # format_similar_tests_with_links
 )
 from bot.handlers.score_test import (
     select_best_match,
@@ -2239,23 +2239,23 @@ async def _handle_name_search_internal(message: Message, state: FSMContext, sear
 
             response = type_info + format_test_info(test_data)
 
-            # Добавляем похожие тесты того же типа
-            similar_tests = await fuzzy_test_search(
-                processor, test_data["test_code"], threshold=40
-            )
+            # # Добавляем похожие тесты того же типа
+            # similar_tests = await fuzzy_test_search(
+            #     processor, test_data["test_code"], threshold=40
+            # )
 
-            # Фильтруем похожие по типу
-            is_profile = is_profile_test(test_data["test_code"])
-            similar_tests = filter_results_by_type(similar_tests, is_profile)
-            similar_tests = [
-                (d, s)
-                for d, s in similar_tests
-                if d.metadata.get("test_code") != test_data["test_code"]
-            ]
+            # # Фильтруем похожие по типу
+            # is_profile = is_profile_test(test_data["test_code"])
+            # similar_tests = filter_results_by_type(similar_tests, is_profile)
+            # similar_tests = [
+            #     (d, s)
+            #     for d, s in similar_tests
+            #     if d.metadata.get("test_code") != test_data["test_code"]
+            # ]
 
-            # Показываем похожие тесты (максимум 5)
-            if similar_tests:
-                response += format_similar_tests_with_links(similar_tests[:5])
+            # # Показываем похожие тесты (максимум 5)
+            # if similar_tests:
+            #     response += format_similar_tests_with_links(similar_tests[:5])
 
             # Отправляем с фото
             await send_test_info_with_photo(message, test_data, response)
@@ -2495,23 +2495,23 @@ async def _handle_code_search_internal(message: Message, state: FSMContext, sear
         await safe_delete_message(loading_msg)
         await safe_delete_message(gif_msg)
 
-        # Добавляем похожие тесты
-        similar_tests = await fuzzy_test_search(
-            processor, test_data["test_code"], threshold=40
-        )
+        # # Добавляем похожие тесты
+        # similar_tests = await fuzzy_test_search(
+        #     processor, test_data["test_code"], threshold=40
+        # )
 
-        # Фильтруем по типу
-        is_profile = is_profile_test(test_data["test_code"])
-        similar_tests = filter_results_by_type(similar_tests, is_profile)
-        similar_tests = [
-            (d, s)
-            for d, s in similar_tests
-            if d.metadata.get("test_code") != test_data["test_code"]
-        ]
+        # # Фильтруем по типу
+        # is_profile = is_profile_test(test_data["test_code"])
+        # similar_tests = filter_results_by_type(similar_tests, is_profile)
+        # similar_tests = [
+        #     (d, s)
+        #     for d, s in similar_tests
+        #     if d.metadata.get("test_code") != test_data["test_code"]
+        # ]
 
-        # Показываем похожие тесты (максимум 5)
-        if similar_tests:
-            response += format_similar_tests_with_links(similar_tests[:5])
+        # # Показываем похожие тесты (максимум 5)
+        # if similar_tests:
+        #     response += format_similar_tests_with_links(similar_tests[:5])
 
         # Отправляем информацию с фото
         await send_test_info_with_photo(message, test_data, response)
@@ -2659,7 +2659,7 @@ __all__ = [
     "smart_test_search",
     "format_test_data",
     "format_test_info",
-    "format_similar_tests_with_links",
+    # "format_similar_tests_with_links",
     "QuestionStates",
     "get_dialog_kb",
     "create_test_link",
