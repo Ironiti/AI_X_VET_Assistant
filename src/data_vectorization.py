@@ -9,6 +9,7 @@ from langchain_community.vectorstores import Chroma
 from langchain.schema import Document
 
 from models.vector_models_init import embedding_model
+from bot.handlers.query_processing.query_preprocessing import expand_query_with_abbreviations
 
 project_root = Path(__file__).resolve().parents[1]
 if str(project_root) not in sys.path:
@@ -70,13 +71,13 @@ class DataProcessor:
         )
         return self.vector_store
 
-    def search_test(self, query: str, top_k: int = 3):
-        if self.vector_store is None:
-            if not self.load_vector_store():
-                self.create_vector_store()
-        print(f'[INFO] Searching for: "{query}"')
-        results = self.vector_store.similarity_search_with_score(query, k=top_k)
-        return results
+    # def search_test(self, query: str, top_k: int = 3):
+    #     if self.vector_store is None:
+    #         if not self.load_vector_store():
+    #             self.create_vector_store()
+    #     print(f'[INFO] Searching for: "{query}"')
+    #     results = self.vector_store.similarity_search_with_score(expand_query_with_abbreviations(query), k=top_k)
+    #     return results
     
     def get_metadata_columns(self) -> list:
         """Get list of metadata columns stored in vector database."""
@@ -105,6 +106,7 @@ class DataProcessor:
         Returns:
             List of (Document, score) tuples
         """
+        query = expand_query_with_abbreviations(query)
         if self.vector_store is None:
             self.load_vector_store()
         

@@ -17,7 +17,7 @@ import re
 
 
 from bot.handlers.ultimate_classifier import ultimate_classifier
-from bot.handlers.query_preprocessing import expand_query_with_abbreviations
+from bot.handlers.query_processing.query_preprocessing import expand_query_with_abbreviations
 
 from src.database.db_init import db
 from src.data_vectorization import DataProcessor
@@ -1036,7 +1036,7 @@ async def handle_universal_search(message: Message, state: FSMContext):
         await handle_new_question_in_dialog(message, state)
         return
 
-    expanded_query = expand_query_with_abbreviations(text)
+    expanded_query = text #expand_query_with_abbreviations(text)
     # Проверяем, не кнопка ли это возврата
     if text == "🔙 Вернуться в главное меню" or text == "❌ Завершить диалог":
         return
@@ -1065,9 +1065,10 @@ async def handle_universal_search(message: Message, state: FSMContext):
     if confidence < 0.7:
         await _clarify_with_llm(message, state, expanded_query, query_type, confidence)
 
+
 async def _process_confident_query(message: Message, state: FSMContext, query_type: str, text: str, metadata: Dict):
     user_id = message.from_user.id
-    expanded_query = expand_query_with_abbreviations(text)
+    expanded_query = text # expand_query_with_abbreviations(text)
     
     # Дополнительная проверка для общих вопросов
     general_question_keywords = [
@@ -1083,10 +1084,14 @@ async def _process_confident_query(message: Message, state: FSMContext, query_ty
     has_general_keywords = any(keyword in text_lower for keyword in general_question_keywords)
     has_test_code = bool(re.search(r'\b[AА][NН]\d+\b|\b\d{2,4}[A-ZА-Я]+\b', text, re.IGNORECASE))
     
-    # Переопределяем тип запроса для общих вопросов
-    if has_general_keywords and not has_test_code and query_type in ["name", "code"]:
-        query_type = "general"
+    # Переопределяем тип запроса для общих вопросов - ДОБАВЬТЕ RETURN
+    if has_general_keywords and not has_test_code:
         print(f"[CLASSIFICATION] Overriding to 'general' for question: {text}")
+        await db.add_request_stat(
+            user_id=user_id, request_type="question", request_text=text
+        )
+        await handle_general_question(message, state, expanded_query)
+        return 
     
     # Дополнительная проверка для профилей
     profile_keywords = ['обс', 'профили', 'профиль', 'комплексы', 'комплекс', 'панели', 'панель']
@@ -1100,6 +1105,7 @@ async def _process_confident_query(message: Message, state: FSMContext, query_ty
         query_type = "profile"
         print(f"[PROFILE DETECTED] Changed query_type to 'profile' for text: {text}")
 
+    # ОСНОВНАЯ ЛОГИКА МАРШРУТИЗАЦИИ
     if query_type == "code":
         await state.set_state(QuestionStates.waiting_for_code)
         await handle_code_search_with_text(message, state, expanded_query)
@@ -1109,10 +1115,6 @@ async def _process_confident_query(message: Message, state: FSMContext, query_ty
     elif query_type == "profile":
         print(f"[PROFILE BRANCH] Setting show_profiles=True for query: {text}")
         await state.update_data(show_profiles=True)
-        
-        check_data = await state.get_data()
-        print(f"[PROFILE BRANCH] State after update: show_profiles={check_data.get('show_profiles')}")
-        
         await state.set_state(QuestionStates.waiting_for_name)
         await handle_name_search_with_text(message, state, expanded_query)
     else:  # general
@@ -1120,6 +1122,7 @@ async def _process_confident_query(message: Message, state: FSMContext, query_ty
             user_id=user_id, request_type="question", request_text=text
         )
         await handle_general_question(message, state, expanded_query)
+
 
 async def _ask_confirmation(message: Message, state: FSMContext, query_type: str, text: str, confidence: float):
     """Запрос подтверждения типа поиска"""
@@ -1170,7 +1173,7 @@ async def handle_search_confirmation(message: Message, state: FSMContext):
         # Пользователь подтвердил - обрабатываем запрос
         query_type = classification.get("type", "general")
         original_query = classification.get("original_query", "")
-        expanded_query = expand_query_with_abbreviations(original_query)
+        expanded_query = original_query #expand_query_with_abbreviations(original_query)
 
         # Убираем клавиатуру подтверждения
         await message.answer("✅ Принято! Обрабатываю запрос...", reply_markup=get_dialog_kb())
@@ -1236,7 +1239,7 @@ async def handle_search_clarification(message: Message, state: FSMContext):
     text = message.text.strip()
     data = await state.get_data()
     original_query = data.get("query_classification", {}).get("original_query", "")
-    expanded_query = expand_query_with_abbreviations(original_query)
+    expanded_query = original_query #expand_query_with_abbreviations(original_query)
 
 
     if text == "🔢 Поиск по коду теста":
@@ -1294,7 +1297,7 @@ async def handle_dialog(message: Message, state: FSMContext):
     data = await state.get_data()
     test_data = data.get("current_test")
 
-    expanded_query = expand_query_with_abbreviations(text)
+    expanded_query = text #expand_query_with_abbreviations(text)
     # Используем классификатор для определения типа нового запроса
     query_type, confidence, metadata = await ultimate_classifier.classify_with_certainty(expanded_query)
 
@@ -1352,7 +1355,7 @@ async def _should_initiate_new_search(text: str, current_test_data: Dict, query_
         return True
 
     # Если запрос явно указывает на новый поиск
-    if query_type != "general" and confidence > 0.7:
+    if query_type != "general" and confidence > 0.8:
         return True
 
     # Эвристики для определения нового поиска
@@ -2067,7 +2070,7 @@ async def _handle_name_search_internal(message: Message, state: FSMContext, sear
     print(f"[NAME SEARCH] show_profiles={show_profiles}, original_query={original_query}")
     # Используем переданный текст или текст из сообщения
     text = search_text if search_text else message.text.strip()
-    text = expand_query_with_abbreviations(text)
+    text = text #expand_query_with_abbreviations(text)
 
     # Сохраняем статистику с оригинальным запросом
     await db.add_request_stat(
@@ -2128,7 +2131,7 @@ async def _handle_name_search_internal(message: Message, state: FSMContext, sear
                 reply_markup=get_back_to_menu_kb(),
                 parse_mode="HTML"
             )
-            await state.set_state(QuestionStates.waiting_for_search_type)
+            await state.set_state(QuestionStates.in_dialog)
             await state.update_data(show_profiles=False, search_text=None)
             return
 
@@ -2299,7 +2302,7 @@ async def _handle_name_search_internal(message: Message, state: FSMContext, sear
             else "⚠️ Ошибка поиска. Попробуйте позже."
         )
         await message.answer(error_msg, reply_markup=get_back_to_menu_kb())
-        await state.set_state(QuestionStates.waiting_for_search_type)
+        await state.set_state(QuestionStates.in_dialog)
         await state.update_data(show_profiles=False, search_text=None)
 
 async def _handle_code_search_internal(message: Message, state: FSMContext, search_text: str = None):

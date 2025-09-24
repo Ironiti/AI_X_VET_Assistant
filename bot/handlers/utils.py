@@ -403,12 +403,18 @@ def filter_results_by_type(results: List[Tuple], show_profiles: bool = False) ->
     print(f"[FILTER DEBUG] Output: {len(filtered)} results after filtering")
     return filtered
 
-def format_i_pattern_numbered(text: str, indent: str = "\t\t") -> str:
+
+def format_i_pattern_numbered(text: str | int | float | None, indent: str = "\t\t") -> str:
     """
     Форматирует текст с паттерном *I* с переносом строки ДО первого элемента.
+    Обрабатывает числа и None значения.
     """
     if not text:
         return ""
+    
+    # Преобразуем в строку, если это не строка
+    if not isinstance(text, str):
+        text = str(text)
     
     # Разделяем по *I*
     parts = [part.strip() for part in text.split('*I*') if part.strip()]
