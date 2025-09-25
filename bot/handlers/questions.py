@@ -2224,6 +2224,9 @@ async def _handle_name_search_internal(message: Message, state: FSMContext, sear
             
             # Сохраняем последний найденный тест для контекста
             last_test_data = format_test_data(selected_docs[0].metadata)
+            
+            await state.set_state(QuestionStates.in_dialog)
+            
             await state.update_data(
                 current_test=last_test_data,
                 last_viewed_test=last_test_data["test_code"],
@@ -2463,7 +2466,7 @@ async def _handle_code_search_internal(message: Message, state: FSMContext, sear
                     error_msg += "💡 Добавьте слово 'профили' для поиска профилей тестов."
                 await message.answer(error_msg, reply_markup=get_back_to_menu_kb())
 
-            await state.set_state(QuestionStates.waiting_for_search_type)
+            await state.set_state(QuestionStates.in_dialog)
             await state.update_data(show_profiles=False, search_text=None)
             return
 
