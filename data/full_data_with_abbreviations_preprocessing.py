@@ -106,7 +106,7 @@ def clean_embedding_text(text: str) -> str:
     special_short_words = {'пцр', 'ифа', 'эдта', 'днк', 'рнк', 'ат', 'аг', 'igg', 'igm', 'ca', 'cd', 'cv', 'не'}
     
     for word in words:
-        if len(word) >= 3 or word in special_short_words:
+        if len(word) >= 2 or word in special_short_words:
             filtered_words.append(word)
     
     return ' '.join(filtered_words)
@@ -185,9 +185,10 @@ def enhance_data_with_vet_abbreviations(df):
             specialization,
             safe_str(row.get('code_letters', '')),
             safe_str(row.get('code_letters', '')),
+            safe_str(row.get('code_letters', '')),
             safe_str(row.get('encoded', '')),
             safe_str(row.get('encoded', '')),
-            safe_str(row.get('encoded', '')),
+            safe_str(row.get('biomaterial_type', '')),
             safe_str(row.get('biomaterial_type', '')),
             safe_str(row.get('biomaterial_type', '')),
             safe_str(row.get('type', '')),
@@ -197,7 +198,7 @@ def enhance_data_with_vet_abbreviations(df):
             # safe_str(row.get('important_information', '')),
             safe_str(row.get('animal_type', '')),
             safe_str(row.get('container_type', '')),
-            safe_str(row.get('storage_temp', ''))
+            # safe_str(row.get('storage_temp', ''))
         ]
         
         # Фильтруем пустые значения

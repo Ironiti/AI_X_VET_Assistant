@@ -15,6 +15,7 @@ project_root = Path(__file__).resolve().parents[1]
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
+import re
 
 class DataProcessor:
     def __init__(self, file_path: str = 'data/processed/joined_data.xlsx'):
@@ -31,6 +32,65 @@ class DataProcessor:
         self.df = pd.read_excel(self.file_path)
         print(f'[INFO] Loaded {len(self.df)} rows')
         return self.df
+
+    def clean_query_text(self, text: str) -> str:
+        """Очищает запрос от шумных слов (такая же логика как в data preprocessing)"""
+        if not text or pd.isna(text):
+            return ""
+        
+        # Приводим к нижнему регистру
+        text = text.lower()
+        
+        # Удаляем общие шумные слова (все формы и падежи)
+        noise_patterns = [
+            r'исследовани[ейяю]\w*',  # исследование, исследования, исследованию и т.д.
+            r'анализ[ауом]?\w*',      # анализ, анализа, анализу, анализом
+            r'определени[ейяю]\w*',   # определение, определения, определению
+            r'тест[ауом]?\w*',        # тест, теста, тесту, тестом
+            r'диагностик[аиуе]\w*',   # диагностика, диагностики, диагностику
+            r'изучени[ейяю]\w*',      # изучение, изучения, изучению
+            r'проведени[ейяю]\w*',    # проведение, проведения, проведению
+            r'измерени[ейяю]\w*',     # измерение, измерения, измерению
+            r'оценк[аиуе]\w*',        # оценка, оценки, оценку
+            r'профил[ейяю]\w*',       # профиль, профиля, профилю
+            r'комплексн\w*',          # комплексный, комплексная, комплексное
+            r'общ[иейяю]\w*',         # общий, общая, общее, общие
+            r'расширенн\w*',          # расширенный, расширенная
+            r'стандартн\w*',          # стандартный, стандартная
+            r'мал\w*',                # малый, малая, малое
+            r'больш\w*',              # большой, большая, большое
+            r'первичн\w*',            # первичный, первичная
+            r'контрол[ейяю]\w*',      # контроль, контроля, контролю
+            r'мониторинг[ау]?\w*',    # мониторинг, мониторинга
+            r'проб[аыуе]\w*',         # проба, пробы, пробу
+            r'уровн[ейяю]\w*',        # уровень, уровня, уровню
+            r'содержани[ейяю]\w*',    # содержание, содержания
+            r'количеств[ауом]?\w*',   # количество, количества
+            r'наличи[ейяю]\w*',       # наличие, наличия
+            r'показател[ейяю]\w*',    # показатель, показателя
+            r'параметр[аов]?\w*',     # параметр, параметра, параметры
+            r'метод[ауом]?\w*',       # метод, метода, методу
+            r'способ[ауом]?\w*',      # способ, способа, способу
+        ]
+        
+        for pattern in noise_patterns:
+            text = re.sub(pattern, '', text)
+        
+        # Удаляем лишние пробелы и очищаем
+        text = re.sub(r'\s+', ' ', text).strip()
+        
+        # Удаляем слова короче 3 символов (кроме кодов типа ПЦР, ИФА и т.д.)
+        words = text.split()
+        filtered_words = []
+        
+        special_short_words = {'пцр', 'ифа', 'эдта', 'днк', 'рнк', 'ат', 'аг', 'igg', 'igm', 'ca', 'cd', 'cv'}
+        
+        for word in words:
+            if len(word) >= 3 or word in special_short_words:
+                filtered_words.append(word)
+        
+        return ' '.join(filtered_words)
+
 
     def create_vector_store(self, persist_path: str = "data/chroma_db", reset: bool = False) -> Chroma:
         if self.df is None:
@@ -109,6 +169,10 @@ class DataProcessor:
         if self.vector_store is None:
             self.load_vector_store()
         
+        cleaned_query = self.clean_query_text(query)
+        print(f'[INFO] Original query: "{query}"')
+        print(f'[INFO] Cleaned query: "{cleaned_query}"')
+
         if filter_dict:
             # Get all tests and filter locally
             all_tests = self.vector_store.get()
