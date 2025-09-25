@@ -7,6 +7,7 @@ from typing import List
 from torch import Tensor
 from tqdm import tqdm
 import numpy as np
+import random
 
 from config import DEEPINFRA_API_KEY
 
@@ -30,6 +31,26 @@ task_prompt = (
     "Embed the query so that it best matches the correct test title."
 )
 
+def set_global_seed(seed: int = 42):
+    """Фиксация сида для всех компонентов."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        # Для детерминированных операций в CUDA
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    
+    if torch.backends.mps.is_available():
+        # Для MPS (Apple Silicon) - ограниченная поддержка детерминизма
+        torch.mps.manual_seed(seed)
+    
+    print(f"[INFO] Global seed set to: {seed}")
+
+
 class QwenEmbeddings(Embeddings):
     def __init__(
         self,
@@ -37,12 +58,13 @@ class QwenEmbeddings(Embeddings):
         task_prompt: str = task_prompt,
         max_length: int = 8192,
         batch_size: int = 8,
-        use_remote: bool = None
+        use_remote: bool = None,
     ):
         self.model_name = model_name
         self.task_prompt = task_prompt
         self.max_length = max_length
         self.batch_size = batch_size
+
         # Determine remote vs local
         if use_remote is None:
             self.use_remote = bool(DEEPINFRA_API_KEY)
