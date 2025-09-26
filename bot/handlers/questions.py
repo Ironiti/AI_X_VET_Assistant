@@ -149,6 +149,176 @@ def _rerank_hits_by_query(hits: List[Tuple[Document, float]], query: str) -> Lis
     rescored.sort(key=lambda x: x[1], reverse=True)
     return rescored
 
+def generate_container_search_variants(container: str) -> List[str]:
+    """
+    Генерирует варианты названий контейнера для поиска в БД
+    """
+    variants = []
+    
+    # Базовая очистка
+    container = container.strip()
+    
+    # 1. Оригинальная строка
+    variants.append(container)
+    
+    # 2. Только часть до слэша
+    if '/' in container:
+        base_part = container.split('/')[0].strip()
+        variants.append(base_part)
+        
+        # Также добавляем варианты с числами для базовой части
+        if not any(char.isdigit() for char in base_part[:3]):  # Если нет числа в начале
+            # Добавляем варианты с числами 2 и 3
+            variants.append(f"2 {base_part}")
+            variants.append(f"3 {base_part}")
+            
+            # Вариант с множественным числом
+            if "Пробирка" in base_part:
+                plural = base_part.replace("Пробирка", "Пробирки")
+                variants.append(f"2 {plural}")
+                variants.append(f"3 {plural}")
+    
+    # 3. Убираем число из начала, если есть
+    import re
+    no_number = re.sub(r'^\d+\s*', '', container)
+    if no_number != container:
+        variants.append(no_number)
+        
+        # Также единственное число
+        if "пробирки" in no_number.lower():
+            singular = re.sub(r'пробирки', 'Пробирка', no_number, flags=re.IGNORECASE)
+            variants.append(singular)
+    
+    # 4. Добавляем варианты с числами, если их нет
+    if not any(char.isdigit() for char in container[:3]):
+        # Проверяем множественное число
+        if "пробирка" in container.lower():
+            # Единственное число
+            variants.append(f"2 {container.replace('Пробирка', 'Пробирки')}")
+            variants.append(f"3 {container.replace('Пробирка', 'Пробирки')}")
+        
+        # Для других контейнеров
+        variants.append(f"2 {container}")
+    
+    # 5. Нормализация регистра для "С" в цветах
+    normalized_variants = []
+    for v in variants:
+        # "с красной" → "С Красной"
+        normalized = re.sub(
+            r'\bс\s+([а-яА-Я])',
+            lambda m: f"С {m.group(1).upper()}{m.group(1)[1:] if len(m.group(1)) > 1 else ''}",
+            v
+        )
+        normalized_variants.append(normalized)
+    
+    variants.extend(normalized_variants)
+    
+    # Убираем дубликаты, сохраняя порядок
+    seen = set()
+    unique_variants = []
+    for v in variants:
+        if v and v not in seen:
+            seen.add(v)
+            unique_variants.append(v)
+    
+    return unique_variants
+
+def normalize_container_for_search(container: str) -> str:
+    """
+    Нормализует название контейнера для поиска, убирая лишнее
+    """
+    if not container:
+        return ""
+    
+    # Убираем числа из начала
+    container = re.sub(r'^\d+\s*', '', container).strip()
+    
+    # Берем только часть до слэша
+    if '/' in container:
+        container = container.split('/')[0].strip()
+    
+    # Берем только часть до плюса
+    if '+' in container:
+        container = container.split('+')[0].strip()
+    
+    # Приводим множественное число к единственному
+    container = re.sub(r'пробирки', 'Пробирка', container, flags=re.IGNORECASE)
+    container = re.sub(r'контейнеры', 'Контейнер', container, flags=re.IGNORECASE)
+    
+    # Нормализуем регистр
+    words = container.split()
+    normalized_words = []
+    for word in words:
+        if word.lower() in ['с', 'для', 'и', 'или']:
+            normalized_words.append(word.lower())
+        else:
+            normalized_words.append(word.capitalize())
+    
+    return ' '.join(normalized_words)
+
+
+def get_base_container_type(container: str) -> str:
+    """
+    Получает базовый тип контейнера для проверки дубликатов
+    Например: "Пробирка с красной крышкой" -> "пробиркакраснойкрышкой"
+    """
+    # Убираем все лишнее
+    base = container.lower()
+    base = re.sub(r'^\d+\s*', '', base)  # Убираем числа
+    base = re.sub(r'[^а-яa-z]', '', base)  # Оставляем только буквы
+    
+    # Специальная обработка для известных вариаций
+    base = base.replace('пробирки', 'пробирка')
+    base = base.replace('контейнеры', 'контейнер')
+    
+    return base
+
+
+async def find_container_photo_smart(db, container_type: str):
+    """
+    Умный поиск фото контейнера с учетом вариантов в БД
+    """
+    # Сначала пробуем точный поиск
+    photo = await db.get_container_photo(container_type)
+    if photo:
+        photo['display_name'] = photo.get('container_type', container_type)
+        return photo
+    
+    # Генерируем варианты для поиска
+    search_variants = []
+    
+    # Варианты с числами
+    if not re.match(r'^\d+\s', container_type):
+        search_variants.extend([
+            f"2 {container_type.replace('Пробирка', 'Пробирки')}",
+            f"3 {container_type.replace('Пробирка', 'Пробирки')}",
+            container_type  # Оригинал
+        ])
+    else:
+        search_variants.append(container_type)
+    
+    # Варианты регистра для "с"
+    for variant in search_variants[:]:  # Копия для итерации
+        # С большой буквы
+        upper_variant = re.sub(r'\bс\s+', 'С ', variant)
+        if upper_variant != variant:
+            search_variants.append(upper_variant)
+        
+        # С маленькой буквы  
+        lower_variant = re.sub(r'\bС\s+', 'с ', variant)
+        if lower_variant != variant:
+            search_variants.append(lower_variant)
+    
+    # Пробуем все варианты
+    for variant in search_variants:
+        photo = await db.get_container_photo(variant)
+        if photo:
+            # Сохраняем оригинальное название для отображения
+            photo['display_name'] = photo.get('container_type', container_type)
+            return photo
+    
+    return None
+
 def create_paginated_keyboard(
     tests: List[Document],
     current_page: int = 0,
@@ -338,11 +508,9 @@ async def handle_show_container_photos_callback(callback: CallbackQuery):
     """Обработчик для показа фото контейнеров"""
     await callback.answer()
 
-    # Извлекаем код теста
     test_code = callback.data.split(":", 1)[1]
 
     try:
-        # Ищем тест в векторной БД
         processor = DataProcessor()
         processor.load_vector_store()
 
@@ -353,69 +521,144 @@ async def handle_show_container_photos_callback(callback: CallbackQuery):
             return
 
         doc = results[0][0] if isinstance(results[0], tuple) else results[0]
-        
-        # ВАЖНО: Используем оригинальные metadata для поиска контейнеров
         raw_metadata = doc.metadata
-        
-        # Для отображения используем форматированные данные
         test_data = format_test_data(doc.metadata)
 
-        # Собираем ВСЕ типы контейнеров из ОРИГИНАЛЬНЫХ полей (без форматирования)
-        raw_container_types = []
+        # Собираем все контейнеры
+        all_containers = []
         
-        # 1. Проверяем primary_container_type из ОРИГИНАЛЬНЫХ данных
+        # Функция для разделения контейнеров по "или"
+        def split_by_or(container_str: str) -> List[str]:
+            """Разделяет строку контейнера по 'или' """
+            if " или " in container_str.lower():
+                # Разделяем по "или" (учитываем разный регистр)
+                parts = re.split(r'\s+или\s+', container_str, flags=re.IGNORECASE)
+                return [part.strip() for part in parts if part.strip()]
+            return [container_str]
+        
+        # Парсим primary_container_type
         primary_container = str(raw_metadata.get("primary_container_type", "")).strip()
         if primary_container and primary_container.lower() not in ["не указан", "нет", "-", "", "none", "null"]:
-            # Убираем кавычки и нормализуем
             primary_container = primary_container.replace('"', "").replace("\n", " ")
             primary_container = " ".join(primary_container.split())
             
-            # Разбиваем по *I* если есть несколько контейнеров
             if "*I*" in primary_container:
                 parts = [ct.strip() for ct in primary_container.split("*I*")]
-                raw_container_types.extend(parts)
             else:
-                raw_container_types.append(primary_container)
+                parts = [primary_container]
+            
+            # Обрабатываем "или" в каждой части
+            for part in parts:
+                all_containers.extend(split_by_or(part))
         
-        # 2. Проверяем обычный container_type из ОРИГИНАЛЬНЫХ данных
+        # Парсим container_type
         container_type_raw = str(raw_metadata.get("container_type", "")).strip()
         if container_type_raw and container_type_raw.lower() not in ["не указан", "нет", "-", "", "none", "null"]:
-            # Убираем кавычки и нормализуем
             container_type_raw = container_type_raw.replace('"', "").replace("\n", " ")
             container_type_raw = " ".join(container_type_raw.split())
             
-            # Разбиваем по *I* если есть несколько контейнеров
             if "*I*" in container_type_raw:
                 parts = [ct.strip() for ct in container_type_raw.split("*I*")]
-                raw_container_types.extend(parts)
             else:
-                raw_container_types.append(container_type_raw)
+                parts = [container_type_raw]
+            
+            # Обрабатываем "или" в каждой части
+            for part in parts:
+                all_containers.extend(split_by_or(part))
         
-        # Используем функцию для удаления дубликатов с нормализацией
-        container_types_to_check = deduplicate_container_names(raw_container_types)
+        # Функция для нормализации контейнера для сравнения дубликатов
+        def normalize_for_comparison(container: str) -> str:
+            """Нормализует контейнер для проверки дубликатов"""
+            norm = container.lower().strip()
+            # Убираем числа в начале (2 пробирки -> пробирки)
+            norm = re.sub(r'^\d+\s+', '', norm)
+            # Заменяем разные варианты написания на единый формат
+            norm = norm.replace(" / ", " ").replace(" + ", " ")
+            # Приводим к единственному числу
+            norm = norm.replace("пробирки", "пробирка")
+            # Убираем множественные пробелы
+            norm = " ".join(norm.split())
+            return norm
         
-        # Если нет контейнеров для проверки
-        if not container_types_to_check:
+        # Дедупликация с учетом эквивалентности
+        unique_containers = []
+        seen_normalized = set()
+        
+        for container in all_containers:
+            if not container:
+                continue
+                
+            # Для дедупликации используем нормализованную версию
+            normalized = normalize_for_comparison(container)
+            
+            if normalized not in seen_normalized:
+                seen_normalized.add(normalized)
+                unique_containers.append(container)  # Сохраняем оригинальное написание
+        
+        if not unique_containers:
             await callback.message.answer("❌ Для этого теста не указаны типы контейнеров")
             return
         
-        # Собираем все фото контейнеров
+        # Ищем фото для каждого уникального контейнера
         found_photos = []
+        already_shown_file_ids = set()
+        not_found_containers = []
         
-        for ct in container_types_to_check:
-            # Контейнер уже нормализован функцией deduplicate_container_names
-            photo_data = await db.get_container_photo(ct)
+        for container in unique_containers:
+            # Варианты для поиска в БД
+            search_variants = [
+                container,  # Оригинал
+                container.replace(" / ", " + "),  # Меняем / на +
+                container.replace(" + ", " / "),  # Меняем + на /
+            ]
+            
+            # Добавляем варианты без чисел
+            container_no_number = re.sub(r'^\d+\s+', '', container)
+            if container_no_number != container:
+                search_variants.extend([
+                    container_no_number,
+                    container_no_number.replace(" / ", " + "),
+                    container_no_number.replace(" + ", " / "),
+                ])
+            
+            # Добавляем варианты с единственным числом
+            if "пробирки" in container.lower():
+                singular = container.replace("пробирки", "пробирка").replace("Пробирки", "Пробирка")
+                search_variants.append(singular)
+                search_variants.append(re.sub(r'^\d+\s+', '', singular))
+            
+            photo_data = None
+            for variant in search_variants:
+                # Сначала точный поиск
+                photo_data = await db.get_container_photo(variant)
+                if photo_data:
+                    break
+                    
+                # Если не нашли - умный поиск
+                if not photo_data:
+                    photo_data = await find_container_photo_smart(db, variant)
+                    if photo_data:
+                        break
+            
             if photo_data:
-                found_photos.append({
-                    "container_type": ct,
-                    "file_id": photo_data["file_id"],
-                    "description": photo_data.get("description")
-                })
+                file_id = photo_data.get("file_id")
+                
+                # Проверяем дубликаты по file_id
+                if file_id not in already_shown_file_ids:
+                    already_shown_file_ids.add(file_id)
+                    found_photos.append({
+                        "container_type": container,  # Используем оригинальное название
+                        "file_id": file_id,
+                        "description": photo_data.get("description")
+                    })
+            else:
+                # Сохраняем контейнеры, для которых не нашли фото
+                not_found_containers.append(container)
         
-        # Если есть фото - отправляем
+        # Отправляем найденные фото
         if found_photos:
             if len(found_photos) == 1:
-                # Одно фото - отправляем как обычно
+                # Одно фото
                 photo_info = found_photos[0]
                 container_name = html.escape(photo_info['container_type'])
                 caption = f"📦 Контейнер: {container_name}"
@@ -440,12 +683,10 @@ async def handle_show_container_photos_callback(callback: CallbackQuery):
                     reply_markup=hide_keyboard
                 )
             else:
-                # Несколько фото - отправляем как медиагруппу
+                # Несколько фото - медиагруппа
                 from aiogram.types import InputMediaPhoto
                 
                 media_group = []
-                
-                # Формируем заголовок для первого фото
                 test_name = html.escape(test_data.get("test_name", ""))
                 main_caption = f"📦 <b>Контейнеры для теста {test_code}</b>\n{test_name}\n\n"
                 
@@ -453,17 +694,13 @@ async def handle_show_container_photos_callback(callback: CallbackQuery):
                     container_name = html.escape(photo_info['container_type'])
                     
                     if i == 0:
-                        # Первое фото с полным описанием
                         caption = main_caption + f"▫️ {container_name}"
-                        if photo_info.get('description'):
-                            description = html.escape(photo_info['description'])
-                            caption += f" - {description}"
                     else:
-                        # Остальные фото с кратким описанием
                         caption = f"▫️ {container_name}"
-                        if photo_info.get('description'):
-                            description = html.escape(photo_info['description'])
-                            caption += f" - {description}"
+                    
+                    if photo_info.get('description'):
+                        description = html.escape(photo_info['description'])
+                        caption += f" - {description}"
                     
                     media_group.append(
                         InputMediaPhoto(
@@ -473,10 +710,8 @@ async def handle_show_container_photos_callback(callback: CallbackQuery):
                         )
                     )
                 
-                # Отправляем медиагруппу
                 messages = await callback.message.answer_media_group(media_group)
                 
-                # Добавляем кнопку отдельным сообщением под альбомом
                 hide_keyboard = InlineKeyboardMarkup(
                     inline_keyboard=[
                         [
@@ -492,15 +727,25 @@ async def handle_show_container_photos_callback(callback: CallbackQuery):
                     f"Показано {len(found_photos)} фото контейнеров",
                     reply_markup=hide_keyboard
                 )
-        
+            
+            # Если есть контейнеры без фото, сообщаем об этом
+            if not_found_containers:
+                not_found_msg = "\n⚠️ Не найдены фото для:\n"
+                for ct in not_found_containers[:5]:
+                    not_found_msg += f"• {ct}\n"
+                if len(not_found_containers) > 5:
+                    not_found_msg += f"... и еще {len(not_found_containers) - 5}"
+                
+                await callback.message.answer(not_found_msg)
+                
         else:
-            # Фото не найдены - показываем какие контейнеры искали
+            # Все контейнеры не найдены
             not_found_msg = "❌ Фото контейнеров не найдены в базе\n\n"
-            not_found_msg += "🔍 Искали контейнеры:\n"
-            for ct in container_types_to_check[:5]:  # Показываем первые 5
+            not_found_msg += "🔍 Искали типы:\n"
+            for ct in unique_containers[:10]:
                 not_found_msg += f"• {ct}\n"
-            if len(container_types_to_check) > 5:
-                not_found_msg += f"... и еще {len(container_types_to_check) - 5}"
+            if len(unique_containers) > 10:
+                not_found_msg += f"... и еще {len(unique_containers) - 10}"
             
             await callback.message.answer(not_found_msg)
 
