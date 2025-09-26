@@ -60,8 +60,9 @@ from bot.handlers.utils import normalize_container_name, deduplicate_container_n
 # LOADING_GIF_ID = (
 #     "CgACAgIAAxkBAAMIaGr_qy1Wxaw2VrBrm3dwOAkYji4AAu54AAKmqHlJAtZWBziZvaA2BA"
 # )
-LOADING_GIF_ID = "CgACAgIAAxkBAAIBFGiBcXtGY7OZvr3-L1dZIBRNqSztAALueAACpqh5Scn4VmIRb4UjNgQ"
-# LOADING_GIF_ID = "CgACAgIAAxkBAAMMaHSq3vqxq2RuMMj-DIMvldgDjfkAAu54AAKmqHlJCNcCjeoHRJI2BA"
+# LOADING_GIF_ID = "CgACAgIAAxkBAAIBFGiBcXtGY7OZvr3-L1dZIBRNqSztAALueAACpqh5Scn4VmIRb4UjNgQ"
+# Кирилл
+LOADING_GIF_ID = "CgACAgIAAxkBAAMMaHSq3vqxq2RuMMj-DIMvldgDjfkAAu54AAKmqHlJCNcCjeoHRJI2BA"
 # Назим
 # LOADING_GIF_ID = "CgACAgIAAxkBAANPaMvCZEN3F6cNDG58zpcLZnhqiDsAAu54AAKmqHlJU1E65w2DvLo2BA"
 
@@ -245,9 +246,6 @@ async def handle_new_question_in_dialog(message: Message, state: FSMContext):
         reply_markup=get_back_to_menu_kb(),
     )
 
-    # Показываем персонализированные подсказки
-    await show_personalized_suggestions(message, state)
-
     # Сохраняем историю просмотров при переходе к новому поиску
     await state.set_state(QuestionStates.waiting_for_search_type)
     if last_viewed:
@@ -270,7 +268,6 @@ async def handle_new_search(callback: CallbackQuery, state: FSMContext):
     # Показываем персонализированные подсказки
     message = callback.message
     message.from_user = callback.from_user
-    await show_personalized_suggestions(message, state)
 
     await state.set_state(QuestionStates.waiting_for_search_type)
     if last_viewed:
@@ -356,13 +353,18 @@ async def handle_show_container_photos_callback(callback: CallbackQuery):
             return
 
         doc = results[0][0] if isinstance(results[0], tuple) else results[0]
+        
+        # ВАЖНО: Используем оригинальные metadata для поиска контейнеров
+        raw_metadata = doc.metadata
+        
+        # Для отображения используем форматированные данные
         test_data = format_test_data(doc.metadata)
 
-        # Собираем ВСЕ типы контейнеров из ОБОИХ полей
+        # Собираем ВСЕ типы контейнеров из ОРИГИНАЛЬНЫХ полей (без форматирования)
         raw_container_types = []
         
-        # 1. Проверяем primary_container_type (ПРИОРИТЕТ)
-        primary_container = str(test_data.get("primary_container_type", "")).strip()
+        # 1. Проверяем primary_container_type из ОРИГИНАЛЬНЫХ данных
+        primary_container = str(raw_metadata.get("primary_container_type", "")).strip()
         if primary_container and primary_container.lower() not in ["не указан", "нет", "-", "", "none", "null"]:
             # Убираем кавычки и нормализуем
             primary_container = primary_container.replace('"', "").replace("\n", " ")
@@ -375,8 +377,8 @@ async def handle_show_container_photos_callback(callback: CallbackQuery):
             else:
                 raw_container_types.append(primary_container)
         
-        # 2. Проверяем обычный container_type
-        container_type_raw = str(test_data.get("container_type", "")).strip()
+        # 2. Проверяем обычный container_type из ОРИГИНАЛЬНЫХ данных
+        container_type_raw = str(raw_metadata.get("container_type", "")).strip()
         if container_type_raw and container_type_raw.lower() not in ["не указан", "нет", "-", "", "none", "null"]:
             # Убираем кавычки и нормализуем
             container_type_raw = container_type_raw.replace('"', "").replace("\n", " ")
@@ -412,80 +414,83 @@ async def handle_show_container_photos_callback(callback: CallbackQuery):
         
         # Если есть фото - отправляем
         if found_photos:
-            message_ids = []
-            
-            # Отправляем все фото
-            for i, photo_info in enumerate(found_photos):
-                is_last = i == len(found_photos) - 1
-                
-                # Формируем подпись
+            if len(found_photos) == 1:
+                # Одно фото - отправляем как обычно
+                photo_info = found_photos[0]
                 container_name = html.escape(photo_info['container_type'])
                 caption = f"📦 Контейнер: {container_name}"
                 if photo_info.get('description'):
                     description = html.escape(photo_info['description'])
                     caption += f"\n📝 {description}"
                 
-                if is_last and len(found_photos) > 1:
-                    # Последнее фото с кнопкой скрытия всех
-                    hide_keyboard = InlineKeyboardMarkup(
-                        inline_keyboard=[
-                            [
-                                InlineKeyboardButton(
-                                    text="🙈 Скрыть все фото",
-                                    callback_data=f"hide_photos:{test_code}:placeholder",
-                                )
-                            ]
-                        ]
-                    )
-                    sent_msg = await callback.message.answer_photo(
-                        photo=photo_info['file_id'],
-                        caption=caption,
-                        reply_markup=hide_keyboard
-                    )
-                elif is_last and len(found_photos) == 1:
-                    # Единственное фото с кнопкой
-                    hide_keyboard = InlineKeyboardMarkup(
-                        inline_keyboard=[
-                            [
-                                InlineKeyboardButton(
-                                    text="🙈 Скрыть фото",
-                                    callback_data=f"hide_single:{test_code}",
-                                )
-                            ]
-                        ]
-                    )
-                    sent_msg = await callback.message.answer_photo(
-                        photo=photo_info['file_id'],
-                        caption=caption,
-                        reply_markup=hide_keyboard
-                    )
-                else:
-                    # Остальные фото без кнопки
-                    sent_msg = await callback.message.answer_photo(
-                        photo=photo_info['file_id'],
-                        caption=caption
-                    )
-                
-                message_ids.append(sent_msg.message_id)
-            
-            # Обновляем callback_data последнего сообщения со всеми ID (если фото больше одного)
-            if len(message_ids) > 1:
                 hide_keyboard = InlineKeyboardMarkup(
                     inline_keyboard=[
                         [
                             InlineKeyboardButton(
-                                text="🙈 Скрыть все фото",
-                                callback_data=f"hide_photos:{test_code}:{','.join(map(str, message_ids))}",
+                                text="🙈 Скрыть фото",
+                                callback_data=f"hide_single:{test_code}",
                             )
                         ]
                     ]
                 )
                 
-                # Редактируем кнопку последнего сообщения
-                await callback.bot.edit_message_reply_markup(
-                    chat_id=callback.message.chat.id,
-                    message_id=message_ids[-1],
-                    reply_markup=hide_keyboard,
+                await callback.message.answer_photo(
+                    photo=photo_info['file_id'],
+                    caption=caption,
+                    reply_markup=hide_keyboard
+                )
+            else:
+                # Несколько фото - отправляем как медиагруппу
+                from aiogram.types import InputMediaPhoto
+                
+                media_group = []
+                
+                # Формируем заголовок для первого фото
+                test_name = html.escape(test_data.get("test_name", ""))
+                main_caption = f"📦 <b>Контейнеры для теста {test_code}</b>\n{test_name}\n\n"
+                
+                for i, photo_info in enumerate(found_photos):
+                    container_name = html.escape(photo_info['container_type'])
+                    
+                    if i == 0:
+                        # Первое фото с полным описанием
+                        caption = main_caption + f"▫️ {container_name}"
+                        if photo_info.get('description'):
+                            description = html.escape(photo_info['description'])
+                            caption += f" - {description}"
+                    else:
+                        # Остальные фото с кратким описанием
+                        caption = f"▫️ {container_name}"
+                        if photo_info.get('description'):
+                            description = html.escape(photo_info['description'])
+                            caption += f" - {description}"
+                    
+                    media_group.append(
+                        InputMediaPhoto(
+                            media=photo_info['file_id'],
+                            caption=caption,
+                            parse_mode="HTML"
+                        )
+                    )
+                
+                # Отправляем медиагруппу
+                messages = await callback.message.answer_media_group(media_group)
+                
+                # Добавляем кнопку отдельным сообщением под альбомом
+                hide_keyboard = InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="🙈 Скрыть все фото",
+                                callback_data=f"hide_album:{messages[0].message_id}",
+                            )
+                        ]
+                    ]
+                )
+                
+                await callback.message.answer(
+                    f"Показано {len(found_photos)} фото контейнеров",
+                    reply_markup=hide_keyboard
                 )
         
         else:
@@ -504,9 +509,6 @@ async def handle_show_container_photos_callback(callback: CallbackQuery):
         import traceback
         traceback.print_exc()
         await callback.message.answer("❌ Ошибка при загрузке фото")
-
-
-
 
 @questions_router.callback_query(F.data.startswith("hide_single:"))
 async def handle_hide_single_photo(callback: CallbackQuery):
@@ -978,9 +980,6 @@ async def start_question(message: Message, state: FSMContext):
     await db.clear_buffer(user_id)
     await message.answer(prompt, reply_markup=get_back_to_menu_kb())
 
-    # Показываем персонализированные подсказки
-    await show_personalized_suggestions(message, state)
-
     await state.set_state(QuestionStates.waiting_for_search_type)
 
 
@@ -1285,6 +1284,37 @@ async def handle_name_search(message: Message, state: FSMContext):
     """Handle test name search using RAG."""
     await _handle_name_search_internal(message, state)
 
+@questions_router.callback_query(F.data.startswith("hide_album:"))
+async def handle_hide_album(callback: CallbackQuery):
+    """Обработчик для скрытия альбома с фото"""
+    await callback.answer("Фото скрыты")
+    
+    try:
+        # Извлекаем ID первого сообщения в альбоме
+        first_message_id = int(callback.data.split(":")[1])
+        
+        # Удаляем сообщение с кнопкой
+        await callback.message.delete()
+        
+        # Пытаемся удалить несколько сообщений подряд (обычно альбом это 2-10 сообщений)
+        for i in range(10):  # максимум 10 фото в альбоме
+            try:
+                await callback.bot.delete_message(
+                    chat_id=callback.message.chat.id,
+                    message_id=first_message_id + i
+                )
+            except:
+                # Когда дойдем до несуществующего сообщения - прекращаем
+                break
+                
+    except Exception as e:
+        print(f"[ERROR] Failed to hide album: {e}")
+        # Пытаемся удалить хотя бы сообщение с кнопкой
+        try:
+            await callback.message.delete()
+        except:
+            pass
+
 
 @questions_router.message(QuestionStates.in_dialog)
 async def handle_dialog(message: Message, state: FSMContext):
@@ -1528,69 +1558,6 @@ async def handle_context_switch(message: Message, state: FSMContext, new_query: 
         await state.set_state(QuestionStates.waiting_for_name)
         message.text = new_query
         await handle_name_search(message, state)
-
-
-async def show_personalized_suggestions(message: Message, state: FSMContext):
-    """Показывает персонализированные подсказки при начале поиска"""
-    user_id = message.from_user.id
-
-    try:
-        # Получаем подсказки
-        suggestions = await db.get_search_suggestions(user_id)
-
-        if suggestions:
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[])
-
-            # Группируем по типам
-            frequent = [s for s in suggestions if s["type"] == "frequent"]
-            recent = [s for s in suggestions if s["type"] == "recent"]
-
-            if frequent:
-                # Добавляем заголовок
-                keyboard.inline_keyboard.append(
-                    [
-                        InlineKeyboardButton(
-                            text="⭐ Часто используемые:", callback_data="ignore"
-                        )
-                    ]
-                )
-
-                for sug in frequent[:3]:
-                    keyboard.inline_keyboard.append(
-                        [
-                            InlineKeyboardButton(
-                                text=f"{sug['code']} - {sug['name'][:40]}... ({sug['frequency']}x)",
-                                callback_data=f"quick_test:{sug['code']}",
-                            )
-                        ]
-                    )
-
-            if recent:
-                keyboard.inline_keyboard.append(
-                    [
-                        InlineKeyboardButton(
-                            text="🕐 Недавние поиски:", callback_data="ignore"
-                        )
-                    ]
-                )
-
-                for sug in recent[:2]:
-                    keyboard.inline_keyboard.append(
-                        [
-                            InlineKeyboardButton(
-                                text=f"{sug['code']} - {sug['name'][:40]}...",
-                                callback_data=f"quick_test:{sug['code']}",
-                            )
-                        ]
-                    )
-
-            await message.answer(
-                "💡 Быстрый доступ к вашим тестам:", reply_markup=keyboard
-            )
-    except Exception as e:
-        print(f"[ERROR] Failed to show personalized suggestions: {e}")
-        # Не показываем ошибку пользователю, просто не показываем подсказки
-
 
 async def send_test_info_with_photo(
     message: Message, test_data: Dict, response_text: str
@@ -1855,6 +1822,8 @@ async def handle_general_question(
             
             context_info += f"\n📊 Общая статистика: {len(departments)} видов исследований\n"
 
+        user_name = get_user_first_name(user)
+
         # Промпт для LLM
         system_prompt = f"""
             # Роль: Ассистент ветеринарной лаборатории VetUnion
@@ -1863,14 +1832,14 @@ async def handle_general_question(
 
             ## Источники информации
             Контекст: {context_info}
-            Постоянно обращайся к пользователю по его имени {user}, без фамилии (если она есть)
+            В начале общения пиши имя пользователя без приветствия если в этом нет необходимости: {user_name}, и сам ответ
 
             ## Основные принципы работы
 
             **Точность и безопасность:**
             - Используй ТОЛЬКО информацию из предоставленного контекста
             - При недостатке данных честно сообщай об ограничениях
-            - Никогда не давай экстренных медицинских советов - направляй к ветеринару
+            - Никогда не давай экстренных медицинских советов - направляй к нашим специалистам
             - Не интерпретируй результаты анализов без достаточной информации
 
             **Качество ответов:**

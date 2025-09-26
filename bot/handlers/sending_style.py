@@ -187,15 +187,21 @@ def format_test_data(metadata: Dict) -> Dict:
         "important_information": metadata.get("important_information"),
         "patient_preparation": metadata.get("patient_preparation"),
         "biomaterial_type": metadata.get("biomaterial_type"),
+        
+        # Сохраняем ОРИГИНАЛЬНЫЕ данные для поиска фото
+        "primary_container_type_raw": metadata.get("primary_container_type"),
+        "container_type_raw": metadata.get("container_type"),
+        
+        # Форматированные данные для отображения
         "primary_container_type": format_i_pattern_numbered(metadata.get("primary_container_type")),
         "container_type": format_i_pattern_numbered(metadata.get("container_type")),
         "container_number": format_i_pattern_numbered(metadata.get("container_number")),
         "preanalytics": '\n' + re.sub(
             r'\s*\*I\*\s*', ' ', 
             re.sub(
-                r"\s*(\d+\.)\s*", r"\n\t\t\1 ", metadata.get("preanalytics")
+                r"\s*(\d+\.)\s*", r"\n\t\t\1 ", metadata.get("preanalytics", "")
             )
-        ),
+        ) if metadata.get("preanalytics") else "",
         "storage_temp": metadata.get("storage_temp"),
         "poss_postorder_container": metadata.get("poss_postorder_container"),
         "form_link": metadata.get("form_link"),
