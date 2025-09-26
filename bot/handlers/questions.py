@@ -278,6 +278,11 @@ async def find_container_photo_smart(db, container_type: str):
     """
     Умный поиск фото контейнера с учетом вариантов в БД
     """
+    
+    # Определяем тип
+    is_test_tube = "пробирк" in container_type.lower()
+    is_container = "контейнер" in container_type.lower()
+    
     # Сначала пробуем точный поиск
     photo = await db.get_container_photo(container_type)
     if photo:
