@@ -404,9 +404,10 @@ def filter_results_by_type(results: List[Tuple], show_profiles: bool = False) ->
     return filtered
 
 
+
 def format_i_pattern_numbered(text: str | int | float | None, indent: str = "\t\t") -> str:
     """
-    Форматирует текст с паттерном *I* с переносом строки ДО первого элемента.
+    Форматирует текст, удаляя разделители *I* и + и выводя все части нумерованно.
     Обрабатывает числа и None значения.
     """
     if not text:
@@ -415,6 +416,9 @@ def format_i_pattern_numbered(text: str | int | float | None, indent: str = "\t\
     # Преобразуем в строку, если это не строка
     if not isinstance(text, str):
         text = str(text)
+    
+    # Заменяем оба разделителя на единый для разделения
+    text = text.replace('+', '*I*')
     
     # Разделяем по *I*
     parts = [part.strip() for part in text.split('*I*') if part.strip()]
@@ -426,7 +430,7 @@ def format_i_pattern_numbered(text: str | int | float | None, indent: str = "\t\
         # Если только одна часть - с переносом и номером
         return f"\n{indent}1. {parts[0]}"
     
-    # Форматируем с переносом ДО первого элемента
+    # Форматируем с нумерацией
     formatted_lines = []
     for i, part in enumerate(parts, 1):
         formatted_lines.append(f"{indent}{i}. {part}")
