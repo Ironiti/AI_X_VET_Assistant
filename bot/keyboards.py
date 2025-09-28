@@ -1,4 +1,4 @@
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
 def get_back_to_menu_kb():
     kb = [
@@ -248,6 +248,21 @@ def get_faq_back_kb():
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
+
+
+def get_search_type_switch_kb(search_id: str = "", tests_count: int = 0, profiles_count: int = 0, total_count: int = 0):
+    """Клавиатура переключения между тестами и профилями"""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text=f"🧪 Тесты ({tests_count})", callback_data=f"switch_view:tests:{search_id}"),
+                InlineKeyboardButton(text=f"🔬 Профили ({profiles_count})", callback_data=f"switch_view:profiles:{search_id}")
+            ],
+            [
+                InlineKeyboardButton(text=f"📋 Все результаты ({total_count})", callback_data=f"switch_view:all:{search_id}")
+            ]
+        ]
+    )
 # Для совместимости
 get_client_menu_kb = get_main_menu_kb
 get_staff_menu_kb = get_main_menu_kb
