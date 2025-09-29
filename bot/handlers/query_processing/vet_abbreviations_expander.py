@@ -138,16 +138,30 @@ class VetAbbreviationsManager:
         # Собираем все термины для расширения
         expanded_terms = set()
         
-        # 1. Добавляем оригинальные слова
+        # 1. Добавляем оригинальные слова, но сначала нормализуем аббревиатуры к верхнему регистру
         words = re.findall(r'\b[\wА-Яа-я]+\b', query)
+        normalized_words = []
+        
         for word in words:
-            expanded_terms.add(word)
+            # Проверяем, является ли слово аббревиатурой в нашем словаре
+            word_upper = word.upper()
+            if word_upper in self.abbreviations_dict:
+                # Если это аббревиатура, добавляем в верхнем регистре
+                normalized_words.append(word_upper)
+                expanded_terms.add(word_upper)
+            else:
+                # Если не аббревиатура, оставляем как есть
+                normalized_words.append(word)
+                expanded_terms.add(word)
         
         # 2. Ищем аббревиатуры в запросе
         for abbr, data in self.abbreviations_dict.items():
             # Проверяем точное совпадение аббревиатуры
             abbr_pattern = r'\b' + re.escape(abbr) + r'\b'
             if re.search(abbr_pattern, query, re.IGNORECASE):
+                # Добавляем саму аббревиатуру в верхнем регистре
+                expanded_terms.add(abbr)
+                
                 # Добавляем полное русское название
                 expanded_terms.add(data['full_ru'])
                 
@@ -182,8 +196,8 @@ class VetAbbreviationsManager:
         result_parts = []
         seen_terms = set()
         
-        # Сначала оригинальные слова
-        for word in words:
+        # Сначала нормализованные слова (аббревиатуры в верхнем регистре)
+        for word in normalized_words:
             word_lower = word.lower()
             if word_lower not in seen_terms:
                 result_parts.append(word)

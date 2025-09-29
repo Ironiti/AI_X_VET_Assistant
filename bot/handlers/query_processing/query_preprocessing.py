@@ -124,9 +124,13 @@ def load_disease_dictionary(excel_file_path: str) -> Tuple[Dict[str, str], Dict[
 def expand_query_with_abbreviations(query: str) -> str:
     """УЛУЧШЕННАЯ ФУНКЦИЯ РАСШИРЕНИЯ ЗАПРОСОВ С ОБРАТНЫМ СЛОВАРЕМ"""
     
-    # 1. ПЕРВЫЙ ЭТАП: РАСШИРЕНИЕ ВЕТЕРИНАРНЫМИ АББРЕВИАТУРАМИ
+    # 0. ПРЕДВАРИТЕЛЬНАЯ НОРМАЛИЗАЦИЯ: Приводим аббревиатуры к верхнему регистру
     print(f"📥 Оригинальный запрос: '{query}'")
-    query = vet_abbr_manager.expand_query(query)
+    normalized_query = normalize_query_abbreviations(query)
+    print(f"🔧 После нормализации аббревиатур: '{normalized_query}'")
+    
+    # 1. ПЕРВЫЙ ЭТАП: РАСШИРЕНИЕ ВЕТЕРИНАРНЫМИ АББРЕВИАТУРАМИ
+    query = vet_abbr_manager.expand_query(normalized_query)
     print(f"📤 После расширения аббревиатурами: '{query}'")
     
     # 2. ВТОРОЙ ЭТАП: СУЩЕСТВУЮЩАЯ ЛОГИКА С БОЛЕЗНЯМИ
@@ -147,6 +151,10 @@ def expand_query_with_abbreviations(query: str) -> str:
             
             # ВАЖНО: Сохраняем исходную логику с post_process_results
             final_result = post_process_results(expanded_with_reverse, query)
+            
+            # ФИНАЛЬНАЯ НОРМАЛИЗАЦИЯ: Приводим все аббревиатуры к верхнему регистру
+            final_result = final_abbreviation_normalization(final_result)
+            
             print(f"✅ Финальный расширенный запрос: '{final_result}'")
             return final_result
             
@@ -155,8 +163,24 @@ def expand_query_with_abbreviations(query: str) -> str:
     
     # ВАЖНО: Сохраняем исходную логику возврата
     final_result = post_process_results(query, query)
+    
+    # ФИНАЛЬНАЯ НОРМАЛИЗАЦИЯ: Приводим все аббревиатуры к верхнему регистру
+    final_result = final_abbreviation_normalization(final_result)
+    
     print(f"✅ Финальный запрос: '{final_result}'")
     return final_result
+
+
+def final_abbreviation_normalization(query: str) -> str:
+    """Финальная нормализация всех аббревиатур в запросе к верхнему регистру"""
+    words = query.split()
+    normalized_words = []
+    
+    for word in words:
+        normalized_word = normalize_abbreviation_case(word)
+        normalized_words.append(normalized_word)
+    
+    return ' '.join(normalized_words)
 
 
 
@@ -433,45 +457,21 @@ def handle_ambiguity(matched_officials: Set[str], query: str, colloquial_to_offi
     return best_diseases if best_diseases else matched_officials
 
 
-def expand_query_with_abbreviations(query: str) -> str:
-    """УЛУЧШЕННАЯ ФУНКЦИЯ РАСШИРЕНИЯ ЗАПРОСОВ С ОБРАТНЫМ СЛОВАРЕМ"""
-    
-    # 1. ПЕРВЫЙ ЭТАП: РАСШИРЕНИЕ ВЕТЕРИНАРНЫМИ АББРЕВИАТУРАМИ
-    print(f"📥 Оригинальный запрос: '{query}'")
-    query = vet_abbr_manager.expand_query(query)
-    print(f"📤 После расширения аббревиатурами: '{query}'")
-    
-    # 2. ВТОРОЙ ЭТАП: СУЩЕСТВУЮЩАЯ ЛОГИКА С БОЛЕЗНЯМИ
-    try:
-        excel_file_path = 'data/processed/data_with_abbreviations_new.xlsx'
-        colloquial_to_official, abbr_to_official = load_disease_dictionary(excel_file_path)
-        
-        tokens = advanced_query_tokenization(query)
-        matched_officials = find_matches_with_context(tokens, colloquial_to_official, abbr_to_official, query)
-        resolved_officials = handle_ambiguity(matched_officials, query, colloquial_to_official)
-        
-        if resolved_officials:
-            sorted_officials = sorted(list(resolved_officials))
-            expanded = f"{query} {' '.join(sorted_officials)}"
-            
-            # ДОБАВЛЕНО: Применяем обратное расширение
-            expanded_with_reverse = apply_reverse_expansion(expanded)
-            
-            # ВАЖНО: Сохраняем исходную логику с post_process_results
-            final_result = post_process_results(expanded_with_reverse, query)
-            print(f"✅ Финальный расширенный запрос: '{final_result}'")
-            return final_result
-            
-    except Exception as e:
-        print(f"⚠️ Ошибка в расширении болезней: {e}")
-    
-    # ВАЖНО: Сохраняем исходную логику возврата
-    final_result = post_process_results(query, query)
-    print(f"✅ Финальный запрос: '{final_result}'")
-    return final_result
 
 
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+def normalize_query_abbreviations(query: str) -> str:
+    """Нормализует аббревиатуры в запросе к верхнему регистру"""
+    words = query.split()
+    normalized_words = []
+    
+    for word in words:
+        normalized_word = normalize_abbreviation_case(word)
+        normalized_words.append(normalized_word)
+    
+    return ' '.join(normalized_words)
+
+
 def post_process_results(expanded_query: str, original_query: str) -> str:
     words = expanded_query.split()
     seen = set()
@@ -479,7 +479,9 @@ def post_process_results(expanded_query: str, original_query: str) -> str:
     
     for word in words:
         if word not in seen:
-            result_words.append(word)
+            # Нормализуем аббревиатуры к верхнему регистру
+            normalized_word = normalize_abbreviation_case(word)
+            result_words.append(normalized_word)
             seen.add(word)
     
     result = ' '.join(result_words)
@@ -488,6 +490,30 @@ def post_process_results(expanded_query: str, original_query: str) -> str:
         return original_query
     
     return result
+
+
+def normalize_abbreviation_case(word: str) -> str:
+    """Нормализует регистр слова, если оно является аббревиатурой"""
+    word_upper = word.upper()
+    
+    # Проверяем, есть ли эта аббревиатура в словаре ветеринарных аббревиатур
+    if word_upper in vet_abbr_manager.abbreviations_dict:
+        return word_upper
+    
+    # Дополнительно проверяем в обратном словаре аббревиатур
+    try:
+        with open('data/reverse_abbreviations.json', 'r', encoding='utf-8') as f:
+            reverse_abbr_dict = json.load(f)
+            
+        # Ищем word_upper во всех списках аббревиатур
+        for full_name, abbr_list in reverse_abbr_dict.items():
+            if word_upper in abbr_list:
+                return word_upper
+    except Exception:
+        pass  # Игнорируем ошибки чтения файла
+    
+    # Если не найдена, возвращаем слово как есть
+    return word
 
 
 def apply_reverse_expansion(query: str) -> str:
@@ -528,18 +554,20 @@ def apply_reverse_expansion(query: str) -> str:
     seen_terms = set()
     result_words = []
     
-    # Сначала оригинальные слова
+    # Сначала оригинальные слова (нормализуем аббревиатуры)
     for word in words:
         word_lower = word.lower()
         if word_lower not in seen_terms:
-            result_words.append(word)
+            normalized_word = normalize_abbreviation_case(word)
+            result_words.append(normalized_word)
             seen_terms.add(word_lower)
     
-    # Затем новые термины
+    # Затем новые термины (тоже нормализуем)
     for term in expanded_terms:
         term_lower = term.lower()
         if term_lower not in seen_terms:
-            result_words.append(term)
+            normalized_term = normalize_abbreviation_case(term)
+            result_words.append(normalized_term)
             seen_terms.add(term_lower)
     
     result = ' '.join(result_words)

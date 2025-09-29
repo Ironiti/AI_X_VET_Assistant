@@ -1256,7 +1256,7 @@ async def handle_universal_search(message: Message, state: FSMContext):
         await handle_new_question_in_dialog(message, state)
         return
 
-    expanded_query = text #expand_query_with_abbreviations(text)
+    expanded_query = expand_query_with_abbreviations(text)
     # Проверяем, не кнопка ли это возврата
     if text == "🔙 Вернуться в главное меню" or text == "❌ Завершить диалог":
         return
@@ -1288,7 +1288,7 @@ async def handle_universal_search(message: Message, state: FSMContext):
 
 async def _process_confident_query(message: Message, state: FSMContext, query_type: str, text: str, metadata: Dict):
     user_id = message.from_user.id
-    expanded_query = text # expand_query_with_abbreviations(text)
+    expanded_query = expand_query_with_abbreviations(text)
     
     # Дополнительная проверка для общих вопросов
     general_question_keywords = [
@@ -1665,7 +1665,7 @@ async def handle_dialog(message: Message, state: FSMContext):
     data = await state.get_data()
     test_data = data.get("current_test")
 
-    expanded_query = text #expand_query_with_abbreviations(text)
+    expanded_query = expand_query_with_abbreviations(text)
     # Используем классификатор для определения типа нового запроса
     query_type, confidence, metadata = await ultimate_classifier.classify_with_certainty(expanded_query)
 
