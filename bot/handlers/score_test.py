@@ -5,6 +5,7 @@ from src.data_vectorization import DataProcessor
 from models.models_init import Google_Gemini_2_5_Flash_Lite as llm
 from bot.handlers.utils import normalize_test_code
 import re
+from bot.handlers.query_processing.query_preprocessing import expand_query_with_abbreviations
 
 def calculate_fuzzy_score(query: str, test_code: str, test_name: str = "") -> float:
     """Улучшенная функция для точного поиска по коду теста."""
@@ -276,9 +277,15 @@ async def select_best_match(
     if len(docs) == 1:
         return [docs[0][0]]
 
+    query = expand_query_with_abbreviations(query)
     options = "\n".join(
         [
-            f"{i}. {doc.metadata['test_name']} ({doc.metadata['test_code']}) - score: {score:.2f}"
+            f'''{i}. ({doc.metadata['test_name']}) 
+                     ({doc.metadata['test_code']}) 
+                     ({doc.metadata['code_letters']})
+                     ({doc.metadata['encoded']} 
+                      - score: {score:.2f}
+            '''
             for i, (doc, score) in enumerate(docs, 1)
         ]
     )

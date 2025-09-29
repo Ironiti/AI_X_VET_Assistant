@@ -19,6 +19,9 @@ def load_disease_dictionary(excel_file_path: str) -> Tuple[Dict[str, str], Dict[
         colloquial_to_official = {}
         abbr_to_official = {}
         
+        # ДОБАВЛЕНО: Обратный словарь для полных названий -> аббревиатуры
+        reverse_abbr_dict = defaultdict(list)
+        
         for _, row in df.iterrows():
             official_name = normalize_text(row['Название на русском'])
             if not official_name:
@@ -44,6 +47,9 @@ def load_disease_dictionary(excel_file_path: str) -> Tuple[Dict[str, str], Dict[
                                 abbr_to_official[abbr] = official_name
                                 colloquial_to_official[abbr] = official_name
                                 colloquial_to_official[abbr.lower()] = official_name
+                                # ДОБАВЛЕНО: В обратный словарь
+                                if abbr not in reverse_abbr_dict[official_name]:
+                                    reverse_abbr_dict[official_name].append(abbr)
             
             # Обработка ОФИЦИАЛЬНЫХ АББРЕВИАТУР
             abbr_text = str(row['Разговорная аббревиатура']).strip()
@@ -55,6 +61,9 @@ def load_disease_dictionary(excel_file_path: str) -> Tuple[Dict[str, str], Dict[
                         abbr_to_official[abbr_clean] = official_name
                         colloquial_to_official[abbr_clean] = official_name
                         colloquial_to_official[abbr_clean.lower()] = official_name
+                        # ДОБАВЛЕНО: В обратный словарь
+                        if abbr_clean not in reverse_abbr_dict[official_name]:
+                            reverse_abbr_dict[official_name].append(abbr_clean)
                         
                         # Создаем все возможные варианты для смешанных раскладок
                         mixed_variants = detect_and_normalize_mixed_abbreviations(abbr_clean)
@@ -63,6 +72,30 @@ def load_disease_dictionary(excel_file_path: str) -> Tuple[Dict[str, str], Dict[
                                 abbr_to_official[variant] = official_name
                                 colloquial_to_official[variant] = official_name
                                 colloquial_to_official[variant.lower()] = official_name
+        
+        # ДОБАВЛЕНО: Загружаем аббревиатуры образцов из Лист2
+        try:
+            df_samples = pd.read_excel(excel_file_path, sheet_name='Лист2')
+            for _, row in df_samples.iterrows():
+                if len(df_samples.columns) >= 2:
+                    abbr = str(row.iloc[0]).strip() if pd.notna(row.iloc[0]) else ""
+                    full_name = str(row.iloc[1]).strip() if pd.notna(row.iloc[1]) else ""
+                    
+                    if abbr and abbr != 'nan' and full_name and full_name != 'nan':
+                        abbr_upper = abbr.upper()
+                        full_name_lower = full_name.lower()
+                        
+                        # Добавляем в обратный словарь
+                        if abbr_upper not in reverse_abbr_dict[full_name_lower]:
+                            reverse_abbr_dict[full_name_lower].append(abbr_upper)
+                        
+                        # Также добавляем в обычные словари для совместимости
+                        colloquial_to_official[full_name_lower] = full_name_lower
+                        colloquial_to_official[abbr_upper] = full_name_lower
+                        abbr_to_official[abbr_upper] = full_name_lower
+                        
+        except Exception as e:
+            print(f"⚠️ Не удалось загрузить аббревиатуры образцов: {e}")
         
         # Убираем распространенные русские слова из аббревиатур
         common_russian_words = {
@@ -77,14 +110,53 @@ def load_disease_dictionary(excel_file_path: str) -> Tuple[Dict[str, str], Dict[
                 # Удаляем только если это короткое слово и не официальное название
                 if colloquial_to_official[word] != word:
                     del colloquial_to_official[word]
-        
-        with open('data/speaking_abbreviations.json', 'w', encoding='utf-8') as f:
-            json.dump(abbr_to_official, f, ensure_ascii=False, indent=2)
+
+        # ДОБАВЛЕНО: Сохраняем обратный словарь в JSON
+        with open('data/reverse_abbreviations.json', 'w', encoding='utf-8') as f:
+            reverse_dict_serializable = {k: v for k, v in reverse_abbr_dict.items()}
+            json.dump(reverse_dict_serializable, f, ensure_ascii=False, indent=2)
 
         return colloquial_to_official, abbr_to_official
         
     except Exception as e:
         raise Exception(f"Ошибка загрузки словаря: {e}")
+
+def expand_query_with_abbreviations(query: str) -> str:
+    """УЛУЧШЕННАЯ ФУНКЦИЯ РАСШИРЕНИЯ ЗАПРОСОВ С ОБРАТНЫМ СЛОВАРЕМ"""
+    
+    # 1. ПЕРВЫЙ ЭТАП: РАСШИРЕНИЕ ВЕТЕРИНАРНЫМИ АББРЕВИАТУРАМИ
+    print(f"📥 Оригинальный запрос: '{query}'")
+    query = vet_abbr_manager.expand_query(query)
+    print(f"📤 После расширения аббревиатурами: '{query}'")
+    
+    # 2. ВТОРОЙ ЭТАП: СУЩЕСТВУЮЩАЯ ЛОГИКА С БОЛЕЗНЯМИ
+    try:
+        excel_file_path = 'data/processed/data_with_abbreviations_new.xlsx'
+        colloquial_to_official, abbr_to_official = load_disease_dictionary(excel_file_path)
+        
+        tokens = advanced_query_tokenization(query)
+        matched_officials = find_matches_with_context(tokens, colloquial_to_official, abbr_to_official, query)
+        resolved_officials = handle_ambiguity(matched_officials, query, colloquial_to_official)
+        
+        if resolved_officials:
+            sorted_officials = sorted(list(resolved_officials))
+            expanded = f"{query} {' '.join(sorted_officials)}"
+            
+            # ДОБАВЛЕНО: Применяем обратное расширение
+            expanded_with_reverse = apply_reverse_expansion(expanded)
+            
+            # ВАЖНО: Сохраняем исходную логику с post_process_results
+            final_result = post_process_results(expanded_with_reverse, query)
+            print(f"✅ Финальный расширенный запрос: '{final_result}'")
+            return final_result
+            
+    except Exception as e:
+        print(f"⚠️ Ошибка в расширении болезней: {e}")
+    
+    # ВАЖНО: Сохраняем исходную логику возврата
+    final_result = post_process_results(query, query)
+    print(f"✅ Финальный запрос: '{final_result}'")
+    return final_result
 
 
 
@@ -362,7 +434,7 @@ def handle_ambiguity(matched_officials: Set[str], query: str, colloquial_to_offi
 
 
 def expand_query_with_abbreviations(query: str) -> str:
-    """УЛУЧШЕННАЯ ФУНКЦИЯ РАСШИРЕНИЯ ЗАПРОСОВ"""
+    """УЛУЧШЕННАЯ ФУНКЦИЯ РАСШИРЕНИЯ ЗАПРОСОВ С ОБРАТНЫМ СЛОВАРЕМ"""
     
     # 1. ПЕРВЫЙ ЭТАП: РАСШИРЕНИЕ ВЕТЕРИНАРНЫМИ АББРЕВИАТУРАМИ
     print(f"📥 Оригинальный запрос: '{query}'")
@@ -381,15 +453,23 @@ def expand_query_with_abbreviations(query: str) -> str:
         if resolved_officials:
             sorted_officials = sorted(list(resolved_officials))
             expanded = f"{query} {' '.join(sorted_officials)}"
-            final_result = post_process_results(expanded, query)
+            
+            # ДОБАВЛЕНО: Применяем обратное расширение
+            expanded_with_reverse = apply_reverse_expansion(expanded)
+            
+            # ВАЖНО: Сохраняем исходную логику с post_process_results
+            final_result = post_process_results(expanded_with_reverse, query)
             print(f"✅ Финальный расширенный запрос: '{final_result}'")
             return final_result
             
     except Exception as e:
         print(f"⚠️ Ошибка в расширении болезней: {e}")
     
-    print(f"✅ Финальный запрос: '{query}'")
-    return query
+    # ВАЖНО: Сохраняем исходную логику возврата
+    final_result = post_process_results(query, query)
+    print(f"✅ Финальный запрос: '{final_result}'")
+    return final_result
+
 
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 def post_process_results(expanded_query: str, original_query: str) -> str:
@@ -407,6 +487,62 @@ def post_process_results(expanded_query: str, original_query: str) -> str:
     if normalize_text(result) == normalize_text(original_query):
         return original_query
     
+    return result
+
+
+def apply_reverse_expansion(query: str) -> str:
+    """Добавляет аббревиатуры к полным названиям в запросе"""
+    try:
+        # Загружаем обратный словарь
+        with open('data/reverse_abbreviations.json', 'r', encoding='utf-8') as f:
+            reverse_abbr_dict = json.load(f)
+    except Exception as e:
+        print(f"⚠️ Не удалось загрузить обратный словарь: {e}")
+        return query
+    
+    if not reverse_abbr_dict:
+        return query
+    
+    query_lower = query.lower()
+    words = query.split()
+    expanded_terms = set(words)
+    
+    # Ищем полные названия в запросе и добавляем соответствующие аббревиатуры
+    for full_name, abbr_list in reverse_abbr_dict.items():
+        if re.search(r'\b' + re.escape(full_name) + r'\b', query_lower) and abbr_list:
+            for abbr in abbr_list:
+                if abbr not in expanded_terms:
+                    print(f"  🔄 Обратное расширение: '{full_name}' -> '{abbr}'")
+                    expanded_terms.add(abbr)
+    
+    # Также проверяем отдельные слова
+    for word in words:
+        word_lower = word.lower()
+        if word_lower in reverse_abbr_dict and len(word) > 2 and not word.isupper():
+            for abbr in reverse_abbr_dict[word_lower]:
+                if abbr not in expanded_terms:
+                    print(f"  🔄 Слово -> Аббревиатура: '{word}' -> '{abbr}'")
+                    expanded_terms.add(abbr)
+    
+    # Собираем результат
+    seen_terms = set()
+    result_words = []
+    
+    # Сначала оригинальные слова
+    for word in words:
+        word_lower = word.lower()
+        if word_lower not in seen_terms:
+            result_words.append(word)
+            seen_terms.add(word_lower)
+    
+    # Затем новые термины
+    for term in expanded_terms:
+        term_lower = term.lower()
+        if term_lower not in seen_terms:
+            result_words.append(term)
+            seen_terms.add(term_lower)
+    
+    result = ' '.join(result_words)
     return result
 
 

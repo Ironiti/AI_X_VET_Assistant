@@ -130,6 +130,7 @@ def _rerank_hits_by_query(hits: List[Tuple[Document, float]], query: str) -> Lis
     if not hits:
         return hits
     # Выделяем только буквы в верхнем регистре
+    query = expand_query_with_abbreviations(query)
     query_alpha = "".join(ch for ch in (query or "") if ch.isalpha()).upper()
     if len(query_alpha) < 2 or len(query_alpha) > 6:
         return hits

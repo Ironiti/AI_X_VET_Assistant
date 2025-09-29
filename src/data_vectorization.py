@@ -86,7 +86,7 @@ class DataProcessor:
         special_short_words = {'пцр', 'ифа', 'эдта', 'днк', 'рнк', 'ат', 'аг', 'igg', 'igm', 'ca', 'cd', 'cv'}
         
         for word in words:
-            if len(word) >= 3 or word in special_short_words:
+            if len(word) >= 1 or word in special_short_words:
                 filtered_words.append(word)
         
         return ' '.join(filtered_words)
@@ -102,6 +102,7 @@ class DataProcessor:
 
         print('[INFO] Creating vector store...')
         records = self.df.dropna(subset=["column_for_embeddings"]).copy()
+        records = records.fillna('')
 
         texts = records["column_for_embeddings"].tolist()
         metadatas = records.to_dict(orient="records")
