@@ -153,7 +153,55 @@ def _rerank_hits_by_query(hits: List[Tuple[Document, float]], query: str) -> Lis
     rescored.sort(key=lambda x: x[1], reverse=True)
     return rescored
 
-
+async def find_container_photo_smart(db, container_type: str):
+    """
+    Умный поиск фото контейнера с учетом вариантов в БД
+    """
+    
+    # Определяем тип
+    is_test_tube = "пробирк" in container_type.lower()
+    is_container = "контейнер" in container_type.lower()
+    
+    # Сначала пробуем точный поиск
+    photo = await db.get_container_photo(container_type)
+    if photo:
+        photo['display_name'] = photo.get('container_type', container_type)
+        return photo
+    
+    # Генерируем варианты для поиска
+    search_variants = []
+    
+    # Варианты с числами
+    if not re.match(r'^\d+\s', container_type):
+        search_variants.extend([
+            f"2 {container_type.replace('Пробирка', 'Пробирки')}",
+            f"3 {container_type.replace('Пробирка', 'Пробирки')}",
+            container_type  # Оригинал
+        ])
+    else:
+        search_variants.append(container_type)
+    
+    # Варианты регистра для "с"
+    for variant in search_variants[:]:  # Копия для итерации
+        # С большой буквы
+        upper_variant = re.sub(r'\bс\s+', 'С ', variant)
+        if upper_variant != variant:
+            search_variants.append(upper_variant)
+        
+        # С маленькой буквы  
+        lower_variant = re.sub(r'\bС\s+', 'с ', variant)
+        if lower_variant != variant:
+            search_variants.append(lower_variant)
+    
+    # Пробуем все варианты
+    for variant in search_variants:
+        photo = await db.get_container_photo(variant)
+        if photo:
+            # Сохраняем оригинальное название для отображения
+            photo['display_name'] = photo.get('container_type', container_type)
+            return photo
+    
+    return None
 
 def create_paginated_keyboard(
     tests: List[Document],
@@ -261,9 +309,6 @@ async def handle_new_question_in_dialog(message: Message, state: FSMContext):
         reply_markup=get_back_to_menu_kb(),
     )
 
-    # Показываем персонализированные подсказки
-    await show_personalized_suggestions(message, state)
-
     # Сохраняем историю просмотров при переходе к новому поиску
     await state.set_state(QuestionStates.waiting_for_search_type)
     if last_viewed:
@@ -282,11 +327,6 @@ async def handle_new_search(callback: CallbackQuery, state: FSMContext):
         "💡 Введите код теста (например: AN5) или опишите, что вы ищете:",
         reply_markup=get_back_to_menu_kb(),
     )
-
-    # Показываем персонализированные подсказки
-    message = callback.message
-    message.from_user = callback.from_user
-    await show_personalized_suggestions(message, state)
 
     await state.set_state(QuestionStates.waiting_for_search_type)
     if last_viewed:
@@ -384,11 +424,9 @@ async def handle_show_container_photos_callback(callback: CallbackQuery):
     """Обработчик для показа фото контейнеров"""
     await callback.answer()
 
-    # Извлекаем код теста
     test_code = callback.data.split(":", 1)[1]
 
     try:
-        # Ищем тест в векторной БД
         processor = DataProcessor()
         processor.load_vector_store()
 
@@ -399,146 +437,231 @@ async def handle_show_container_photos_callback(callback: CallbackQuery):
             return
 
         doc = results[0][0] if isinstance(results[0], tuple) else results[0]
+        raw_metadata = doc.metadata
         test_data = format_test_data(doc.metadata)
 
-        # Собираем ВСЕ типы контейнеров из ОБОИХ полей
-        raw_container_types = []
+        # Собираем все контейнеры
+        all_containers = []
         
-        # 1. Проверяем primary_container_type (ПРИОРИТЕТ)
-        primary_container = str(test_data.get("primary_container_type", "")).strip()
+        # Функция для разделения контейнеров по "или"
+        def split_by_or(container_str: str) -> List[str]:
+            """Разделяет строку контейнера по 'или' """
+            if " или " in container_str.lower():
+                # Разделяем по "или" (учитываем разный регистр)
+                parts = re.split(r'\s+или\s+', container_str, flags=re.IGNORECASE)
+                return [part.strip() for part in parts if part.strip()]
+            return [container_str]
+        
+        # Парсим primary_container_type
+        primary_container = str(raw_metadata.get("primary_container_type", "")).strip()
         if primary_container and primary_container.lower() not in ["не указан", "нет", "-", "", "none", "null"]:
-            # Убираем кавычки и нормализуем
             primary_container = primary_container.replace('"', "").replace("\n", " ")
             primary_container = " ".join(primary_container.split())
             
-            # Разбиваем по *I* если есть несколько контейнеров
             if "*I*" in primary_container:
                 parts = [ct.strip() for ct in primary_container.split("*I*")]
-                raw_container_types.extend(parts)
             else:
-                raw_container_types.append(primary_container)
+                parts = [primary_container]
+            
+            # Обрабатываем "или" в каждой части
+            for part in parts:
+                all_containers.extend(split_by_or(part))
         
-        # 2. Проверяем обычный container_type
-        container_type_raw = str(test_data.get("container_type", "")).strip()
+        # Парсим container_type
+        container_type_raw = str(raw_metadata.get("container_type", "")).strip()
         if container_type_raw and container_type_raw.lower() not in ["не указан", "нет", "-", "", "none", "null"]:
-            # Убираем кавычки и нормализуем
             container_type_raw = container_type_raw.replace('"', "").replace("\n", " ")
             container_type_raw = " ".join(container_type_raw.split())
             
-            # Разбиваем по *I* если есть несколько контейнеров
             if "*I*" in container_type_raw:
                 parts = [ct.strip() for ct in container_type_raw.split("*I*")]
-                raw_container_types.extend(parts)
             else:
-                raw_container_types.append(container_type_raw)
+                parts = [container_type_raw]
+            
+            # Обрабатываем "или" в каждой части
+            for part in parts:
+                all_containers.extend(split_by_or(part))
         
-        # Используем функцию для удаления дубликатов с нормализацией
-        container_types_to_check = deduplicate_container_names(raw_container_types)
+        # Функция для нормализации контейнера для сравнения дубликатов
+        def normalize_for_comparison(container: str) -> str:
+            """Нормализует контейнер для проверки дубликатов"""
+            norm = container.lower().strip()
+            # Убираем числа в начале (2 пробирки -> пробирки)
+            norm = re.sub(r'^\d+\s+', '', norm)
+            # Заменяем разные варианты написания на единый формат
+            norm = norm.replace(" / ", " ").replace(" + ", " ")
+            # Приводим к единственному числу
+            norm = norm.replace("пробирки", "пробирка")
+            # Убираем множественные пробелы
+            norm = " ".join(norm.split())
+            return norm
         
-        # Если нет контейнеров для проверки
-        if not container_types_to_check:
+        # Дедупликация с учетом эквивалентности
+        unique_containers = []
+        seen_normalized = set()
+        
+        for container in all_containers:
+            if not container:
+                continue
+                
+            # Для дедупликации используем нормализованную версию
+            normalized = normalize_for_comparison(container)
+            
+            if normalized not in seen_normalized:
+                seen_normalized.add(normalized)
+                unique_containers.append(container)  # Сохраняем оригинальное написание
+        
+        if not unique_containers:
             await callback.message.answer("❌ Для этого теста не указаны типы контейнеров")
             return
         
-        # Собираем все фото контейнеров
+        # Ищем фото для каждого уникального контейнера
         found_photos = []
+        already_shown_file_ids = set()
+        not_found_containers = []
         
-        for ct in container_types_to_check:
-            # Контейнер уже нормализован функцией deduplicate_container_names
-            photo_data = await db.get_container_photo(ct)
-            if photo_data:
-                found_photos.append({
-                    "container_type": ct,
-                    "file_id": photo_data["file_id"],
-                    "description": photo_data.get("description")
-                })
-        
-        # Если есть фото - отправляем
-        if found_photos:
-            message_ids = []
+        for container in unique_containers:
+            # Варианты для поиска в БД
+            search_variants = [
+                container,  # Оригинал
+                container.replace(" / ", " + "),  # Меняем / на +
+                container.replace(" + ", " / "),  # Меняем + на /
+            ]
             
-            # Отправляем все фото
-            for i, photo_info in enumerate(found_photos):
-                is_last = i == len(found_photos) - 1
+            # Добавляем варианты без чисел
+            container_no_number = re.sub(r'^\d+\s+', '', container)
+            if container_no_number != container:
+                search_variants.extend([
+                    container_no_number,
+                    container_no_number.replace(" / ", " + "),
+                    container_no_number.replace(" + ", " / "),
+                ])
+            
+            # Добавляем варианты с единственным числом
+            if "пробирки" in container.lower():
+                singular = container.replace("пробирки", "пробирка").replace("Пробирки", "Пробирка")
+                search_variants.append(singular)
+                search_variants.append(re.sub(r'^\d+\s+', '', singular))
+            
+            photo_data = None
+            for variant in search_variants:
+                # Сначала точный поиск
+                photo_data = await db.get_container_photo(variant)
+                if photo_data:
+                    break
+                    
+                # Если не нашли - умный поиск
+                if not photo_data:
+                    photo_data = await find_container_photo_smart(db, variant)
+                    if photo_data:
+                        break
+            
+            if photo_data:
+                file_id = photo_data.get("file_id")
                 
-                # Формируем подпись
+                # Проверяем дубликаты по file_id
+                if file_id not in already_shown_file_ids:
+                    already_shown_file_ids.add(file_id)
+                    found_photos.append({
+                        "container_type": container,  # Используем оригинальное название
+                        "file_id": file_id,
+                        "description": photo_data.get("description")
+                    })
+            else:
+                # Сохраняем контейнеры, для которых не нашли фото
+                not_found_containers.append(container)
+        
+        # Отправляем найденные фото
+        if found_photos:
+            if len(found_photos) == 1:
+                # Одно фото
+                photo_info = found_photos[0]
                 container_name = html.escape(photo_info['container_type'])
                 caption = f"📦 Контейнер: {container_name}"
                 if photo_info.get('description'):
                     description = html.escape(photo_info['description'])
                     caption += f"\n📝 {description}"
                 
-                if is_last and len(found_photos) > 1:
-                    # Последнее фото с кнопкой скрытия всех
-                    hide_keyboard = InlineKeyboardMarkup(
-                        inline_keyboard=[
-                            [
-                                InlineKeyboardButton(
-                                    text="🙈 Скрыть все фото",
-                                    callback_data=f"hide_photos:{test_code}:placeholder",
-                                )
-                            ]
-                        ]
-                    )
-                    sent_msg = await callback.message.answer_photo(
-                        photo=photo_info['file_id'],
-                        caption=caption,
-                        reply_markup=hide_keyboard
-                    )
-                elif is_last and len(found_photos) == 1:
-                    # Единственное фото с кнопкой
-                    hide_keyboard = InlineKeyboardMarkup(
-                        inline_keyboard=[
-                            [
-                                InlineKeyboardButton(
-                                    text="🙈 Скрыть фото",
-                                    callback_data=f"hide_single:{test_code}",
-                                )
-                            ]
-                        ]
-                    )
-                    sent_msg = await callback.message.answer_photo(
-                        photo=photo_info['file_id'],
-                        caption=caption,
-                        reply_markup=hide_keyboard
-                    )
-                else:
-                    # Остальные фото без кнопки
-                    sent_msg = await callback.message.answer_photo(
-                        photo=photo_info['file_id'],
-                        caption=caption
-                    )
-                
-                message_ids.append(sent_msg.message_id)
-            
-            # Обновляем callback_data последнего сообщения со всеми ID (если фото больше одного)
-            if len(message_ids) > 1:
                 hide_keyboard = InlineKeyboardMarkup(
                     inline_keyboard=[
                         [
                             InlineKeyboardButton(
-                                text="🙈 Скрыть все фото",
-                                callback_data=f"hide_photos:{test_code}:{','.join(map(str, message_ids))}",
+                                text="🙈 Скрыть фото",
+                                callback_data=f"hide_single:{test_code}",
                             )
                         ]
                     ]
                 )
                 
-                # Редактируем кнопку последнего сообщения
-                await callback.bot.edit_message_reply_markup(
-                    chat_id=callback.message.chat.id,
-                    message_id=message_ids[-1],
-                    reply_markup=hide_keyboard,
+                await callback.message.answer_photo(
+                    photo=photo_info['file_id'],
+                    caption=caption,
+                    reply_markup=hide_keyboard
                 )
-        
+            else:
+                # Несколько фото - медиагруппа
+                from aiogram.types import InputMediaPhoto
+                
+                media_group = []
+                test_name = html.escape(test_data.get("test_name", ""))
+                main_caption = f"📦 <b>Контейнеры для теста {test_code}</b>\n{test_name}\n\n"
+                
+                for i, photo_info in enumerate(found_photos):
+                    container_name = html.escape(photo_info['container_type'])
+                    
+                    if i == 0:
+                        caption = main_caption + f"▫️ {container_name}"
+                    else:
+                        caption = f"▫️ {container_name}"
+                    
+                    if photo_info.get('description'):
+                        description = html.escape(photo_info['description'])
+                        caption += f" - {description}"
+                    
+                    media_group.append(
+                        InputMediaPhoto(
+                            media=photo_info['file_id'],
+                            caption=caption,
+                            parse_mode="HTML"
+                        )
+                    )
+                
+                messages = await callback.message.answer_media_group(media_group)
+                
+                hide_keyboard = InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="🙈 Скрыть все фото",
+                                callback_data=f"hide_album:{messages[0].message_id}",
+                            )
+                        ]
+                    ]
+                )
+                
+                await callback.message.answer(
+                    f"Показано {len(found_photos)} фото контейнеров",
+                    reply_markup=hide_keyboard
+                )
+            
+            # Если есть контейнеры без фото, сообщаем об этом
+            if not_found_containers:
+                not_found_msg = "\n⚠️ Не найдены фото для:\n"
+                for ct in not_found_containers[:5]:
+                    not_found_msg += f"• {ct}\n"
+                if len(not_found_containers) > 5:
+                    not_found_msg += f"... и еще {len(not_found_containers) - 5}"
+                
+                await callback.message.answer(not_found_msg)
+                
         else:
-            # Фото не найдены - показываем какие контейнеры искали
+            # Все контейнеры не найдены
             not_found_msg = "❌ Фото контейнеров не найдены в базе\n\n"
-            not_found_msg += "🔍 Искали контейнеры:\n"
-            for ct in container_types_to_check[:5]:  # Показываем первые 5
+            not_found_msg += "🔍 Искали типы:\n"
+            for ct in unique_containers[:10]:
                 not_found_msg += f"• {ct}\n"
-            if len(container_types_to_check) > 5:
-                not_found_msg += f"... и еще {len(container_types_to_check) - 5}"
+            if len(unique_containers) > 10:
+                not_found_msg += f"... и еще {len(unique_containers) - 10}"
             
             await callback.message.answer(not_found_msg)
 
@@ -547,9 +670,6 @@ async def handle_show_container_photos_callback(callback: CallbackQuery):
         import traceback
         traceback.print_exc()
         await callback.message.answer("❌ Ошибка при загрузке фото")
-
-
-
 
 @questions_router.callback_query(F.data.startswith("hide_single:"))
 async def handle_hide_single_photo(callback: CallbackQuery):
@@ -561,6 +681,36 @@ async def handle_hide_single_photo(callback: CallbackQuery):
         await callback.message.delete()
     except Exception as e:
         print(f"[ERROR] Failed to hide single photo: {e}")
+        
+@questions_router.callback_query(F.data.startswith("hide_album:"))
+async def handle_hide_album(callback: CallbackQuery):
+    """Обработчик для скрытия медиагруппы (нескольких фото)"""
+    await callback.answer("Фото скрыты")
+    
+    try:
+        # Извлекаем message_id первого сообщения из медиагруппы
+        parts = callback.data.split(":")
+        if len(parts) > 1:
+            first_message_id = int(parts[1])
+            
+            # Пытаемся удалить все сообщения медиагруппы
+            # Обычно медиагруппа состоит из последовательных message_id
+            for i in range(10):  # Максимум 10 фото в медиагруппе
+                try:
+                    await callback.bot.delete_message(
+                        chat_id=callback.message.chat.id,
+                        message_id=first_message_id + i
+                    )
+                except Exception:
+                    # Если сообщение не существует или уже удалено - прерываем цикл
+                    break
+        
+        # Удаляем также сообщение с кнопкой "Скрыть все фото"
+        await callback.message.delete()
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to hide album: {e}")
+        await callback.answer("Ошибка при скрытии фото", show_alert=True)
 
 
 @questions_router.callback_query(F.data == "close_keyboard")
@@ -1020,9 +1170,6 @@ async def start_question(message: Message, state: FSMContext):
 
     await db.clear_buffer(user_id)
     await message.answer(prompt, reply_markup=get_back_to_menu_kb())
-
-    # Показываем персонализированные подсказки
-    await show_personalized_suggestions(message, state)
 
     await state.set_state(QuestionStates.waiting_for_search_type)
 
@@ -1720,69 +1867,6 @@ async def handle_context_switch(message: Message, state: FSMContext, new_query: 
         message.text = new_query
         await handle_name_search(message, state)
 
-
-async def show_personalized_suggestions(message: Message, state: FSMContext):
-    """Показывает персонализированные подсказки при начале поиска"""
-    user_id = message.from_user.id
-
-    try:
-        # Получаем подсказки
-        suggestions = await db.get_search_suggestions(user_id)
-
-        if suggestions:
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[])
-
-            # Группируем по типам
-            frequent = [s for s in suggestions if s["type"] == "frequent"]
-            recent = [s for s in suggestions if s["type"] == "recent"]
-
-            if frequent:
-                # Добавляем заголовок
-                keyboard.inline_keyboard.append(
-                    [
-                        InlineKeyboardButton(
-                            text="⭐ Часто используемые:", callback_data="ignore"
-                        )
-                    ]
-                )
-
-                for sug in frequent[:3]:
-                    keyboard.inline_keyboard.append(
-                        [
-                            InlineKeyboardButton(
-                                text=f"{sug['code']} - {sug['name'][:40]}... ({sug['frequency']}x)",
-                                callback_data=f"quick_test:{sug['code']}",
-                            )
-                        ]
-                    )
-
-            if recent:
-                keyboard.inline_keyboard.append(
-                    [
-                        InlineKeyboardButton(
-                            text="🕐 Недавние поиски:", callback_data="ignore"
-                        )
-                    ]
-                )
-
-                for sug in recent[:2]:
-                    keyboard.inline_keyboard.append(
-                        [
-                            InlineKeyboardButton(
-                                text=f"{sug['code']} - {sug['name'][:40]}...",
-                                callback_data=f"quick_test:{sug['code']}",
-                            )
-                        ]
-                    )
-
-            await message.answer(
-                "💡 Быстрый доступ к вашим тестам:", reply_markup=keyboard
-            )
-    except Exception as e:
-        print(f"[ERROR] Failed to show personalized suggestions: {e}")
-        # Не показываем ошибку пользователю, просто не показываем подсказки
-
-
 async def send_test_info_with_photo(
     message: Message, test_data: Dict, response_text: str
 ):
@@ -2075,6 +2159,8 @@ async def handle_general_question(message: Message, state: FSMContext, question_
                     departments.add(dept)
             
             context_info += f"\n📊 Общая статистика: {len(departments)} видов исследований\n"
+            
+        user_name = get_user_first_name(user)
 
         # 6. Промпт для LLM
         system_prompt = f"""
@@ -2084,7 +2170,7 @@ async def handle_general_question(message: Message, state: FSMContext, question_
 
             ## Источники информации
             Контекст: {context_info}
-            Постоянно обращайся к пользователю по его имени {user}, без фамилии (если она есть)
+            В начале общения пиши имя пользователя без приветствия: {user_name}, и сам ответ
 
             ## Основные принципы работы
 
