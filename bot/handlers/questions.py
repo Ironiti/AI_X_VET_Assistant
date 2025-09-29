@@ -2171,7 +2171,7 @@ async def handle_general_question(message: Message, state: FSMContext, question_
 
             ## Источники информации
             Контекст: {context_info}
-            В начале общения пиши имя пользователя без приветствия: {user_name}, и сам ответ
+            В начале общения обращайся к пользователю без приветствия. Его зовут: {user_name}
 
             ## Основные принципы работы
 
@@ -2834,9 +2834,8 @@ async def handle_switch_view(callback: CallbackQuery, state: FSMContext):
         print(f"[ERROR] Failed to switch view: {e}")
         await callback.answer("Ошибка переключения", show_alert=True)
 
-# Модифицируем функцию _handle_code_search_internal
 async def _handle_code_search_internal(message: Message, state: FSMContext, search_text: str = None):
-    """Внутренняя функция обработки поиска по коду с пагинацией и фильтрацией по животным"""
+    """Внутренняя функция обработки поиска по коду БЕЗ фильтрации по типу"""
     data = await state.get_data()
     if data.get("is_processing", False):
         await message.answer(
@@ -2852,8 +2851,7 @@ async def _handle_code_search_internal(message: Message, state: FSMContext, sear
     # Используем переданный текст или текст из сообщения
     original_input = search_text if search_text else message.text.strip()
 
-    # Получаем флаги из состояния
-    show_profiles = data.get("show_profiles", False)
+    # Получаем оригинальный запрос из состояния
     original_query = data.get("original_query", original_input)
 
     # Сохраняем статистику
@@ -2875,10 +2873,9 @@ async def _handle_code_search_internal(message: Message, state: FSMContext, sear
         except Exception:
             gif_msg = None
 
-        # Определяем что ищем
-        search_type = "профили" if show_profiles else "тесты"
+        # Просто пишем "Ищу по коду" без указания типа
         loading_msg = await message.answer(
-            f"🔍 Ищу {search_type} по коду...\n⏳ Анализирую данные..."
+            f"🔍 Ищу по коду...\n⏳ Анализирую данные..."
         )
         if loading_msg:
             animation_task = asyncio.create_task(animate_loading(loading_msg))
@@ -2897,28 +2894,23 @@ async def _handle_code_search_internal(message: Message, state: FSMContext, sear
             processor, original_input
         )
 
-        # Фильтруем результат по типу
-        if result:
-            filtered = filter_results_by_type([result], show_profiles)
-            if not filtered:
-                result = None
+        # НЕ фильтруем результат по типу - поиск по коду должен находить всё
 
         if current_task and current_task.cancelled():
             raise asyncio.CancelledError()
 
-        # НОВАЯ ЛОГИКА: Фильтрация по животным из запроса (только если не нашли точный результат)
+        # Извлекаем животных из запроса для фильтрации (только если не нашли точный результат)
         animal_types = set()
         if not result:
             animal_types = animal_filter.extract_animals_from_query(original_query)
 
         if not result:
-            # Ищем похожие тесты с фильтрацией по типу
+            # Ищем похожие тесты БЕЗ фильтрации по типу
             similar_tests = await fuzzy_test_search(
                 processor, normalized_input, threshold=30
             )
 
-            # Фильтруем по типу
-            similar_tests = filter_results_by_type(similar_tests, show_profiles)
+            # НЕ фильтруем по типу профиль/тест
 
             # Применяем фильтр по животным, если он есть
             if animal_types:
@@ -2963,7 +2955,7 @@ async def _handle_code_search_internal(message: Message, state: FSMContext, sear
                 )
                 
                 response = (
-                    f"❌ {search_type.capitalize()} с кодом '<code>{normalized_input}</code>' не найден.\n\n"
+                    f"❌ Точное совпадение для кода '<code>{normalized_input}</code>' не найдено.\n\n"
                 )
                 
                 # Добавляем информацию о фильтрации по животным, если она применялась
@@ -2971,7 +2963,7 @@ async def _handle_code_search_internal(message: Message, state: FSMContext, sear
                     animal_display = animal_filter.get_animal_display_names(animal_types)
                     response += f"🐾 <b>Фильтр по животным:</b> {animal_display}\n\n"
                 
-                response += f"🔍 <b>Найдены похожие {search_type} ({len(similar_tests)} шт.)</b>"
+                response += f"🔍 <b>Найдены похожие результаты ({len(similar_tests)} шт.)</b>"
                 
                 if total_pages > 1:
                     response += f" <b>(страница 1 из {total_pages}):</b>\n\n"
@@ -2984,9 +2976,12 @@ async def _handle_code_search_internal(message: Message, state: FSMContext, sear
                     test_code = sanitize_test_code_for_display(test_data["test_code"])
                     test_name = html.escape(test_data["test_name"])
                     
+                    # Добавляем метку типа для информативности
+                    type_label = "🔬 Профиль" if is_profile_test(test_code) else "🧪 Тест"
+                    
                     link = create_test_link(test_code)
                     response += (
-                        f"<b>{i}.</b> <a href='{link}'>{test_code}</a> - {test_name}\n"
+                        f"<b>{i}.</b> {type_label}: <a href='{link}'>{test_code}</a> - {test_name}\n"
                         f"   📊 Схожесть: {score}%\n\n"
                     )
                 
@@ -3003,22 +2998,20 @@ async def _handle_code_search_internal(message: Message, state: FSMContext, sear
                 )
             else:
                 # Ничего не найдено
-                error_msg = f"❌ {search_type.capitalize()} с кодом '{normalized_input}' не найден.\n"
+                error_msg = f"❌ Код '{normalized_input}' не найден в базе данных.\n"
                 
                 # Добавляем информацию о фильтрации по животным, если она применялась
                 if animal_types:
                     animal_display = animal_filter.get_animal_display_names(animal_types)
                     error_msg += f"🐾 <b>Фильтр по животным:</b> {animal_display}\n\n"
                     
-                if show_profiles:
-                    error_msg += "💡 Попробуйте поиск без указания 'профили' для обычных тестов."
-                else:
-                    error_msg += "💡 Добавьте слово 'профили' для поиска профилей тестов."
+                error_msg += "💡 Попробуйте проверить правильность написания кода."
                     
-                await message.answer(error_msg, reply_markup=get_back_to_menu_kb())
+                await message.answer(error_msg, reply_markup=get_back_to_menu_kb(), parse_mode="HTML")
 
             await state.set_state(QuestionStates.in_dialog)
-            await state.update_data(show_profiles=False, search_text=None)
+            # Убираем сброс флагов при поиске по коду
+            await state.update_data(search_text=None)
             return
 
         # Найден точный результат - показываем подробную информацию
@@ -3068,7 +3061,7 @@ async def _handle_code_search_internal(message: Message, state: FSMContext, sear
         await state.update_data(
             current_test=test_data,
             last_viewed_test=test_data["test_code"],
-            show_profiles=False,
+            # Убираем сброс флагов при поиске по коду
             search_text=None
         )
 
@@ -3100,7 +3093,7 @@ async def _handle_code_search_internal(message: Message, state: FSMContext, sear
             reply_markup=get_back_to_menu_kb()
         )
         await state.set_state(QuestionStates.waiting_for_search_type)
-        await state.update_data(show_profiles=False, search_text=None)
+        await state.update_data(search_text=None)
 
     finally:
         await state.update_data(is_processing=False, current_task=None)
