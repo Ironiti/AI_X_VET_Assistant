@@ -600,41 +600,37 @@ async def handle_show_container_photos_callback(callback: CallbackQuery):
                     reply_markup=hide_keyboard
                 )
             else:
-                # Несколько фото - медиагруппа
-                from aiogram.types import InputMediaPhoto
-                
-                media_group = []
-                test_name = html.escape(test_data.get("test_name", ""))
-                main_caption = f"📦 <b>Контейнеры для теста {test_code}</b>\n{test_name}\n\n"
+                # Несколько фото - отправляем каждое отдельно
+                sent_messages = []
                 
                 for i, photo_info in enumerate(found_photos):
                     container_name = html.escape(photo_info['container_type'])
                     
-                    if i == 0:
-                        caption = main_caption + f"▫️ {container_name}"
-                    else:
-                        caption = f"▫️ {container_name}"
+                    # Только название контейнера как подпись
+                    caption = f"📦 {container_name}"
                     
-                    if photo_info.get('description'):
-                        description = html.escape(photo_info['description'])
-                        caption += f" - {description}"
-                    
-                    media_group.append(
-                        InputMediaPhoto(
-                            media=photo_info['file_id'],
-                            caption=caption,
-                            parse_mode="HTML"
-                        )
+                    # Отправляем каждое фото отдельно без кнопок
+                    sent_msg = await callback.message.answer_photo(
+                        photo=photo_info['file_id'],
+                        caption=caption,
+                        parse_mode="HTML"
                     )
+                    sent_messages.append(sent_msg)
+                    
+                    # Небольшая задержка между отправками для избежания спама
+                    if i < len(found_photos) - 1:
+                        await asyncio.sleep(0.3)
                 
-                messages = await callback.message.answer_media_group(media_group)
+                # Отправляем общую кнопку для скрытия всех фото
+                message_ids = [msg.message_id for msg in sent_messages]
+                message_ids_str = ",".join(map(str, message_ids))
                 
                 hide_keyboard = InlineKeyboardMarkup(
                     inline_keyboard=[
                         [
                             InlineKeyboardButton(
                                 text="🙈 Скрыть все фото",
-                                callback_data=f"hide_album:{messages[0].message_id}",
+                                callback_data=f"hide_multiple:{message_ids_str}",
                             )
                         ]
                     ]
@@ -682,10 +678,42 @@ async def handle_hide_single_photo(callback: CallbackQuery):
         await callback.message.delete()
     except Exception as e:
         print(f"[ERROR] Failed to hide single photo: {e}")
+
+@questions_router.callback_query(F.data.startswith("hide_multiple:"))
+async def handle_hide_multiple_photos(callback: CallbackQuery):
+    """Обработчик для скрытия нескольких отдельных фото"""
+    await callback.answer("Фото скрыты")
+    
+    try:
+        # Извлекаем message_ids из callback_data
+        parts = callback.data.split(":")
+        if len(parts) > 1:
+            message_ids_str = parts[1]
+            message_ids = [int(mid) for mid in message_ids_str.split(",") if mid.isdigit()]
+            
+            # Удаляем все фото по их message_id
+            for message_id in message_ids:
+                try:
+                    await callback.bot.delete_message(
+                        chat_id=callback.message.chat.id,
+                        message_id=message_id
+                    )
+                except Exception:
+                    # Если сообщение не существует или уже удалено - продолжаем
+                    continue
         
+        # Удаляем также сообщение с кнопкой "Скрыть все фото"
+        await callback.message.delete()
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to hide multiple photos: {e}")
+        await callback.answer("Ошибка при скрытии фото", show_alert=True)
+        
+# Обработчик hide_album больше не нужен, так как теперь фото отправляются по отдельности
+# Оставляем его для совместимости со старыми сообщениями, если они есть
 @questions_router.callback_query(F.data.startswith("hide_album:"))
 async def handle_hide_album(callback: CallbackQuery):
-    """Обработчик для скрытия медиагруппы (нескольких фото)"""
+    """Обработчик для скрытия медиагруппы (устаревший, для совместимости)"""
     await callback.answer("Фото скрыты")
     
     try:

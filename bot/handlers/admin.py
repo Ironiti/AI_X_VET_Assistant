@@ -82,7 +82,7 @@ def get_update_bot_kb():
     """Клавиатура с кнопкой перезапуска бота после обновления"""
     from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     keyboard = [
-        [InlineKeyboardButton(text="🔄 Перезапустить бот", callback_data="restart_bot")]
+        [InlineKeyboardButton(text="🔄 Установить обновление", callback_data="restart_bot")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
@@ -1228,10 +1228,10 @@ async def restart_bot_handler(callback: CallbackQuery, state: FSMContext):
             # Определяем правильную клавиатуру в зависимости от роли
             if user.get('role') == 'admin':
                 keyboard = get_admin_menu_kb()
-                menu_text = "✅ Бот успешно перезапущен!\n\nГлавное меню администратора:"
+                menu_text = "✅ Бот успешно обновлен!\n\nГлавное меню администратора:"
             else:
                 keyboard = get_main_menu_kb()
-                menu_text = "✅ Бот успешно перезапущен!\n\nГлавное меню:"
+                menu_text = "✅ Бот успешно обновлен!\n\nГлавное меню:"
             
             await callback.message.answer(
                 menu_text,
@@ -1298,7 +1298,7 @@ async def send_broadcast(message: Message, state: FSMContext):
     # Добавляем информацию об обновлении в текст, если это обновление
     update_notice = ""
     if is_update_message:
-        update_notice = "\n\n💡 <i>Если бот не отвечает, используйте кнопку ниже для перезапуска</i>"
+        update_notice = "\n\n💡 <i>Для обновления бота нажмите на кнопку ниже👇</i>"
     
     for recipient_id in recipients:
         try:
