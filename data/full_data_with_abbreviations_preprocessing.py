@@ -180,7 +180,7 @@ def enhance_data_with_vet_abbreviations(df):
         
         # 1. Добавляем оригинальные данные (только непустые)
         base_fields = [
-            test_name, test_name,
+            test_name, test_name, test_name,
             department, department,
             specialization,
             safe_str(row.get('type', '')),
@@ -192,14 +192,14 @@ def enhance_data_with_vet_abbreviations(df):
             safe_str(row.get('encoded', '')),
             safe_str(row.get('encoded', '')),
             safe_str(row.get('encoded', '')),
-            safe_str(row.get('encoded', '')),
-            safe_str(row.get('encoded', '')),
             safe_str(row.get('biomaterial_type', '')),
             safe_str(row.get('biomaterial_type', '')),
             safe_str(row.get('test_name_abbreviations', '')),
             safe_str(row.get('test_name_abbreviations', '')),
             safe_str(row.get('test_name_abbreviations', '')),
             # safe_str(row.get('important_information', '')),
+            safe_str(row.get('animal_type', '')),
+            safe_str(row.get('animal_type', '')),
             safe_str(row.get('animal_type', '')),
             safe_str(row.get('container_type', '')),
             # safe_str(row.get('storage_temp', ''))

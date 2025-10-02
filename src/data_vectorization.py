@@ -37,10 +37,9 @@ class DataProcessor:
         """Очищает запрос от шумных слов (такая же логика как в data preprocessing)"""
         if not text or pd.isna(text):
             return ""
-        
-        # Приводим к нижнему регистру
-        text = text.lower()
-        
+            
+        # text = text.lower()
+
         # Удаляем общие шумные слова (все формы и падежи)
         noise_patterns = [
             r'исследовани[ейяю]\w*',  # исследование, исследования, исследованию и т.д.

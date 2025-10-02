@@ -2,681 +2,830 @@ import pandas as pd
 import re
 from typing import Dict, List, Set, Tuple, Optional
 from collections import defaultdict
-import unicodedata
-import string
-from bot.handlers.utils import normalize_text, transliterate_abbreviation
-import unicodedata
-import string
-from fuzzywuzzy import process, fuzz
 import json
 import os
-from bot.handlers.query_processing.vet_abbreviations_expander import vet_abbr_manager
+import pymorphy3
+from fuzzywuzzy import fuzz, process
+import logging
+from pathlib import Path
 
-def load_disease_dictionary(excel_file_path: str) -> Tuple[Dict[str, str], Dict[str, List[str]]]:
-    try:
-        df = pd.read_excel(excel_file_path, sheet_name='Справочник болезней')
+# Настройка логирования
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+class UnifiedAbbreviationExpander:
+    def __init__(self, excel_file: str = 'data/processed/data_with_abbreviations_new.xlsx'):
+        self.morph = pymorphy3.MorphAnalyzer()
+        self.excel_file = excel_file
+        self.all_dictionaries = self._load_all_dictionaries()
+        self.processed_queries = {}  # Кэш обработанных запросов
+        self.fuzzy_threshold = 80  # Порог для fuzzy matching
         
-        colloquial_to_official = {}
-        abbr_to_official = {}
+        # Константы для безопасности
+        self.MAX_QUERY_LENGTH = 1000
+        self.MAX_CACHE_SIZE = 1000
+        self.MAX_WORD_LENGTH = 50
         
-        # ДОБАВЛЕНО: Обратный словарь для полных названий -> аббревиатуры
-        reverse_abbr_dict = defaultdict(list)
+        # Создаем списки для fuzzy поиска
+        self._build_fuzzy_search_indexes()
+        
+    def _validate_query(self, query: str) -> bool:
+        """Валидация входного запроса"""
+        if not isinstance(query, str):
+            return False
+        if len(query) > self.MAX_QUERY_LENGTH:
+            logger.warning(f"Query too long: {len(query)} characters")
+            return False
+        if any(word for word in query.split() if len(word) > self.MAX_WORD_LENGTH):
+            logger.warning("Query contains overly long words")
+            return False
+        return True
+        
+    def _build_fuzzy_search_indexes(self):
+        """Строит индексы для fuzzy поиска с отладкой"""
+        self.fuzzy_full_names = []
+        self.fuzzy_abbreviations = []
+        
+        logger.info("🔍 Построение индексов для fuzzy поиска...")
+        
+        # Собираем все формы для поиска
+        for dict_name in ['vet_full', 'disease_full', 'pcr_full']:
+            dictionary = self.all_dictionaries.get(dict_name, {})
+            for key, data in dictionary.items():
+                if key and len(key) >= 2:
+                    self.fuzzy_full_names.append((key, dict_name))
+                    
+        # ОТЛАДКА: посмотрим что есть в disease_abbr
+        disease_abbr_count = len(self.all_dictionaries.get('disease_abbr', {}))
+        logger.info(f"📊 Всего аббревиатур болезней: {disease_abbr_count}")
+        
+        # Выведем несколько примеров аббревиатур болезней
+        disease_examples = list(self.all_dictionaries.get('disease_abbr', {}).keys())[:5]
+        logger.info(f"📋 Примеры аббревиатур болезней: {disease_examples}")
+        
+        for dict_name in ['vet_abbr', 'disease_abbr', 'pcr_abbr']:
+            dictionary = self.all_dictionaries.get(dict_name, {})
+            dict_count = len(dictionary)
+            logger.info(f"📊 Словарь {dict_name}: {dict_count} записей")
+            
+            for key, data in dictionary.items():
+                if key and len(key) >= 2:
+                    self.fuzzy_abbreviations.append((key, dict_name))
+                    
+                    # ОТЛАДКА: для ВИК и ДТБС
+                    if key in ['ВИК', 'ДТБС', 'VIK', 'DTBS']:
+                        logger.info(f"🎯 Найдена аббревиатура: {key} в {dict_name}")
+                        all_forms = data.get('all_abbr_forms', [])
+                        logger.info(f"   Все формы для {key}: {all_forms}")
+                    
+                    # Добавляем все формы для поиска
+                    all_forms = data.get('all_abbr_forms', [])
+                    for form in all_forms:
+                        if form and len(form) >= 2:
+                            self.fuzzy_abbreviations.append((form, dict_name))
+                            
+                            # ОТЛАДКА: для форм ВИК
+                            if key in ['ВИК', 'ДТБС'] and form in ['VIK', 'vik', 'DTBS', 'dtbs']:
+                                logger.info(f"   ✅ Добавлена форма {form} для {key}")
+        
+        logger.info(f"📈 Всего форм для поиска: {len(self.fuzzy_abbreviations)}")
+        
+        # Выведем все формы для ВИК и ДТБС
+        vik_forms = [form for form, dict_name in self.fuzzy_abbreviations if 'ВИК' in form or 'VIK' in form.upper()]
+        dtbs_forms = [form for form, dict_name in self.fuzzy_abbreviations if 'ДТБС' in form or 'DTBS' in form.upper()]
+        
+        logger.info(f"🔍 Формы для ВИК: {vik_forms}")
+        logger.info(f"🔍 Формы для ДТБС: {dtbs_forms}")
+    
+    def _load_all_dictionaries(self) -> Dict[str, Dict]:
+        """Загружает все словари из Excel файла"""
+        all_dicts = {
+            'vet_abbr': {}, 'vet_full': {}, 
+            'disease_abbr': {}, 'disease_full': {},
+            'pcr_abbr': {}, 'pcr_full': {}
+        }
+        
+        try:
+            file_path = Path(self.excel_file)
+            if not file_path.exists():
+                logger.error(f"Excel file not found: {self.excel_file}")
+                return all_dicts
+            
+            # Безопасная загрузка Excel
+            with pd.ExcelFile(self.excel_file, engine='openpyxl') as xls:
+                # Ветеринарные аббревиатуры
+                if 'Аббревиатуры ветеринарии' in xls.sheet_names:
+                    df_vet = pd.read_excel(xls, sheet_name='Аббревиатуры ветеринарии')
+                    self._process_vet_abbreviations(df_vet, all_dicts)
+                
+                # Болезни
+                if 'Справочник болезней' in xls.sheet_names:
+                    df_disease = pd.read_excel(xls, sheet_name='Справочник болезней')
+                    self._process_diseases(df_disease, all_dicts)
+                
+                # ПЦР сокращения
+                if 'Справочник сокращений ПЦР' in xls.sheet_names:
+                    df_pcr = pd.read_excel(xls, sheet_name='Справочник сокращений ПЦР')
+                    self._process_pcr_abbreviations(df_pcr, all_dicts)
+            
+            logger.info(f"✅ Загружено словарей: Ветеринарные({len(all_dicts['vet_abbr'])}), "
+                       f"Болезни({len(all_dicts['disease_abbr'])}), ПЦР({len(all_dicts['pcr_abbr'])})")
+            
+            # ОТЛАДКА: проверим конкретные аббревиатуры
+            for abbr in ['ВИК', 'ДТБС', 'VIK', 'DTBS']:
+                for dict_name in ['disease_abbr', 'vet_abbr']:
+                    if abbr in all_dicts[dict_name]:
+                        logger.info(f"🔍 Аббревиатура '{abbr}' найдена в {dict_name}")
+                        data = all_dicts[dict_name][abbr]
+                        logger.info(f"   Данные: {data.get('official_name', 'N/A')}")
+                        logger.info(f"   Все формы: {data.get('all_abbr_forms', [])}")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка загрузки словарей: {e}")
+            
+        return all_dicts
+    
+    def _safe_string_conversion(self, value) -> str:
+        """Безопасное преобразование в строку"""
+        if pd.isna(value) or value is None:
+            return ""
+        return str(value).strip()
+    
+    def _process_vet_abbreviations(self, df: pd.DataFrame, all_dicts: Dict):
+        """Обрабатывает ветеринарные аббревиатуры"""
+        for _, row in df.iterrows():
+            try:
+                abbr = self._safe_string_conversion(row['Аббревиатура'])
+                russian_name = self._safe_string_conversion(row['Русское название/расшифровка'])
+                english_name = self._safe_string_conversion(row.get('Английское название', ''))
+                
+                if not abbr or abbr == 'nan' or not russian_name or russian_name == 'nan':
+                    continue
+                    
+                abbr_variants = self._split_variants(abbr, '/')
+                russian_variants = self._split_variants(russian_name, '/')
+                
+                for abbr_var in abbr_variants:
+                    if not abbr_var:
+                        continue
+                        
+                    all_abbr_forms = self._generate_all_abbreviation_forms(abbr_var)
+                    
+                    for abbr_form in all_abbr_forms:
+                        all_dicts['vet_abbr'][abbr_form] = {
+                            'type': 'vet_abbr',
+                            'russian_names': russian_variants,
+                            'english_name': english_name,
+                            'original_abbr': abbr_var,
+                            'all_abbr_forms': all_abbr_forms
+                        }
+                        
+                    for rus_name in russian_variants:
+                        if not rus_name:
+                            continue
+                            
+                        all_rus_forms = self._generate_all_forms(rus_name, is_abbreviation=False)
+                        for rus_form in all_rus_forms:
+                            all_dicts['vet_full'][rus_form] = {
+                                'type': 'vet_full',
+                                'abbreviations': [abbr_var],  # Только оригинальные для вывода
+                                'original_name': rus_name,
+                                'original_abbr': abbr_var,
+                                'all_abbr_forms': all_abbr_forms
+                            }
+                
+                if english_name and english_name != 'nan':
+                    eng_forms = self._generate_all_forms(english_name, is_abbreviation=False)
+                    for eng_form in eng_forms:
+                        all_dicts['vet_full'][eng_form] = {
+                            'type': 'vet_english',
+                            'abbreviations': [abbr_var],  # Только оригинальные для вывода
+                            'original_name': english_name,
+                            'original_abbr': abbr_var,
+                            'all_abbr_forms': all_abbr_forms
+                        }
+                        
+            except Exception as e:
+                logger.warning(f"Ошибка обработки строки ветеринарных аббревиатур: {e}")
+                continue
+
+    def _generate_all_abbreviation_forms(self, abbr: str) -> List[str]:
+        """Генерирует формы аббревиатуры для поиска"""
+        if not abbr:
+            return []
+            
+        forms = set()
+        forms.add(abbr)
+        forms.add(abbr.upper())
+        forms.add(abbr.lower())
+        forms.add(abbr.capitalize())
+        
+        # Генерируем транслитерации для поиска
+        translit_variants = self._generate_transliteration_variants(abbr)
+        forms.update(translit_variants)
+        
+        # ОТЛАДКА: для ВИК и ДТБС
+        if abbr in ['ВИК', 'ДТБС']:
+            logger.info(f"🔄 Генерация форм для '{abbr}': {list(forms)}")
+        
+        return [form for form in forms if form and 1 < len(form) <= 20]
+
+    def _process_diseases(self, df: pd.DataFrame, all_dicts: Dict):
+        """Обрабатывает болезни с улучшенной обработкой аббревиатур"""
+        logger.info("🩺 Обработка болезней...")
         
         for _, row in df.iterrows():
-            official_name = normalize_text(row['Название на русском'])
-            if not official_name:
+            try:
+                official_name = self._safe_string_conversion(row['Название на русском'])
+                colloquial_names = self._safe_string_conversion(row.get('Разговорное название', ''))
+                abbreviations = self._safe_string_conversion(row.get('Разговорная аббревиатура', ''))
+                
+                if not official_name or official_name == 'nan':
+                    continue
+                
+                # ОТЛАДКА: для отладки выведем некоторые болезни
+                if 'иммунодефицит' in official_name.lower() or 'дисплазия' in official_name.lower():
+                    logger.info(f"🔍 Обрабатывается болезнь: {official_name}")
+                    logger.info(f"   Аббревиатуры: {abbreviations}")
+                
+                # Генерируем формы для официального названия
+                official_forms = self._generate_medical_term_forms(official_name)
+                
+                # Обрабатываем аббревиатуры болезней (включая ДТБС, ВИК и другие)
+                original_abbreviations = []
+                all_abbr_forms_for_disease = []
+                
+                if abbreviations:
+                    abbr_variants = self._split_variants(abbreviations, ',')
+                    original_abbreviations = abbr_variants
+                    
+                    for abbr_var in abbr_variants:
+                        # Генерируем все формы аббревиатуры (включая транслитерацию)
+                        all_abbr_forms = self._generate_all_abbreviation_forms(abbr_var)
+                        all_abbr_forms_for_disease.extend(all_abbr_forms)
+                        
+                        # ОТЛАДКА: для ВИК и ДТБС
+                        if abbr_var in ['ВИК', 'ДТБС']:
+                            logger.info(f"🎯 Обрабатывается аббревиатура: {abbr_var}")
+                            logger.info(f"   Все формы: {all_abbr_forms}")
+                        
+                        # Добавляем все формы в словарь аббревиатур
+                        for abbr_form in all_abbr_forms:
+                            all_dicts['disease_abbr'][abbr_form] = {
+                                'type': 'disease_abbr',
+                                'official_name': official_name,
+                                'original_abbr': abbr_var,
+                                'all_abbr_forms': all_abbr_forms
+                            }
+                
+                # Обрабатываем официальное название
+                for form in official_forms:
+                    all_dicts['disease_full'][form] = {
+                        'type': 'disease_full',
+                        'official_name': official_name,
+                        'abbreviations': original_abbreviations,  # Только оригинальные для вывода
+                        'original_name': official_name,
+                        'all_abbr_forms': all_abbr_forms_for_disease
+                    }
+                
+                # Обрабатываем разговорные названия
+                if colloquial_names:
+                    colloquial_variants = self._split_variants(colloquial_names, ',')
+                    for colloquial_var in colloquial_variants:
+                        colloquial_forms = self._generate_medical_term_forms(colloquial_var)
+                        for form in colloquial_forms:
+                            all_dicts['disease_full'][form] = {
+                                'type': 'disease_colloquial',
+                                'official_name': official_name,
+                                'abbreviations': original_abbreviations,  # Только оригинальные для вывода
+                                'original_name': colloquial_var,
+                                'all_abbr_forms': all_abbr_forms_for_disease
+                            }
+                            
+            except Exception as e:
+                logger.warning(f"Ошибка обработки строки болезней: {e}")
                 continue
+
+    def _generate_medical_term_forms(self, text: str) -> List[str]:
+        """Генерирует формы для медицинских терминов"""
+        if not text:
+            return []
             
-            # Добавляем официальное название
-            colloquial_to_official[official_name] = official_name
-            
-            # Обработка РАЗГОВОРНЫХ НАЗВАНИЙ - извлекаем все аббревиатуры
-            colloquial_text = normalize_text(row['Разговорное название'])
-            if colloquial_text:
-                for term in colloquial_text.split(','):
-                    term = term.strip()
-                    if term:
-                        # Добавляем термин как есть
-                        colloquial_to_official[term] = official_name
-                        
-                        # Извлекаем все возможные аббревиатуры из термина
-                        potential_abbrs = extract_abbreviations_from_text(term)
-                        for abbr in potential_abbrs:
-                            if len(abbr) > 2:
-                                # Добавляем в оба словаря для перекрестного поиска
-                                abbr_to_official[abbr] = official_name
-                                colloquial_to_official[abbr] = official_name
-                                colloquial_to_official[abbr.lower()] = official_name
-                                # ДОБАВЛЕНО: В обратный словарь
-                                if abbr not in reverse_abbr_dict[official_name]:
-                                    reverse_abbr_dict[official_name].append(abbr)
-            
-            # Обработка ОФИЦИАЛЬНЫХ АББРЕВИАТУР
-            abbr_text = str(row['Разговорная аббревиатура']).strip()
-            if abbr_text:
-                for abbr in abbr_text.split(','):
-                    abbr_clean = abbr.strip().upper()
-                    if abbr_clean:
-                        # Оригинальная аббревиатура
-                        abbr_to_official[abbr_clean] = official_name
-                        colloquial_to_official[abbr_clean] = official_name
-                        colloquial_to_official[abbr_clean.lower()] = official_name
-                        # ДОБАВЛЕНО: В обратный словарь
-                        if abbr_clean not in reverse_abbr_dict[official_name]:
-                            reverse_abbr_dict[official_name].append(abbr_clean)
-                        
-                        # Создаем все возможные варианты для смешанных раскладок
-                        mixed_variants = detect_and_normalize_mixed_abbreviations(abbr_clean)
-                        for variant in mixed_variants:
-                            if len(variant) >= 2:
-                                abbr_to_official[variant] = official_name
-                                colloquial_to_official[variant] = official_name
-                                colloquial_to_official[variant.lower()] = official_name
+        forms = set()
+        forms.add(text)
+        forms.add(text.lower())
+        forms.add(text.upper())
         
-        # ДОБАВЛЕНО: Загружаем аббревиатуры образцов из Лист2
-        try:
-            df_samples = pd.read_excel(excel_file_path, sheet_name='Лист2')
-            for _, row in df_samples.iterrows():
-                if len(df_samples.columns) >= 2:
-                    abbr = str(row.iloc[0]).strip() if pd.notna(row.iloc[0]) else ""
-                    full_name = str(row.iloc[1]).strip() if pd.notna(row.iloc[1]) else ""
-                    
-                    if abbr and abbr != 'nan' and full_name and full_name != 'nan':
-                        abbr_upper = abbr.upper()
-                        full_name_lower = full_name.lower()
+        return list(forms)
+
+    def _process_pcr_abbreviations(self, df: pd.DataFrame, all_dicts: Dict):
+        """Обрабатывает ПЦР сокращения"""
+        for _, row in df.iterrows():
+            try:
+                abbr = self._safe_string_conversion(row['Аббревиатура'])
+                full_name = self._safe_string_conversion(row['Расшифровка'])
+                
+                if not abbr or abbr == 'nan' or not full_name or full_name == 'nan':
+                    continue
+                
+                abbr_variants = self._split_variants(abbr, '/')
+                full_name_variants = self._split_variants(full_name, '/')
+                
+                for abbr_var in abbr_variants:
+                    all_abbr_forms = self._generate_all_abbreviation_forms(abbr_var)
+                    for abbr_form in all_abbr_forms:
+                        all_dicts['pcr_abbr'][abbr_form] = {
+                            'type': 'pcr_abbr',
+                            'full_names': full_name_variants,
+                            'original_abbr': abbr_var,
+                            'all_abbr_forms': all_abbr_forms
+                        }
+                
+                for full_var in full_name_variants:
+                    all_full_forms = self._generate_all_forms(full_var, is_abbreviation=False)
+                    for full_form in all_full_forms:
+                        all_dicts['pcr_full'][full_form] = {
+                            'type': 'pcr_full',
+                            'abbreviations': abbr_variants,  # Только оригинальные для вывода
+                            'original_name': full_var,
+                            'all_abbr_forms': [abbr_form for abbr_var in abbr_variants 
+                                            for abbr_form in self._generate_all_abbreviation_forms(abbr_var)]
+                        }
                         
-                        # Добавляем в обратный словарь
-                        if abbr_upper not in reverse_abbr_dict[full_name_lower]:
-                            reverse_abbr_dict[full_name_lower].append(abbr_upper)
-                        
-                        # Также добавляем в обычные словари для совместимости
-                        colloquial_to_official[full_name_lower] = full_name_lower
-                        colloquial_to_official[abbr_upper] = full_name_lower
-                        abbr_to_official[abbr_upper] = full_name_lower
-                        
-        except Exception as e:
-            print(f"⚠️ Не удалось загрузить аббревиатуры образцов: {e}")
+            except Exception as e:
+                logger.warning(f"Ошибка обработки строки ПЦР: {e}")
+                continue
+    
+    def _split_variants(self, text: str, delimiter: str) -> List[str]:
+        """Разделяет текст на варианты"""
+        if not text:
+            return []
         
-        # Убираем распространенные русские слова из аббревиатур
-        common_russian_words = {
-            'ОТ', 'ДО', 'ПО', 'НА', 'ЗА', 'ИЗ', 'С', 'У', 'В', 'К', 'НО', 'ДА',
-            'НЕТ', 'АГА', 'ОЙ', 'АХ', 'ЭХ', 'НУ', 'ВОТ', 'ЭТО', 'ТО', 'ТАК', 'КАК'
+        variants = [v.strip() for v in text.split(delimiter) if v.strip()]
+        return variants if variants else [text]
+    
+    def _generate_all_forms(self, text: str, is_abbreviation: bool = False) -> List[str]:
+        """Генерирует все формы слова/аббревиатуры"""
+        if not text:
+            return []
+            
+        if is_abbreviation:
+            # Для аббревиатур используем отдельный метод
+            return self._generate_all_abbreviation_forms(text)
+        else:
+            forms = set()
+            forms.add(text)
+            forms.add(text.lower())
+            forms.add(text.upper())
+            return list(forms)
+    
+    def _generate_transliteration_variants(self, text: str) -> List[str]:
+        """Генерирует варианты транслитерации для поиска"""
+        variants = set()
+        
+        # Расширенный словарь транслитерации
+        eng_to_rus = {
+            'A': 'А', 'B': 'В', 'C': 'С', 'D': 'Д', 'E': 'Е', 'F': 'Ф', 'G': 'Г',
+            'H': 'Х', 'I': 'И', 'J': 'ДЖ', 'K': 'К', 'L': 'Л', 'M': 'М', 'N': 'Н',
+            'O': 'О', 'P': 'П', 'Q': 'К', 'R': 'Р', 'S': 'С', 'T': 'Т', 'U': 'У',
+            'V': 'В', 'W': 'В', 'X': 'КС', 'Y': 'И', 'Z': 'З'
         }
         
-        for word in common_russian_words:
-            if word in abbr_to_official:
-                del abbr_to_official[word]
-            if word in colloquial_to_official and len(word) <= 3:
-                # Удаляем только если это короткое слово и не официальное название
-                if colloquial_to_official[word] != word:
-                    del colloquial_to_official[word]
-
-        # ДОБАВЛЕНО: Сохраняем обратный словарь в JSON
-        with open('data/reverse_abbreviations.json', 'w', encoding='utf-8') as f:
-            reverse_dict_serializable = {k: v for k, v in reverse_abbr_dict.items()}
-            json.dump(reverse_dict_serializable, f, ensure_ascii=False, indent=2)
-
-        return colloquial_to_official, abbr_to_official
-        
-    except Exception as e:
-        raise Exception(f"Ошибка загрузки словаря: {e}")
-
-def expand_query_with_abbreviations(query: str) -> str:
-    """УЛУЧШЕННАЯ ФУНКЦИЯ РАСШИРЕНИЯ ЗАПРОСОВ С ОБРАТНЫМ СЛОВАРЕМ"""
-    
-    # 0. ПРЕДВАРИТЕЛЬНАЯ НОРМАЛИЗАЦИЯ: Приводим аббревиатуры к верхнему регистру
-    print(f"📥 Оригинальный запрос: '{query}'")
-    normalized_query = normalize_query_abbreviations(query)
-    print(f"🔧 После нормализации аббревиатур: '{normalized_query}'")
-    
-    # 1. ПЕРВЫЙ ЭТАП: РАСШИРЕНИЕ ВЕТЕРИНАРНЫМИ АББРЕВИАТУРАМИ
-    query = vet_abbr_manager.expand_query(normalized_query)
-    print(f"📤 После расширения аббревиатурами: '{query}'")
-    
-    # 2. ВТОРОЙ ЭТАП: СУЩЕСТВУЮЩАЯ ЛОГИКА С БОЛЕЗНЯМИ
-    try:
-        excel_file_path = 'data/processed/data_with_abbreviations_new.xlsx'
-        colloquial_to_official, abbr_to_official = load_disease_dictionary(excel_file_path)
-        
-        tokens = advanced_query_tokenization(query)
-        matched_officials = find_matches_with_context(tokens, colloquial_to_official, abbr_to_official, query)
-        resolved_officials = handle_ambiguity(matched_officials, query, colloquial_to_official)
-        
-        if resolved_officials:
-            sorted_officials = sorted(list(resolved_officials))
-            expanded = f"{query} {' '.join(sorted_officials)}"
-            
-            # ДОБАВЛЕНО: Применяем обратное расширение
-            expanded_with_reverse = apply_reverse_expansion(expanded)
-            
-            # ВАЖНО: Сохраняем исходную логику с post_process_results
-            final_result = post_process_results(expanded_with_reverse, query)
-            
-            # ФИНАЛЬНАЯ НОРМАЛИЗАЦИЯ: Приводим все аббревиатуры к верхнему регистру
-            final_result = final_abbreviation_normalization(final_result)
-            
-            print(f"✅ Финальный расширенный запрос: '{final_result}'")
-            return final_result
-            
-    except Exception as e:
-        print(f"⚠️ Ошибка в расширении болезней: {e}")
-    
-    # ВАЖНО: Сохраняем исходную логику возврата
-    final_result = post_process_results(query, query)
-    
-    # ФИНАЛЬНАЯ НОРМАЛИЗАЦИЯ: Приводим все аббревиатуры к верхнему регистру
-    final_result = final_abbreviation_normalization(final_result)
-    
-    print(f"✅ Финальный запрос: '{final_result}'")
-    return final_result
-
-
-def final_abbreviation_normalization(query: str) -> str:
-    """Финальная нормализация всех аббревиатур в запросе к верхнему регистру"""
-    words = query.split()
-    normalized_words = []
-    
-    for word in words:
-        normalized_word = normalize_abbreviation_case(word)
-        normalized_words.append(normalized_word)
-    
-    return ' '.join(normalized_words)
-
-
-
-def generate_common_typos(abbr: str, is_russian: bool) -> List[str]:
-    if len(abbr) <= 1:
-        return []
-    
-    typos = set()
-    
-    # Опечатки для отдельных букв
-    if is_russian:
-    # Опечатки для русских букв
-        common_mistakes = {
-            'А': ['С', 'Д', 'Ф', 'Л'],
-            'Б': ['В', 'Ь', 'Ы', 'Ъ'],
-            'В': ['Б', 'Ь', 'Ы', 'Ф'],
-            'Г': ['Т', 'П', 'Р'],
-            'Д': ['Т', 'Л', 'Ж'],
-            'Е': ['Э', 'Ё', 'З'],
-            'Ж': ['Х', 'К', 'Д'],
-            'З': ['Э', 'Е', 'С'],
-            'И': ['Й', 'Ц', 'У'],
-            'Й': ['И', 'Ц', 'У'],
-            'К': ['Ж', 'Х', 'Н'],
-            'Л': ['Д', 'П', 'М'],
-            'М': ['Н', 'Л', 'Т'],
-            'Н': ['М', 'К', 'П'],
-            'О': ['А', 'С', 'Э'],
-            'П': ['Р', 'Н', 'Л'],
-            'Р': ['П', 'Г', 'Ь'],
-            'С': ['З', 'Э', 'О'],
-            'Т': ['Г', 'П', 'М'],
-            'У': ['И', 'Ц', 'Й'],
-            'Ф': ['А', 'В', 'Х'],
-            'Х': ['Ж', 'Ф', 'К'],
-            'Ц': ['У', 'И', 'Й'],
-            'Ч': ['Щ', 'Ь', 'Ы'],
-            'Ш': ['Щ', 'Ч', 'Ь'],
-            'Щ': ['Ш', 'Ч', 'Ь'],
-            'Ь': ['Б', 'В', 'Ы'],
-            'Ы': ['Ь', 'Ъ', 'Б'],
-            'Ъ': ['Ь', 'Ы', 'Б'],
-            'Э': ['Е', 'З', 'С'],
-            'Ю': ['У', 'И', 'Й'],
-            'Я': ['А', 'У', 'И']
+        rus_to_eng = {
+            'А': 'A', 'Б': 'B', 'В': 'V', 'Г': 'G', 'Д': 'D', 'Е': 'E', 'Ё': 'E',
+            'Ж': 'ZH', 'З': 'Z', 'И': 'I', 'Й': 'Y', 'К': 'K', 'Л': 'L', 'М': 'M',
+            'Н': 'H', 'О': 'O', 'П': 'P', 'Р': 'R', 'С': 'S', 'Т': 'T', 'У': 'U',
+            'Ф': 'F', 'Х': 'KH', 'Ц': 'TS', 'Ч': 'CH', 'Ш': 'SH', 'Щ': 'SCH',
+            'Ъ': '', 'Ы': 'Y', 'Ь': '', 'Э': 'E', 'Ю': 'YU', 'Я': 'YA'
         }
         
-    else:
-        # Опечатки для английских букв (как ранее)
-        common_mistakes = {
-            'D': ['T', 'F', 'G', 'B'],
-            'B': ['V', 'P', 'R', 'D'],
-            'P': ['B', 'R', 'D'],
-            'T': ['D', 'F', 'G'],
-            'F': ['D', 'T', 'V'],
-            'V': ['B', 'F', 'W'],
-            'W': ['V', 'M', 'N'],
-            'M': ['N', 'W'],
-            'N': ['M', 'H'],
-            'H': ['N', 'K'],
-            'K': ['H', 'C'],
-            'C': ['K', 'S'],
-            'S': ['C', 'Z'],
-            'Z': ['S', 'X'],
-            'X': ['Z', 'K'],
-            'G': ['D', 'T', 'J'],
-            'J': ['G', 'I'],
-            'I': ['J', 'L', '1'],
-            'L': ['I', '1', '7'],
-            '1': ['I', 'L', '7'],
-            '7': ['1', 'L']
+        text_upper = text.upper()
+        
+        # Русский -> английский
+        if any(c in 'АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ' for c in text_upper):
+            eng_variant = ''.join(rus_to_eng.get(char, char) for char in text_upper)
+            if eng_variant and eng_variant != text_upper:
+                variants.add(eng_variant)
+                variants.add(eng_variant.lower())
+                variants.add(eng_variant.capitalize())
+        
+        # Английский -> русский  
+        elif any(c.isascii() and c.isalpha() for c in text_upper):
+            rus_variant = ''.join(eng_to_rus.get(char, char) for char in text_upper)
+            if rus_variant and rus_variant != text_upper:
+                variants.add(rus_variant)
+                variants.add(rus_variant.lower())
+                variants.add(rus_variant.capitalize())
+        
+        # ОТЛАДКА: для ВИК и ДТБС
+        if text in ['ВИК', 'ДТБС']:
+            logger.info(f"🔄 Транслитерация для '{text}': {list(variants)}")
+        
+        return list(variants)
+    
+    def expand_query(self, query: str) -> str:
+        """Основная функция расширения запроса"""
+        if not self._validate_query(query):
+            return query
+            
+        logger.info(f"📥 Оригинальный запрос: '{query}'")
+        
+        # Очищаем запрос
+        query = ' '.join(query.split())
+        
+        # Проверка кэша с ограничением размера
+        if len(self.processed_queries) > self.MAX_CACHE_SIZE:
+            self.processed_queries.clear()
+            
+        if query in self.processed_queries:
+            logger.info("✅ Используем кэшированный результат")
+            return self.processed_queries[query]
+        
+        if self._has_proper_expansions(query):
+            logger.info("✅ Запрос уже содержит корректные расшифровки, пропускаем")
+            self.processed_queries[query] = query
+            return query
+        
+        corrected_query = self._fix_typos(query)
+        if corrected_query != query:
+            logger.info(f"🔧 Исправлены опечатки: '{query}' -> '{corrected_query}'")
+            query = corrected_query
+        
+        matches = self._find_matches_with_fuzzy(query)
+        result = self._apply_expansions(query, matches)
+        
+        self.processed_queries[query] = result
+        
+        if result != query:
+            logger.info(f"📤 После расширения: '{result}'")
+        else:
+            logger.info(f"✅ Финальный запрос: '{result}'")
+        
+        return result
+
+    def _fix_typos(self, query: str) -> str:
+        """Исправляет частые опечатки"""
+        common_typos = {
+            'фсперма': 'сперма', 'фспермы': 'спермы', 'фсперму': 'сперму',
+            'фспермой': 'спермой', 'калл': 'кал', 'фекали': 'фекалии',
+            'фекалий': 'фекалии', 'фекалия': 'фекалии', 'екскременты': 'экскременты',
+            'екскрементов': 'экскрементов', 'ии': 'и',
         }
-    
-    #Замена одной буквы
-    for i in range(len(abbr)):
-        original_char = abbr[i]
-        if original_char in common_mistakes:
-            for mistake in common_mistakes[original_char]:
-                typo = abbr[:i] + mistake + abbr[i+1:]
-                typos.add(typo)
-    #Пропуск буквы
-    for i in range(len(abbr)):
-        typo = abbr[:i] + abbr[i+1:]
-        if len(typo) >= 2:
-            typos.add(typo)
-
-    #Добавление лишней буквы (повторение)
-    for i in range(len(abbr)):
-        typo = abbr[:i] + abbr[i] + abbr[i:]
-        typos.add(typo)
-    
-    #Перестановка соседних букв
-    for i in range(len(abbr)-1):
-        typo = abbr[:i] + abbr[i+1] + abbr[i] + abbr[i+2:]
-        typos.add(typo)
-    
-     #Путаница кириллица/латиница
-    if is_russian:
-        rus_lat_confusion = {
-            'А': 'A', 'В': 'B', 'С': 'C', 'Е': 'E', 'Н': 'H', 
-            'К': 'K', 'М': 'M', 'О': 'O', 'Р': 'P', 'Т': 'T',
-            'Х': 'X', 'У': 'Y'
-        }
-        for i in range(len(abbr)):
-            char = abbr[i]
-            if char in rus_lat_confusion:
-                typo = abbr[:i] + rus_lat_confusion[char] + abbr[i+1:]
-                typos.add(typo)
-    
-    return list(typos)
-
-def advanced_query_tokenization(query: str) -> List[Tuple[str, int, int]]:
-    # Продвинутая токенизация с сохранением позиций
-    query = normalize_text(query)
-    tokens = []
-    
-    words = query.split()
-    n = len(words)
-    
-    for start in range(n):
-        for length in range(min(6, n - start), 0, -1):
-            phrase = ' '.join(words[start:start+length])
-            tokens.append((phrase, start, start+length))
-    
-    tokens.sort(key=lambda x: len(x[0]), reverse=True)
-    return tokens
-
-
-def find_matches_with_context(tokens: List[Tuple[str, int, int]], 
-                             colloquial_to_official: Dict[str, str],
-                             abbr_to_official: Dict[str, str],
-                             query: str) -> Set[str]:
-    
-    matched_officials = set()
-    used_positions = set()
-    
-    for token, start, end in tokens:
-        if any(pos in used_positions for pos in range(start, end)):
-            continue
         
-        token_lower = token.lower()
-        token_upper = token.upper()
+        words = query.split()
+        corrected_words = []
         
-        # Пропускаем слишком короткие токены
-        if len(token_upper) < 2:
-            continue
-            
-        # 1. Ищем в разговорных названиях (все регистры)
-        if token_lower in colloquial_to_official:
-            official = colloquial_to_official[token_lower]
-            matched_officials.add(official)
-            used_positions.update(range(start, end))
-            continue
-            
-        if token_upper in colloquial_to_official:
-            official = colloquial_to_official[token_upper]
-            matched_officials.add(official)
-            used_positions.update(range(start, end))
-            continue
-        
-        # 2. Ищем в аббревиатурах
-        if token_upper in abbr_to_official:
-            official = abbr_to_official[token_upper]
-            matched_officials.add(official)
-            used_positions.update(range(start, end))
-            continue
-        
-        # 3. Для токенов, которые выглядят как аббревиатуры, создаем варианты
-        if (2 <= len(token_upper) <= 4 and token_upper.isalpha() and
-            (any(c.isascii() for c in token_upper) or 
-             any(c in 'АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ' for c in token_upper))):
-            
-            # Создаем все возможные варианты аббревиатуры
-            possible_variants = detect_and_normalize_mixed_abbreviations(token_upper)
-            
-            for variant in possible_variants:
-                # Проверяем в обоих словарях
-                if variant in abbr_to_official:
-                    official = abbr_to_official[variant]
-                    matched_officials.add(official)
-                    used_positions.update(range(start, end))
-                    break
-                    
-                if variant in colloquial_to_official:
-                    official = colloquial_to_official[variant]
-                    matched_officials.add(official)
-                    used_positions.update(range(start, end))
-                    break
-    
-    return matched_officials
-
-
-def handle_ambiguity(matched_officials: Set[str], query: str, colloquial_to_official: Dict[str, str]) -> Set[str]:
-    if len(matched_officials) <= 1:
-        return matched_officials
-    
-    query_lower = query.lower()
-    query_words = query_lower.split()
-    
-    # Определяем тип запроса
-    has_abbreviations = any(len(word) <= 3 and word.isupper() for word in query_words)
-    is_short_query = len(query_words) <= 2
-    
-    # ДЛЯ АББРЕВИАТУР: возвращаем ВСЕ похожие варианты
-    if has_abbreviations or is_short_query:
-        return matched_officials
-    
-    disease_scores = {}
-    
-    # Создаем обратный mapping
-    disease_to_terms = defaultdict(set)
-    for term, official in colloquial_to_official.items():
-        if official in matched_officials:
-            # Добавляем все варианты терминов для каждой болезни
-            if ',' in term:
-                for sub_term in term.split(','):
-                    clean_term = sub_term.strip().lower()
-                    if clean_term:
-                        disease_to_terms[official].add(clean_term)
-            else:
-                clean_term = term.strip().lower()
-                if clean_term:
-                    disease_to_terms[official].add(clean_term)
-    
-    # Для каждой болезни считаем комплексный score
-    for disease, terms in disease_to_terms.items():
-        total_score = 0
-        matches_count = 0
-        
-        # Объединяем все термины болезни в один текст для сравнения
-        all_terms_text = ' '.join(terms)
-        
-        # 1. Сравнение всего запроса со всеми терминами болезни
-        overall_similarity = fuzz.token_set_ratio(query_lower, all_terms_text)
-        total_score += overall_similarity * 0.6  # 60% веса
-        
-        # 2. Поиск точных совпадений отдельных слов
-        for word in query_words:
-            if len(word) <= 2:  # Пропускаем короткие слова
+        for word in words:
+            if (word.startswith('(') and word.endswith(')')) or self._is_abbreviation(word):
+                corrected_words.append(word)
                 continue
                 
-            word_found = False
-            for term in terms:
-                # Проверяем вхождение слова в термин
-                if word in term:
-                    total_score += 30  # Бонус за точное вхождение
-                    word_found = True
-                    matches_count += 1
-                    break
+            if word.islower() or (word[0].isupper() and word[1:].islower()):
+                corrected_word = common_typos.get(word.lower(), word)
+                if word[0].isupper():
+                    corrected_word = corrected_word.capitalize()
+                corrected_words.append(corrected_word)
+            else:
+                corrected_words.append(word)
+        
+        return ' '.join(corrected_words)
+
+    def _is_abbreviation(self, word: str) -> bool:
+        """Проверяет, является ли слово аббревиатурой"""
+        if word.isupper() and 2 <= len(word) <= 5:
+            return True
+        if word.isalpha() and word.isupper():
+            return True
+        if len(word) <= 4 and any(c.isupper() for c in word):
+            return True
+        return False
+    
+    def _has_proper_expansions(self, query: str) -> bool:
+        """Проверяет, содержит ли запрос корректные расшифровки"""
+        cleaned_query = self._fix_typos(query)
+        
+        patterns = [
+            r'[а-яА-Яa-zA-Z]+\s*\([^)]+\)',
+            r'\([^)]+\)\s*[а-яА-Яa-zA-Z]+',
+        ]
+        
+        for pattern in patterns:
+            if re.search(pattern, cleaned_query):
+                return True
+        
+        bracket_pattern = r'\(([^)]+)\)'
+        brackets = re.findall(bracket_pattern, cleaned_query)
+        
+        for bracket_content in brackets:
+            content = bracket_content.strip()
+            if ',' in content:
+                parts = [part.strip() for part in content.split(',')]
+                if all(2 <= len(part) <= 5 and part.isupper() for part in parts):
+                    return True
+            elif 2 <= len(content) <= 30:
+                return True
+        
+        words = re.findall(r'\b[а-яА-Яa-zA-Z]{2,}\b', cleaned_query)
+        expansion_parts = re.findall(r'\([^)]+\)', cleaned_query)
+        
+        if len(expansion_parts) >= len(words):
+            return True
+        
+        return False
+    
+    def _find_matches_with_fuzzy(self, query: str) -> List[Dict]:
+        """Поиск совпадений с улучшенной логикой"""
+        matches = []
+        used_positions = set()
+        
+        corrected_query = self._fix_typos(query)
+        
+        logger.info(f"🔍 Поиск совпадений для: '{corrected_query}'")
+        
+        # Сначала точный поиск
+        exact_matches = self._find_exact_matches(corrected_query, used_positions)
+        matches.extend(exact_matches)
+        
+        # Затем fuzzy поиск для оставшихся слов
+        fuzzy_matches = self._find_fuzzy_matches(corrected_query, used_positions)
+        matches.extend(fuzzy_matches)
+        
+        logger.info(f"🎯 Найдено совпадений: {len(matches)}")
+        for match in matches:
+            logger.info(f"   - '{match['found_text']}' -> {match['dict_name']}")
+        
+        return matches
+
+    def _find_exact_matches(self, query: str, used_positions: set) -> List[Dict]:
+        """Точный поиск совпадений для всех слов"""
+        matches = []
+        
+        words = query.split()
+        
+        for word in words:
+            word_start = query.find(word)
+            word_end = word_start + len(word)
             
-            if not word_found:
-                # Ищем частичное совпадение
-                for term in terms:
-                    if fuzz.partial_ratio(word, term) > 80:
-                        total_score += 15  # Меньший бонус за частичное совпадение
-                        matches_count += 1
+            # Пропускаем короткие слова и уже использованные
+            if len(word) < 2 or self._is_position_used(word_start, word_end, used_positions):
+                continue
+            
+            # Для аббревиатур ищем точное совпадение в верхнем регистре
+            search_terms = [word]
+            if word.isupper() and 2 <= len(word) <= 5:
+                search_terms.append(word)  # Ищем как есть
+            else:
+                search_terms.append(word.upper())  # Ищем в верхнем регистре
+            
+            # Ищем во всех словарях
+            for dict_name in ['vet_abbr', 'vet_full', 'disease_abbr', 'disease_full', 'pcr_abbr', 'pcr_full']:
+                dictionary = self.all_dictionaries.get(dict_name, {})
+                
+                for search_term in search_terms:
+                    if search_term in dictionary:
+                        data = dictionary[search_term]
+                        matches.append({
+                            'start': word_start,
+                            'end': word_end,
+                            'found_text': word,
+                            'dict_name': dict_name,
+                            'data': data,
+                            'match_type': 'exact'
+                        })
+                        used_positions.add((word_start, word_end))
+                        logger.debug(f"Точное совпадение: '{word}' -> {dict_name} (поиск: '{search_term}')")
                         break
+                
+                # Прерываем если нашли в одном словаре
+                if any(m['found_text'] == word for m in matches):
+                    break
         
-        # 3. Учитываем количество совпадений
-        if matches_count > 0:
-            total_score += (matches_count / len(query_words)) * 100
+        return matches
+
+    def _find_fuzzy_matches(self, query: str, used_positions: set) -> List[Dict]:
+        """Fuzzy поиск совпадений"""
+        matches = []
+        words = query.split()
         
-        disease_scores[disease] = total_score
-    
-    # Сортируем по убыванию score и берем топ-3
-    sorted_diseases = sorted(disease_scores.items(), key=lambda x: x[1], reverse=True)
-    
-    # Возвращаем все болезни с score > 150 или топ-3
-    best_diseases = set()
-    for disease, score in sorted_diseases[:3]:
-        if score > 160:
-            best_diseases.add(disease)
-    
-    return best_diseases if best_diseases else matched_officials
-
-
-
-
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-def normalize_query_abbreviations(query: str) -> str:
-    """Нормализует аббревиатуры в запросе к верхнему регистру"""
-    words = query.split()
-    normalized_words = []
-    
-    for word in words:
-        normalized_word = normalize_abbreviation_case(word)
-        normalized_words.append(normalized_word)
-    
-    return ' '.join(normalized_words)
-
-
-def post_process_results(expanded_query: str, original_query: str) -> str:
-    words = expanded_query.split()
-    seen = set()
-    result_words = []
-    
-    for word in words:
-        if word not in seen:
-            # Нормализуем аббревиатуры к верхнему регистру
-            normalized_word = normalize_abbreviation_case(word)
-            result_words.append(normalized_word)
-            seen.add(word)
-    
-    result = ' '.join(result_words)
-       
-    if normalize_text(result) == normalize_text(original_query):
-        return original_query
-    
-    return result
-
-
-def normalize_abbreviation_case(word: str) -> str:
-    """Нормализует регистр слова, если оно является аббревиатурой"""
-    word_upper = word.upper()
-    
-    # Проверяем, есть ли эта аббревиатура в словаре ветеринарных аббревиатур
-    if word_upper in vet_abbr_manager.abbreviations_dict:
-        return word_upper
-    
-    # Дополнительно проверяем в обратном словаре аббревиатур
-    try:
-        with open('data/reverse_abbreviations.json', 'r', encoding='utf-8') as f:
-            reverse_abbr_dict = json.load(f)
+        for i, word in enumerate(words):
+            word_start = query.find(word)
+            word_end = word_start + len(word)
             
-        # Ищем word_upper во всех списках аббревиатур
-        for full_name, abbr_list in reverse_abbr_dict.items():
-            if word_upper in abbr_list:
-                return word_upper
-    except Exception:
-        pass  # Игнорируем ошибки чтения файла
-    
-    # Если не найдена, возвращаем слово как есть
-    return word
-
-
-def apply_reverse_expansion(query: str) -> str:
-    """Добавляет аббревиатуры к полным названиям в запросе"""
-    try:
-        # Загружаем обратный словарь
-        with open('data/reverse_abbreviations.json', 'r', encoding='utf-8') as f:
-            reverse_abbr_dict = json.load(f)
-    except Exception as e:
-        print(f"⚠️ Не удалось загрузить обратный словарь: {e}")
-        return query
-    
-    if not reverse_abbr_dict:
-        return query
-    
-    query_lower = query.lower()
-    words = query.split()
-    expanded_terms = set(words)
-    
-    # Ищем полные названия в запросе и добавляем соответствующие аббревиатуры
-    for full_name, abbr_list in reverse_abbr_dict.items():
-        if re.search(r'\b' + re.escape(full_name) + r'\b', query_lower) and abbr_list:
-            for abbr in abbr_list:
-                if abbr not in expanded_terms:
-                    print(f"  🔄 Обратное расширение: '{full_name}' -> '{abbr}'")
-                    expanded_terms.add(abbr)
-    
-    # Также проверяем отдельные слова
-    for word in words:
-        word_lower = word.lower()
-        if word_lower in reverse_abbr_dict and len(word) > 2 and not word.isupper():
-            for abbr in reverse_abbr_dict[word_lower]:
-                if abbr not in expanded_terms:
-                    print(f"  🔄 Слово -> Аббревиатура: '{word}' -> '{abbr}'")
-                    expanded_terms.add(abbr)
-    
-    # Собираем результат
-    seen_terms = set()
-    result_words = []
-    
-    # Сначала оригинальные слова (нормализуем аббревиатуры)
-    for word in words:
-        word_lower = word.lower()
-        if word_lower not in seen_terms:
-            normalized_word = normalize_abbreviation_case(word)
-            result_words.append(normalized_word)
-            seen_terms.add(word_lower)
-    
-    # Затем новые термины (тоже нормализуем)
-    for term in expanded_terms:
-        term_lower = term.lower()
-        if term_lower not in seen_terms:
-            normalized_term = normalize_abbreviation_case(term)
-            result_words.append(normalized_term)
-            seen_terms.add(term_lower)
-    
-    result = ' '.join(result_words)
-    return result
-
-
-def detect_and_normalize_mixed_abbreviations(text: str) -> List[str]:
-
-    variants = set()
-    
-    # Если текст слишком короткий или не содержит букв
-    if len(text) < 2 or not any(c.isalpha() for c in text):
-        return [text.upper()]
-    
-    text_upper = text.upper()
-    variants.add(text_upper)
-    
-    # Словари для транслитерации
-    eng_to_rus = {
-        'A': 'А', 'B': 'В', 'C': 'С', 'D': 'Д', 'E': 'Е', 'F': 'Ф', 'G': 'Г',
-        'H': 'Х', 'I': 'И', 'J': 'ДЖ', 'K': 'К', 'L': 'Л', 'M': 'М', 'N': 'Н',
-        'O': 'О', 'P': 'П', 'Q': 'К', 'R': 'Р', 'S': 'С', 'T': 'Т', 'U': 'У',
-        'V': 'В', 'W': 'В', 'X': 'КС', 'Y': 'И', 'Z': 'З'
-    }
-    
-    rus_to_eng = {
-        'А': 'A', 'Б': 'B', 'В': 'V', 'Г': 'G', 'Д': 'D', 'Е': 'E', 'Ё': 'E',
-        'Ж': 'ZH', 'З': 'Z', 'И': 'I', 'Й': 'Y', 'К': 'K', 'Л': 'L', 'М': 'M',
-        'Н': 'H', 'О': 'O', 'П': 'P', 'Р': 'R', 'С': 'S', 'Т': 'T', 'У': 'U',
-        'Ф': 'F', 'Х': 'KH', 'Ц': 'TS', 'Ч': 'CH', 'Ш': 'SH', 'Щ': 'SCH',
-        'Ъ': '', 'Ы': 'Y', 'Ь': '', 'Э': 'E', 'Ю': 'YU', 'Я': 'YA'
-    }
-    
-    # Определяем тип букв в тексте
-    has_english = any(c.isascii() and c.isalpha() for c in text_upper)
-    has_russian = any(c in 'АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ' for c in text_upper)
-    
-    # Если есть обе раскладки - создаем варианты
-    if has_english and has_russian:
-        # Вариант 1: все на английском
-        eng_variant = []
-        for char in text_upper:
-            if char in rus_to_eng:
-                eng_variant.append(rus_to_eng[char])
-            else:
-                eng_variant.append(char)
-        eng_result = ''.join(eng_variant)
-        if eng_result and len(eng_result) >= 2:
-            variants.add(eng_result)
-        
-        # Вариант 2: все на русском
-        rus_variant = []
-        for char in text_upper:
-            if char in eng_to_rus:
-                rus_variant.append(eng_to_rus[char])
-            else:
-                rus_variant.append(char)
-        rus_result = ''.join(rus_variant)
-        if rus_result and len(rus_result) >= 2:
-            variants.add(rus_result)
-    
-    # Также создаем варианты для чисто русских или чисто английских аббревиатур
-    elif has_russian:
-        # Русская аббревиатура -> английский вариант
-        eng_variant = []
-        for char in text_upper:
-            if char in rus_to_eng:
-                eng_variant.append(rus_to_eng[char])
-            else:
-                eng_variant.append(char)
-        eng_result = ''.join(eng_variant)
-        if eng_result and eng_result != text_upper and len(eng_result) >= 2:
-            variants.add(eng_result)
-    
-    elif has_english:
-        # Английская аббревиатура -> русский вариант
-        rus_variant = []
-        for char in text_upper:
-            if char in eng_to_rus:
-                rus_variant.append(eng_to_rus[char])
-            else:
-                rus_variant.append(char)
-        rus_result = ''.join(rus_variant)
-        if rus_result and rus_result != text_upper and len(rus_result) >= 2:
-            variants.add(rus_result)
-    
-    return list(variants)
-
-
-def extract_abbreviations_from_text(text: str) -> List[str]:
-
-    abbreviations = set()
-    
-    # Разбиваем текст на слова
-    words = re.findall(r'\b[\wА-Яа-я]+\b', text)
-    
-    for word in words:
-        word_upper = word.upper()
-        
-        # Критерии для определения аббревиатур:
-
-        if 2 < len(word_upper) <= 4 and word_upper.isalpha():
-            # Добавляем как есть
-            abbreviations.add(word_upper)
+            if len(word) < 2 or self._is_position_used(word_start, word_end, used_positions):
+                continue
             
-            # Добавляем варианты для смешанных аббревиатур
-            mixed_variants = detect_and_normalize_mixed_abbreviations(word_upper)
-            for variant in mixed_variants:
-                if len(variant) > 2:
-                    abbreviations.add(variant)
-    
-    return list(abbreviations)
+            # ОТЛАДКА: для VIK, DTBS
+            if word.upper() in ['VIK', 'DTBS']:
+                logger.info(f"🔍 Fuzzy поиск для: '{word}'")
+                logger.info(f"   Доступно аббревиатур для поиска: {len(self.fuzzy_abbreviations)}")
+            
+            # Fuzzy поиск по аббревиатурам (включая транслитерированные формы)
+            if len(self.fuzzy_abbreviations) > 0:
+                try:
+                    abbr_matches = process.extractBests(
+                        word.upper(), 
+                        [item[0] for item in self.fuzzy_abbreviations], 
+                        scorer=fuzz.ratio, 
+                        score_cutoff=self.fuzzy_threshold,
+                        limit=3  # Увеличим лимит для отладки
+                    )
+                    
+                    # ОТЛАДКА: выведем топ совпадения
+                    if word.upper() in ['VIK', 'DTBS'] and abbr_matches:
+                        logger.info(f"   Топ совпадения для '{word}': {abbr_matches}")
+                    
+                    for match_text, score in abbr_matches:
+                        for original_key, dict_name in self.fuzzy_abbreviations:
+                            if original_key == match_text:
+                                data = self.all_dictionaries[dict_name].get(original_key)
+                                if data:
+                                    matches.append({
+                                        'start': word_start,
+                                        'end': word_end,
+                                        'found_text': word,
+                                        'dict_name': dict_name,
+                                        'data': data,
+                                        'match_type': 'fuzzy',
+                                        'score': score
+                                    })
+                                    used_positions.add((word_start, word_end))
+                                    
+                                    # ОТЛАДКА
+                                    if word.upper() in ['VIK', 'DTBS']:
+                                        logger.info(f"   ✅ Найдено: '{word}' -> '{match_text}' (score: {score})")
+                                        logger.info(f"      Официальное название: {data.get('official_name', 'N/A')}")
+                                    
+                                break
+                        break
+                except Exception as e:
+                    logger.debug(f"Ошибка fuzzy поиска аббревиатур: {e}")
+        
+        return matches
+
+    def _is_position_used(self, start: int, end: int, used_positions: set) -> bool:
+        """Проверяет, используется ли позиция"""
+        for used_start, used_end in used_positions:
+            if not (end <= used_start or start >= used_end):
+                return True
+        return False
+
+    def _apply_expansions(self, query: str, matches: List[Dict]) -> str:
+        """Применяет расширения к запросу"""
+        if not matches:
+            return query
+        
+        # Сортируем совпадения по позиции (с начала к концу)
+        matches.sort(key=lambda x: x['start'])
+        
+        result = query
+        offset = 0  # Смещение из-за предыдущих замен
+        
+        for match in matches:
+            start = match['start'] + offset
+            end = match['end'] + offset
+            found_text = match['found_text']
+            dict_name = match['dict_name']
+            data = match['data']
+            
+            # Пропускаем, если это уже часть расшифровки в скобках
+            if self._is_part_of_expansion(result, start, end):
+                logger.debug(f"Пропускаем '{found_text}' - часть расшифровки")
+                continue
+                
+            # Создаем расширенный текст
+            expanded_text = self._create_expanded_text(found_text, dict_name, data)
+            
+            # Если текст не изменился, пропускаем
+            if expanded_text == found_text:
+                continue
+                
+            # Заменяем в результате
+            result_before = result
+            result = result[:start] + expanded_text + result[end:]
+            
+            # Вычисляем новое смещение
+            offset += len(expanded_text) - len(found_text)
+            
+            logger.debug(f"Расширено: '{found_text}' -> '{expanded_text}'")
+            logger.debug(f"Результат: '{result}'")
+        
+        return result
+        
+    def _is_part_of_expansion(self, query: str, start: int, end: int) -> bool:
+        """Проверяет, находится ли текст внутри скобок"""
+        # Упрощенная проверка
+        text_before = query[:start]
+        open_brackets = text_before.count('(')
+        close_brackets = text_before.count(')')
+        return open_brackets > close_brackets
+
+    def _create_expanded_text(self, found_text: str, dict_name: str, data: Dict) -> str:
+        """Создает расширенный текст с правильной логикой для аббревиатур"""
+        # Пропускаем если уже внутри скобок
+        if self._is_inside_brackets(found_text):
+            return found_text
+        
+        # НЕ пропускаем аббревиатуры! Они тоже должны расширяться
+        # if found_text.isupper() and len(found_text) <= 5:
+        #     logger.debug(f"Пропускаем аббревиатуру: '{found_text}'")
+        #     return found_text
+        
+        # Пропускаем если слово уже содержит скобки
+        if '(' in found_text or ')' in found_text:
+            return found_text
+            
+        expansion_rules = {
+            'vet_abbr': self._expand_vet_abbr,
+            'vet_full': self._expand_vet_full,
+            'vet_english': self._expand_vet_english,
+            'disease_abbr': self._expand_disease_abbr,
+            'disease_full': self._expand_disease_full,
+            'pcr_abbr': self._expand_pcr_abbr,
+            'pcr_full': self._expand_pcr_full
+        }
+        
+        expander = expansion_rules.get(dict_name)
+        if expander:
+            result = expander(found_text, data)
+            if result != found_text:
+                logger.debug(f"Расширение: '{found_text}' -> '{result}'")
+                return result
+        
+        return found_text
+
+    def _expand_vet_abbr(self, found_text: str, data: Dict) -> str:
+        """Расширяет ветеринарные аббревиатуры"""
+        russian_names = data.get('russian_names', [])
+        if russian_names:
+            original_abbr = data.get('original_abbr', found_text.upper())
+            # Для аббревиатур добавляем расшифровку
+            return f"{original_abbr} ({russian_names[0]})"
+        return found_text
+
+    def _expand_vet_full(self, found_text: str, data: Dict) -> str:
+        """Расширяет полные ветеринарные названия"""
+        abbreviations = data.get('abbreviations', [])
+        if abbreviations:
+            # Используем только оригинальные аббревиатуры для вывода
+            unique_abbrs = list(set(abbreviations))
+            if unique_abbrs and not self._abbreviations_already_in_query(found_text, unique_abbrs):
+                return f"{found_text} ({', '.join(unique_abbrs)})"
+        return found_text
+
+    def _expand_vet_english(self, found_text: str, data: Dict) -> str:
+        return self._expand_vet_full(found_text, data)
+
+    def _expand_disease_abbr(self, found_text: str, data: Dict) -> str:
+        official_name = data.get('official_name', '')
+        if official_name:
+            original_abbr = data.get('original_abbr', found_text.upper())
+            return f"{original_abbr} ({official_name})"
+        return found_text
+
+    def _expand_disease_full(self, found_text: str, data: Dict) -> str:
+        abbreviations = data.get('abbreviations', [])
+        official_name = data.get('official_name', '')
+        
+        is_colloquial = data.get('type') == 'disease_colloquial'
+        is_official = data.get('type') == 'disease_full'
+        
+        if is_colloquial and official_name:
+            return f"{found_text} ({official_name})"
+        elif abbreviations:
+            # Используем только оригинальные аббревиатуры для вывода
+            unique_abbrs = list(set(abbreviations))
+            if unique_abbrs and not self._abbreviations_already_in_query(found_text, unique_abbrs):
+                return f"{found_text} ({', '.join(unique_abbrs)})"
+        elif official_name and official_name != found_text and is_official:
+            return f"{found_text} ({official_name})"
+        
+        return found_text
+
+    def _expand_pcr_abbr(self, found_text: str, data: Dict) -> str:
+        full_names = data.get('full_names', [])
+        if full_names:
+            original_abbr = data.get('original_abbr', found_text.upper())
+            return f"{original_abbr} ({full_names[0]})"
+        return found_text
+
+    def _expand_pcr_full(self, found_text: str, data: Dict) -> str:
+        abbreviations = data.get('abbreviations', [])
+        if abbreviations:
+            # Используем только оригинальные аббревиатуры для вывода
+            unique_abbrs = list(set(abbreviations))
+            if unique_abbrs and not self._abbreviations_already_in_query(found_text, unique_abbrs):
+                return f"{found_text} ({', '.join(unique_abbrs)})"
+        return found_text
+
+    def _is_inside_brackets(self, text: str) -> bool:
+        return text.startswith('(') and text.endswith(')')
+
+    def _abbreviations_already_in_query(self, found_text: str, abbreviations: List[str]) -> bool:
+        return False
+
+# Глобальный экземпляр
+abbreviation_expander = UnifiedAbbreviationExpander()
+
+# Функция для обратной совместимости
+def expand_query_with_abbreviations(query: str) -> str:
+    return abbreviation_expander.expand_query(query)
