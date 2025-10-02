@@ -1,3 +1,8 @@
+"""
+Обработчики вопросов и поиска тестов
+Исправленная версия с устранением всех критических багов
+"""
+
 from aiogram import Router, F
 from aiogram.types import (
     Message,
@@ -11,11 +16,12 @@ from aiogram.fsm.state import State, StatesGroup
 from langchain.schema import SystemMessage, HumanMessage, Document
 import asyncio
 import html
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional, Set
 from datetime import datetime
 import re
 import hashlib
-from datetime import datetime
+from collections import defaultdict
+import logging
 
 from bot.handlers.ultimate_classifier import ultimate_classifier
 from bot.handlers.query_processing.query_preprocessing import expand_query_with_abbreviations
@@ -33,14 +39,13 @@ from bot.handlers.utils import (
     check_profile_request,
     filter_results_by_type,
     is_profile_test
-    )
+)
 from bot.handlers.sending_style import (
     animate_loading,
     format_test_data,
     format_test_info,
     get_user_first_name,
     get_time_based_farewell,
-    # format_similar_tests_with_links
 )
 from bot.handlers.score_test import (
     select_best_match,
@@ -57,38 +62,80 @@ from bot.keyboards import (
     get_search_type_switch_kb
 )
 from bot.handlers.utils import normalize_container_name, deduplicate_container_names
-
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from bot.handlers.feedback import CallbackStates, get_phone_kb
 
-# LOADING_GIF_ID = (
-#     "CgACAgIAAxkBAAMIaGr_qy1Wxaw2VrBrm3dwOAkYji4AAu54AAKmqHlJAtZWBziZvaA2BA"
-# )
+# ============================================================================
+# КОНСТАНТЫ
+# ============================================================================
+
 LOADING_GIF_ID = "CgACAgIAAxkBAAIBFGiBcXtGY7OZvr3-L1dZIBRNqSztAALueAACpqh5Scn4VmIRb4UjNgQ"
-# LOADING_GIF_ID = "CgACAgIAAxkBAAMMaHSq3vqxq2RuMMj-DIMvldgDjfkAAu54AAKmqHlJCNcCjeoHRJI2BA"
-# Назим
-# LOADING_GIF_ID = "CgACAgIAAxkBAANPaMvCZEN3F6cNDG58zpcLZnhqiDsAAu54AAKmqHlJU1E65w2DvLo2BA"
+
+# Параметры поиска
+FUZZY_SEARCH_THRESHOLD_MIN = 55  # Увеличен с 30 до 55
+FUZZY_SEARCH_THRESHOLD_EXACT = 90
+TEXT_SEARCH_TOP_K = 80
+SIMILAR_TESTS_TOP_K = 50
+
+# Параметры пагинации
+ITEMS_PER_PAGE = 6
+MAX_SEARCH_RESULTS_IN_STATE = 3  # Количество хранимых поисков
+SEARCH_RESULTS_TTL_SECONDS = 1800  # 30 минут
+
+# Параметры LLM
+LLM_TIMEOUT_SECONDS = 30
+
+# Пороги уверенности классификатора
+CONFIDENCE_HIGH = 0.85
+CONFIDENCE_MEDIUM = 0.70
+
+# Настройки логирования
+logger = logging.getLogger(__name__)
+
+# ============================================================================
+# ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
+# ============================================================================
 
 questions_router = Router()
 
+# Lock'и для предотвращения race conditions
+user_processing_locks = defaultdict(asyncio.Lock)
 
-class TestCallback:
-    @staticmethod
-    def pack(action: str, test_code: str) -> str:
-        # Обработка проблемного теста
-        if "AN520" in test_code and "," in test_code:
-            test_code = "AN520ГИЭ"
-        
-        # Ограничиваем длину
-        if len(test_code) > 40:
-            test_code = test_code[:40]
-            
-        return f"{action}:{test_code}"
+# Кеш для категорий тестов (оптимизация)
+TEST_CATEGORY_KEYWORDS = {
+    "биохимия": {"биохим", "алт", "аст", "креатинин", "мочевина", "глюкоза"},
+    "гематология": {"оак", "общий анализ крови", "гемоглобин", "эритроциты", "лейкоциты"},
+    "гормоны": {"ттг", "т3", "т4", "кортизол", "тестостерон"},
+    "инфекции": {"пцр", "ифа", "антитела", "вирус", "бактерии"},
+    "моча": {"моча", "оам", "общий анализ мочи"},
+}
 
-    @staticmethod
-    def unpack(callback_data: str) -> Tuple[str, str]:
-        parts = callback_data.split(":", 1)
-        return parts[0] if len(parts) > 0 else "", parts[1] if len(parts) > 1 else ""
+# Плоский set для быстрого поиска
+ALL_TEST_KEYWORDS = set()
+for keywords in TEST_CATEGORY_KEYWORDS.values():
+    ALL_TEST_KEYWORDS.update(keywords)
+
+# Ключевые слова для общих вопросов
+GENERAL_QUESTION_KEYWORDS = {
+    'как', 'что', 'где', 'когда', 'почему', 'зачем', 'сколько',
+    'хранить', 'хранение', 'транспортировка', 'подготовка', 'правила',
+    'можно ли', 'нужно ли', 'должен ли', 'следует ли',
+    'температура', 'время', 'срок', 'условия',
+    'рекомендации', 'советы', 'инструкция'
+}
+
+# Ключевые слова для нерелевантных вопросов
+OFF_TOPIC_KEYWORDS = {
+    'человек', 'люди', 'доктор', 'больница', 'поликлиника', 'терапевт',
+    'цена', 'стоимость', 'купить', 'продать', 'заказ', 'доставка',
+    'оплата', 'прайс', 'сколько стоит', 'тариф', 'услуг', 'заказать',
+    'график работы', 'часы работы', 'адрес', 'ваканс', 'работа',
+    'сайт', 'приложение', 'техническ', 'баг', 'ошибка',
+    'погода', 'новости', 'политика', 'спорт', 'кино', 'музыка',
+}
+
+# ============================================================================
+# FSM STATES
+# ============================================================================
 
 class QuestionStates(StatesGroup):
     waiting_for_search_type = State()
@@ -99,39 +146,85 @@ class QuestionStates(StatesGroup):
     clarifying_search = State()
     confirming_search_type = State()
 
+# ============================================================================
+# CALLBACK HELPERS
+# ============================================================================
 
-# Структура для хранения контекста поиска
-class SearchContext:
-    def __init__(self):
-        self.original_query = ""
-        self.search_attempts = []
-        self.candidate_tests = []
-        self.clarification_step = 0
-        self.filters = {}
+class TestCallback:
+    """Безопасная работа с callback data для тестов"""
+    
+    @staticmethod
+    def pack(action: str, test_code: str) -> str:
+        """Упаковка callback данных с защитой от превышения лимита"""
+        # Обработка проблемного теста
+        if "AN520" in test_code and "," in test_code:
+            test_code = "AN520ГИЭ"
+        
+        # Формируем callback
+        callback_data = f"{action}:{test_code}"
+        
+        # Telegram лимит: 64 байта
+        if len(callback_data.encode('utf-8')) > 64:
+            # Создаем короткий хеш
+            test_hash = hashlib.md5(test_code.encode()).hexdigest()[:8]
+            callback_data = f"{action}:h_{test_hash}"
+            logger.warning(f"Test code too long, using hash: {test_code} -> {test_hash}")
+        
+        return callback_data
+
+    @staticmethod
+    def unpack(callback_data: str) -> Tuple[str, str]:
+        """Распаковка callback данных"""
+        parts = callback_data.split(":", 1)
+        action = parts[0] if len(parts) > 0 else ""
+        test_code = parts[1] if len(parts) > 1 else ""
+        return action, test_code
+
 
 class PaginationCallback:
-    """Класс для работы с callback данными пагинации"""
+    """Работа с callback данными пагинации"""
+    
     @staticmethod
-    def pack(action: str, page: int, search_id: str, view_type: str = "all") -> str:  # ДОБАВИТЬ view_type
+    def pack(action: str, page: int, search_id: str, view_type: str = "all") -> str:
         return f"page:{action}:{page}:{search_id}:{view_type}"
     
     @staticmethod
-    def unpack(callback_data: str) -> Tuple[str, int, str, str]:  # ДОБАВИТЬ возврат view_type
+    def unpack(callback_data: str) -> Tuple[str, int, str, str]:
         parts = callback_data.split(":", 4)
         action = parts[1] if len(parts) > 1 else ""
         page = int(parts[2]) if len(parts) > 2 else 0
         search_id = parts[3] if len(parts) > 3 else ""
-        view_type = parts[4] if len(parts) > 4 else "all"  # ДОБАВИТЬ извлечение view_type
+        view_type = parts[4] if len(parts) > 4 else "all"
         return action, page, search_id, view_type
+
+# ============================================================================
+# УТИЛИТЫ
+# ============================================================================
+
+def sanitize_test_code_for_display(test_code: str) -> str:
+    """Обрезает слишком длинные коды тестов для корректного отображения"""
+    if not test_code:
+        return test_code
+    
+    # Специальная обработка проблемного теста
+    if "AN520" in test_code and "," in test_code:
+        return "AN520ГИЭ"
+    
+    # Обрезаем длинные коды
+    if len(test_code) > 20:
+        return test_code[:17] + "..."
+    
+    return test_code
 
 
 def _rerank_hits_by_query(hits: List[Tuple[Document, float]], query: str) -> List[Tuple[Document, float]]:
-
+    """Перераспределение результатов на основе соответствия запросу"""
     if not hits:
         return hits
-    # Выделяем только буквы в верхнем регистре
+    
     query = expand_query_with_abbreviations(query)
     query_alpha = "".join(ch for ch in (query or "") if ch.isalpha()).upper()
+    
     if len(query_alpha) < 2 or len(query_alpha) > 6:
         return hits
 
@@ -154,16 +247,169 @@ def _rerank_hits_by_query(hits: List[Tuple[Document, float]], query: str) -> Lis
     rescored.sort(key=lambda x: x[1], reverse=True)
     return rescored
 
+
+async def apply_animal_filter(
+    results: List[Tuple[Document, float]], 
+    query: str
+) -> Tuple[List[Tuple[Document, float]], Set[str]]:
+    """
+    Применяет фильтр по типам животных к результатам поиска
+    
+    Returns:
+        Tuple[filtered_results, animal_types]
+    """
+    animal_types = animal_filter.extract_animals_from_query(query)
+    
+    if not animal_types:
+        return results, set()
+    
+    logger.info(f"[ANIMAL FILTER] Found animals: {animal_types}")
+    filtered = animal_filter.filter_tests_by_animals(results, animal_types)
+    logger.info(f"[ANIMAL FILTER] Filtered: {len(results)} → {len(filtered)}")
+    
+    return filtered, animal_types
+
+
+async def cleanup_old_search_results(
+    state: FSMContext, 
+    max_age_seconds: int = SEARCH_RESULTS_TTL_SECONDS,
+    keep_last: int = MAX_SEARCH_RESULTS_IN_STATE
+):
+    """
+    Очищает старые результаты поиска из состояния
+    
+    Args:
+        state: FSM контекст
+        max_age_seconds: Максимальный возраст результатов в секундах
+        keep_last: Сколько последних результатов сохранять
+    """
+    data = await state.get_data()
+    now = datetime.now().timestamp()
+    
+    search_results = {}
+    
+    # Собираем все результаты с их временем
+    for key, value in data.items():
+        if key.startswith("search_results_"):
+            if isinstance(value, dict) and 'timestamp' in value:
+                search_results[key] = value
+    
+    # Сортируем по времени
+    sorted_results = sorted(
+        search_results.items(),
+        key=lambda x: x[1].get('timestamp', 0),
+        reverse=True
+    )
+    
+    # Определяем, что удалять
+    to_delete = []
+    
+    for i, (key, value) in enumerate(sorted_results):
+        # Удаляем старые результаты
+        if now - value.get('timestamp', 0) > max_age_seconds:
+            to_delete.append(key)
+        # Удаляем лишние (сверх лимита)
+        elif i >= keep_last:
+            to_delete.append(key)
+    
+    # Удаляем
+    if to_delete:
+        logger.info(f"[CLEANUP] Removing {len(to_delete)} old search results")
+        await state.update_data(**{k: None for k in to_delete})
+
+
+def create_mock_message(original_message, text: str):
+    """
+    Создает полнофункциональный mock сообщение
+    
+    ВНИМАНИЕ: Используется для callback → текстовый обработчик
+    В идеале нужно рефакторить и избегать mock объектов
+    """
+    bot = getattr(original_message, 'bot', None)
+    
+    class MockMessage:
+        def __init__(self):
+            self.text = text
+            self.from_user = original_message.from_user
+            self.chat = original_message.chat
+            self.message_id = getattr(original_message, 'message_id', None)
+            self.bot = bot
+        
+        async def answer_animation(self, animation, caption="", reply_markup=None):
+            if self.bot:
+                return await self.bot.send_animation(
+                    chat_id=self.chat.id,
+                    animation=animation,
+                    caption=caption,
+                    reply_markup=reply_markup
+                )
+        
+        async def answer(self, text, reply_markup=None, parse_mode=None, 
+                        disable_web_page_preview=None):
+            if self.bot:
+                return await self.bot.send_message(
+                    chat_id=self.chat.id,
+                    text=text,
+                    reply_markup=reply_markup,
+                    parse_mode=parse_mode,
+                    disable_web_page_preview=disable_web_page_preview
+                )
+        
+        async def answer_photo(self, photo, caption="", reply_markup=None, parse_mode=None):
+            if self.bot:
+                return await self.bot.send_photo(
+                    chat_id=self.chat.id,
+                    photo=photo,
+                    caption=caption,
+                    reply_markup=reply_markup,
+                    parse_mode=parse_mode
+                )
+        
+        async def reply(self, text, reply_markup=None, parse_mode=None):
+            if self.bot:
+                return await self.bot.send_message(
+                    chat_id=self.chat.id,
+                    text=text,
+                    reply_to_message_id=self.message_id,
+                    reply_markup=reply_markup,
+                    parse_mode=parse_mode
+                )
+        
+        async def edit_text(self, text, reply_markup=None, parse_mode=None,
+                           disable_web_page_preview=None):
+            if self.bot and self.message_id:
+                return await self.bot.edit_message_text(
+                    chat_id=self.chat.id,
+                    message_id=self.message_id,
+                    text=text,
+                    reply_markup=reply_markup,
+                    parse_mode=parse_mode,
+                    disable_web_page_preview=disable_web_page_preview
+                )
+    
+    return MockMessage()
+
+
+async def safe_cancel_animation(animation_task: Optional[asyncio.Task]):
+    """Безопасная отмена задачи анимации"""
+    if animation_task and not animation_task.done():
+        animation_task.cancel()
+        try:
+            await animation_task
+        except asyncio.CancelledError:
+            pass  # Ожидаемое исключение
+        except Exception as e:
+            logger.warning(f"[ANIMATION] Error during cancel: {e}")
+
+
 async def find_container_photo_smart(db, container_type: str):
     """
     Умный поиск фото контейнера с учетом вариантов в БД
     """
-    
-    # Определяем тип
     is_test_tube = "пробирк" in container_type.lower()
     is_container = "контейнер" in container_type.lower()
     
-    # Сначала пробуем точный поиск
+    # Сначала точный поиск
     photo = await db.get_container_photo(container_type)
     if photo:
         photo['display_name'] = photo.get('container_type', container_type)
@@ -177,19 +423,17 @@ async def find_container_photo_smart(db, container_type: str):
         search_variants.extend([
             f"2 {container_type.replace('Пробирка', 'Пробирки')}",
             f"3 {container_type.replace('Пробирка', 'Пробирки')}",
-            container_type  # Оригинал
+            container_type
         ])
     else:
         search_variants.append(container_type)
     
     # Варианты регистра для "с"
-    for variant in search_variants[:]:  # Копия для итерации
-        # С большой буквы
+    for variant in search_variants[:]:
         upper_variant = re.sub(r'\bс\s+', 'С ', variant)
         if upper_variant != variant:
             search_variants.append(upper_variant)
         
-        # С маленькой буквы  
         lower_variant = re.sub(r'\bС\s+', 'с ', variant)
         if lower_variant != variant:
             search_variants.append(lower_variant)
@@ -198,16 +442,19 @@ async def find_container_photo_smart(db, container_type: str):
     for variant in search_variants:
         photo = await db.get_container_photo(variant)
         if photo:
-            # Сохраняем оригинальное название для отображения
             photo['display_name'] = photo.get('container_type', container_type)
             return photo
     
     return None
 
+# ============================================================================
+# КЛАВИАТУРЫ
+# ============================================================================
+
 def create_paginated_keyboard(
-    tests: List[Document],
+    tests: List[Dict],  # Изменено: теперь список Dict, а не Document
     current_page: int = 0,
-    items_per_page: int = 6,
+    items_per_page: int = ITEMS_PER_PAGE,
     search_id: str = "",
     include_filters: bool = True,
     tests_count: int = 0,
@@ -215,31 +462,59 @@ def create_paginated_keyboard(
     total_count: int = 0,
     current_view: str = "all"
 ) -> Tuple[InlineKeyboardMarkup, int, int]:
+    """
+    Создает клавиатуру с пагинацией для результатов поиска
+    
+    Args:
+        tests: Список словарей с metadata тестов
+        current_page: Текущая страница
+        items_per_page: Элементов на странице
+        search_id: ID поиска для callback
+        include_filters: Показывать ли фильтры
+        tests_count: Количество обычных тестов
+        profiles_count: Количество профилей
+        total_count: Общее количество
+        current_view: Текущий вид (all/tests/profiles)
+    
+    Returns:
+        Tuple[клавиатура, количество_страниц, показано_элементов]
+    """
     total_items = len(tests)
     total_pages = (total_items + items_per_page - 1) // items_per_page
     
-    # Вычисляем индексы для текущей страницы
     start_idx = current_page * items_per_page
     end_idx = min(start_idx + items_per_page, total_items)
     
     keyboard = []
     
-    # ДОБАВЛЯЕМ КНОПКИ ФИЛЬТРАЦИИ ЕСЛИ НУЖНО (ТОЛЬКО ОДИН РАЗ)
-    if include_filters and tests_count + profiles_count + total_count > 0:
+    # Кнопки фильтрации
+    if include_filters and (tests_count + profiles_count + total_count) > 0:
         filter_row = [
-            InlineKeyboardButton(text=f"🧪 Тесты ({tests_count})", callback_data=f"switch_view:tests:{search_id}"),
-            InlineKeyboardButton(text=f"🔬 Профили ({profiles_count})", callback_data=f"switch_view:profiles:{search_id}"),
-            InlineKeyboardButton(text=f"📋 Все ({total_count})", callback_data=f"switch_view:all:{search_id}")
+            InlineKeyboardButton(
+                text=f"🧪 Тесты ({tests_count})",
+                callback_data=f"switch_view:tests:{search_id}"
+            ),
+            InlineKeyboardButton(
+                text=f"🔬 Профили ({profiles_count})",
+                callback_data=f"switch_view:profiles:{search_id}"
+            ),
+            InlineKeyboardButton(
+                text=f"📋 Все ({total_count})",
+                callback_data=f"switch_view:all:{search_id}"
+            )
         ]
         keyboard.append(filter_row)
     
+    # Кнопки тестов (по 3 в ряд)
     row = []
-    
-    # Добавляем кнопки тестов для текущей страницы
-    for doc in tests[start_idx:end_idx]:
-        test_code = doc.metadata.get("test_code", "")
+    for item in tests[start_idx:end_idx]:
+        # Извлекаем test_code из metadata
+        metadata = item.get('metadata', item)  # На случай разных структур
+        test_code = metadata.get('test_code', '')
         
-        # Санитизируем код для кнопки
+        if not test_code:
+            continue
+        
         button_text = sanitize_test_code_for_display(test_code)
         
         row.append(
@@ -249,43 +524,40 @@ def create_paginated_keyboard(
             )
         )
         
-        if len(row) >= 3:  # По 3 кнопки в ряд
+        if len(row) >= 3:
             keyboard.append(row)
             row = []
     
     if row:
         keyboard.append(row)
     
-    # Добавляем навигационные кнопки
-    nav_row = []
-    
-    # Кнопка "Назад"
-    if current_page > 0:
+    # Навигация
+    if total_pages > 1:
+        nav_row = []
+        
+        if current_page > 0:
+            nav_row.append(
+                InlineKeyboardButton(
+                    text="◀️ Назад",
+                    callback_data=PaginationCallback.pack("prev", current_page - 1, search_id, current_view)
+                )
+            )
+        
         nav_row.append(
             InlineKeyboardButton(
-                text="◀️ Назад",
-                callback_data=PaginationCallback.pack("prev", current_page - 1, search_id, current_view)
+                text=f"📄 {current_page + 1}/{total_pages}",
+                callback_data="ignore"
             )
         )
-    
-    # Индикатор страниц
-    nav_row.append(
-        InlineKeyboardButton(
-            text=f"📄 {current_page + 1}/{total_pages}",
-            callback_data="ignore"
-        )
-    )
-    
-    # Кнопка "Вперед"
-    if current_page < total_pages - 1:
-        nav_row.append(
-            InlineKeyboardButton(
-                text="Вперед ▶️",
-                callback_data=PaginationCallback.pack("next", current_page + 1, search_id, current_view)
+        
+        if current_page < total_pages - 1:
+            nav_row.append(
+                InlineKeyboardButton(
+                    text="Вперед ▶️",
+                    callback_data=PaginationCallback.pack("next", current_page + 1, search_id, current_view)
+                )
             )
-        )
-    
-    if nav_row and total_pages > 1:
+        
         keyboard.append(nav_row)
     
     # Кнопка закрытия
@@ -298,884 +570,175 @@ def create_paginated_keyboard(
     
     return InlineKeyboardMarkup(inline_keyboard=keyboard), total_pages, end_idx - start_idx
 
-@questions_router.message(F.text == "🔄 Новый вопрос")
-async def handle_new_question_in_dialog(message: Message, state: FSMContext):
-    """Обработчик для новых вопросов в режиме диалога."""
-    # Сохраняем контекст последних тестов
-    data = await state.get_data()
-    last_viewed = data.get("last_viewed_test")
 
-    await message.answer(
-        "💡 Введите код теста (например: AN5) или опишите, что вы ищете:",
-        reply_markup=get_back_to_menu_kb(),
-    )
-
-    # Сохраняем историю просмотров при переходе к новому поиску
-    await state.set_state(QuestionStates.waiting_for_search_type)
-    if last_viewed:
-        await state.update_data(last_viewed_test=last_viewed)
-
-
-@questions_router.callback_query(F.data == "new_search")
-async def handle_new_search(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-
-    # Сохраняем контекст
-    data = await state.get_data()
-    last_viewed = data.get("last_viewed_test")
-
-    await callback.message.answer(
-        "💡 Введите код теста (например: AN5) или опишите, что вы ищете:",
-        reply_markup=get_back_to_menu_kb(),
-    )
-
-    await state.set_state(QuestionStates.waiting_for_search_type)
-    if last_viewed:
-        await state.update_data(last_viewed_test=last_viewed)
-
-
-
-@questions_router.callback_query(F.data.startswith("page:"))
-async def handle_pagination(callback: CallbackQuery, state: FSMContext):
-    """Обработчик переключения страниц с сохранением фильтрации"""
-    await callback.answer()
-    
-    action, page, search_id, current_view = PaginationCallback.unpack(callback.data)
-    
-    # Получаем сохраненные результаты поиска
-    data = await state.get_data()
-    all_results = data.get(f"search_results_{search_id}", [])
-    
-    if not all_results:
-        await callback.answer("Результаты поиска устарели. Выполните новый поиск.", show_alert=True)
-        return
-    
-    # Фильтруем результаты согласно current_view
-    if current_view == "tests":
-        display_results = [doc for doc in all_results if not is_profile_test(doc.metadata.get("test_code", ""))]
-        view_name = "тесты"
-    elif current_view == "profiles":
-        display_results = [doc for doc in all_results if is_profile_test(doc.metadata.get("test_code", ""))]
-        view_name = "профили"
-    else:
-        display_results = all_results
-        view_name = "результаты"
-    
-    # Считаем количества для кнопок (из всех результатов)
-    tests_count = len([doc for doc in all_results if not is_profile_test(doc.metadata.get("test_code", ""))])
-    profiles_count = len([doc for doc in all_results if is_profile_test(doc.metadata.get("test_code", ""))])
-    total_count = len(all_results)
-    
-    # Создаем клавиатуру с фильтрами
-    keyboard, total_pages, items_shown = create_paginated_keyboard(
-        display_results,  # ПЕРЕДАЕМ УЖЕ ОТФИЛЬТРОВАННЫЕ РЕЗУЛЬТАТЫ
-        current_page=page,
-        items_per_page=6,
-        search_id=search_id,
-        include_filters=True,
-        tests_count=tests_count,
-        profiles_count=profiles_count,
-        total_count=total_count,
-        current_view=current_view
-    )
-    
-    # Формируем текст с результатами для текущей страницы
-    start_idx = page * 6
-    end_idx = start_idx + items_shown
-    
-    response = f"🔍 <b>Найдено {len(display_results)} {view_name}</b>"
-    
-    if total_pages > 1:
-        response += f" <b>(страница {page + 1} из {total_pages}):</b>\n\n"
-    else:
-        response += ":\n\n"
-    
-    for i, doc in enumerate(display_results[start_idx:end_idx], start=start_idx + 1):
-        test_data = format_test_data(doc.metadata)
-        test_code = sanitize_test_code_for_display(test_data["test_code"])
-        test_name = html.escape(test_data["test_name"])
-        department = html.escape(test_data.get("department", "Не указано"))
-        
-        type_label = "🔬 Профиль" if is_profile_test(test_code) else "🧪 Тест"
-        link = create_test_link(test_code)
-        
-        response += (
-            f"<b>{i}.</b> {type_label}: <a href='{link}'>{test_code}</a>\n"
-            f"📝 {test_name}\n"
-            f"📋 {department}\n\n"
-        )
-    
-    response += "\n💡 <i>Нажмите на код теста или выберите из кнопок ниже</i>"
-    
-    # Обновляем сообщение
-    try:
-        await callback.message.edit_text(
-            response,
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-            reply_markup=keyboard
-        )
-    except Exception as e:
-        print(f"[ERROR] Failed to update message: {e}")
-        await callback.answer("Ошибка обновления сообщения", show_alert=True)
-
-
-@questions_router.callback_query(F.data.startswith("show_container_photos:"))
-async def handle_show_container_photos_callback(callback: CallbackQuery):
-    """Обработчик для показа фото контейнеров"""
-    await callback.answer()
-
-    test_code = callback.data.split(":", 1)[1]
-
-    try:
-        processor = DataProcessor()
-        processor.load_vector_store()
-
-        results = processor.search_test(filter_dict={"test_code": test_code})
-
-        if not results:
-            await callback.message.answer("❌ Тест не найден")
-            return
-
-        doc = results[0][0] if isinstance(results[0], tuple) else results[0]
-        raw_metadata = doc.metadata
-        test_data = format_test_data(doc.metadata)
-
-        # Собираем все контейнеры
-        all_containers = []
-        
-        # Функция для разделения контейнеров по "или"
-        def split_by_or(container_str: str) -> List[str]:
-            """Разделяет строку контейнера по 'или' """
-            if " или " in container_str.lower():
-                # Разделяем по "или" (учитываем разный регистр)
-                parts = re.split(r'\s+или\s+', container_str, flags=re.IGNORECASE)
-                return [part.strip() for part in parts if part.strip()]
-            return [container_str]
-        
-        # Парсим primary_container_type
-        primary_container = str(raw_metadata.get("primary_container_type", "")).strip()
-        if primary_container and primary_container.lower() not in ["не указан", "нет", "-", "", "none", "null"]:
-            primary_container = primary_container.replace('"', "").replace("\n", " ")
-            primary_container = " ".join(primary_container.split())
-            
-            if "*I*" in primary_container:
-                parts = [ct.strip() for ct in primary_container.split("*I*")]
-            else:
-                parts = [primary_container]
-            
-            # Обрабатываем "или" в каждой части
-            for part in parts:
-                all_containers.extend(split_by_or(part))
-        
-        # Парсим container_type
-        container_type_raw = str(raw_metadata.get("container_type", "")).strip()
-        if container_type_raw and container_type_raw.lower() not in ["не указан", "нет", "-", "", "none", "null"]:
-            container_type_raw = container_type_raw.replace('"', "").replace("\n", " ")
-            container_type_raw = " ".join(container_type_raw.split())
-            
-            if "*I*" in container_type_raw:
-                parts = [ct.strip() for ct in container_type_raw.split("*I*")]
-            else:
-                parts = [container_type_raw]
-            
-            # Обрабатываем "или" в каждой части
-            for part in parts:
-                all_containers.extend(split_by_or(part))
-        
-        # Функция для нормализации контейнера для сравнения дубликатов
-        def normalize_for_comparison(container: str) -> str:
-            """Нормализует контейнер для проверки дубликатов"""
-            norm = container.lower().strip()
-            # Убираем числа в начале (2 пробирки -> пробирки)
-            norm = re.sub(r'^\d+\s+', '', norm)
-            # Заменяем разные варианты написания на единый формат
-            norm = norm.replace(" / ", " ").replace(" + ", " ")
-            # Приводим к единственному числу
-            norm = norm.replace("пробирки", "пробирка")
-            # Убираем множественные пробелы
-            norm = " ".join(norm.split())
-            return norm
-        
-        # Дедупликация с учетом эквивалентности
-        unique_containers = []
-        seen_normalized = set()
-        
-        for container in all_containers:
-            if not container:
-                continue
-                
-            # Для дедупликации используем нормализованную версию
-            normalized = normalize_for_comparison(container)
-            
-            if normalized not in seen_normalized:
-                seen_normalized.add(normalized)
-                unique_containers.append(container)  # Сохраняем оригинальное написание
-        
-        if not unique_containers:
-            await callback.message.answer("❌ Для этого теста не указаны типы контейнеров")
-            return
-        
-        # Ищем фото для каждого уникального контейнера
-        found_photos = []
-        already_shown_file_ids = set()
-        not_found_containers = []
-        
-        for container in unique_containers:
-            # Варианты для поиска в БД
-            search_variants = [
-                container,  # Оригинал
-                container.replace(" / ", " + "),  # Меняем / на +
-                container.replace(" + ", " / "),  # Меняем + на /
+def _get_callback_support_keyboard(question: str = "") -> InlineKeyboardMarkup:
+    """Создает клавиатуру с кнопкой для заказа звонка"""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📞 Позвонить специалисту",
+                    callback_data="redirect_to_callback"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔄 Задать другой вопрос",
+                    callback_data="new_search"
+                )
             ]
-            
-            # Добавляем варианты без чисел
-            container_no_number = re.sub(r'^\d+\s+', '', container)
-            if container_no_number != container:
-                search_variants.extend([
-                    container_no_number,
-                    container_no_number.replace(" / ", " + "),
-                    container_no_number.replace(" + ", " / "),
-                ])
-            
-            # Добавляем варианты с единственным числом
-            if "пробирки" in container.lower():
-                singular = container.replace("пробирки", "пробирка").replace("Пробирки", "Пробирка")
-                search_variants.append(singular)
-                search_variants.append(re.sub(r'^\d+\s+', '', singular))
-            
-            photo_data = None
-            for variant in search_variants:
-                # Сначала точный поиск
-                photo_data = await db.get_container_photo(variant)
-                if photo_data:
-                    break
-                    
-                # Если не нашли - умный поиск
-                if not photo_data:
-                    photo_data = await find_container_photo_smart(db, variant)
-                    if photo_data:
-                        break
-            
-            if photo_data:
-                file_id = photo_data.get("file_id")
-                
-                # Проверяем дубликаты по file_id
-                if file_id not in already_shown_file_ids:
-                    already_shown_file_ids.add(file_id)
-                    found_photos.append({
-                        "container_type": container,  # Используем оригинальное название
-                        "file_id": file_id,
-                        "description": photo_data.get("description")
-                    })
-            else:
-                # Сохраняем контейнеры, для которых не нашли фото
-                not_found_containers.append(container)
-        
-        # Отправляем найденные фото
-        if found_photos:
-            if len(found_photos) == 1:
-                # Одно фото
-                photo_info = found_photos[0]
-                container_name = html.escape(photo_info['container_type'])
-                caption = f"📦 Контейнер: {container_name}"
-                if photo_info.get('description'):
-                    description = html.escape(photo_info['description'])
-                    caption += f"\n📝 {description}"
-                
-                hide_keyboard = InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [
-                            InlineKeyboardButton(
-                                text="🙈 Скрыть фото",
-                                callback_data=f"hide_single:{test_code}",
-                            )
-                        ]
-                    ]
-                )
-                
-                await callback.message.answer_photo(
-                    photo=photo_info['file_id'],
-                    caption=caption,
-                    reply_markup=hide_keyboard
-                )
-            else:
-                # Несколько фото - отправляем каждое отдельно
-                sent_messages = []
-                
-                for i, photo_info in enumerate(found_photos):
-                    container_name = html.escape(photo_info['container_type'])
-                    
-                    # Только название контейнера как подпись
-                    caption = f"📦 {container_name}"
-                    
-                    # Отправляем каждое фото отдельно без кнопок
-                    sent_msg = await callback.message.answer_photo(
-                        photo=photo_info['file_id'],
-                        caption=caption,
-                        parse_mode="HTML"
-                    )
-                    sent_messages.append(sent_msg)
-                    
-                    # Небольшая задержка между отправками для избежания спама
-                    if i < len(found_photos) - 1:
-                        await asyncio.sleep(0.3)
-                
-                # Отправляем общую кнопку для скрытия всех фото
-                message_ids = [msg.message_id for msg in sent_messages]
-                message_ids_str = ",".join(map(str, message_ids))
-                
-                hide_keyboard = InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [
-                            InlineKeyboardButton(
-                                text="🙈 Скрыть все фото",
-                                callback_data=f"hide_multiple:{message_ids_str}",
-                            )
-                        ]
-                    ]
-                )
-                
-                await callback.message.answer(
-                    f"Показано {len(found_photos)} фото контейнеров",
-                    reply_markup=hide_keyboard
-                )
-            
-            # Если есть контейнеры без фото, сообщаем об этом
-            if not_found_containers:
-                not_found_msg = "\n⚠️ Не найдены фото для:\n"
-                for ct in not_found_containers[:5]:
-                    not_found_msg += f"• {ct}\n"
-                if len(not_found_containers) > 5:
-                    not_found_msg += f"... и еще {len(not_found_containers) - 5}"
-                
-                await callback.message.answer(not_found_msg)
-                
-        else:
-            # Все контейнеры не найдены
-            not_found_msg = "❌ Фото контейнеров не найдены в базе\n\n"
-            not_found_msg += "🔍 Искали типы:\n"
-            for ct in unique_containers[:10]:
-                not_found_msg += f"• {ct}\n"
-            if len(unique_containers) > 10:
-                not_found_msg += f"... и еще {len(unique_containers) - 10}"
-            
-            await callback.message.answer(not_found_msg)
-
-    except Exception as e:
-        print(f"[ERROR] Failed to show container photos: {e}")
-        import traceback
-        traceback.print_exc()
-        await callback.message.answer("❌ Ошибка при загрузке фото")
-
-@questions_router.callback_query(F.data.startswith("hide_single:"))
-async def handle_hide_single_photo(callback: CallbackQuery):
-    """Обработчик для скрытия одиночного фото с кнопкой"""
-    await callback.answer("Фото скрыто")
-
-    try:
-        # Удаляем сообщение с фото и кнопкой
-        await callback.message.delete()
-    except Exception as e:
-        print(f"[ERROR] Failed to hide single photo: {e}")
-
-@questions_router.callback_query(F.data.startswith("hide_multiple:"))
-async def handle_hide_multiple_photos(callback: CallbackQuery):
-    """Обработчик для скрытия нескольких отдельных фото"""
-    await callback.answer("Фото скрыты")
-    
-    try:
-        # Извлекаем message_ids из callback_data
-        parts = callback.data.split(":")
-        if len(parts) > 1:
-            message_ids_str = parts[1]
-            message_ids = [int(mid) for mid in message_ids_str.split(",") if mid.isdigit()]
-            
-            # Удаляем все фото по их message_id
-            for message_id in message_ids:
-                try:
-                    await callback.bot.delete_message(
-                        chat_id=callback.message.chat.id,
-                        message_id=message_id
-                    )
-                except Exception:
-                    # Если сообщение не существует или уже удалено - продолжаем
-                    continue
-        
-        # Удаляем также сообщение с кнопкой "Скрыть все фото"
-        await callback.message.delete()
-        
-    except Exception as e:
-        print(f"[ERROR] Failed to hide multiple photos: {e}")
-        await callback.answer("Ошибка при скрытии фото", show_alert=True)
-        
-# Обработчик hide_album больше не нужен, так как теперь фото отправляются по отдельности
-# Оставляем его для совместимости со старыми сообщениями, если они есть
-@questions_router.callback_query(F.data.startswith("hide_album:"))
-async def handle_hide_album(callback: CallbackQuery):
-    """Обработчик для скрытия медиагруппы (устаревший, для совместимости)"""
-    await callback.answer("Фото скрыты")
-    
-    try:
-        # Извлекаем message_id первого сообщения из медиагруппы
-        parts = callback.data.split(":")
-        if len(parts) > 1:
-            first_message_id = int(parts[1])
-            
-            # Пытаемся удалить все сообщения медиагруппы
-            # Обычно медиагруппа состоит из последовательных message_id
-            for i in range(10):  # Максимум 10 фото в медиагруппе
-                try:
-                    await callback.bot.delete_message(
-                        chat_id=callback.message.chat.id,
-                        message_id=first_message_id + i
-                    )
-                except Exception:
-                    # Если сообщение не существует или уже удалено - прерываем цикл
-                    break
-        
-        # Удаляем также сообщение с кнопкой "Скрыть все фото"
-        await callback.message.delete()
-        
-    except Exception as e:
-        print(f"[ERROR] Failed to hide album: {e}")
-        await callback.answer("Ошибка при скрытии фото", show_alert=True)
-
-
-@questions_router.callback_query(F.data == "close_keyboard")
-async def handle_close_keyboard(callback: CallbackQuery):
-    await callback.answer()
-    await callback.message.edit_reply_markup(reply_markup=None)
-
-
-# Также добавим обработчики для callback кнопок, которые могут быть не определены:
-@questions_router.callback_query(F.data == "search_by_code")
-async def handle_search_by_code_callback(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    await callback.message.answer(
-        "Введите код теста (например, AN5):", reply_markup=get_back_to_menu_kb()
+        ]
     )
-    await state.set_state(QuestionStates.waiting_for_code)
+
+# ============================================================================
+# ПРОВЕРКИ И ВАЛИДАЦИЯ
+# ============================================================================
+
+async def _is_off_topic_question(question: str) -> bool:
+    """Определяет, относится ли вопрос к нерелевантной тематике"""
+    question_lower = question.lower()
+    
+    # Проверка на нерелевантные ключевые слова
+    if any(keyword in question_lower for keyword in OFF_TOPIC_KEYWORDS):
+        return True
+    
+    # Ветеринарные, но не лабораторные темы
+    non_lab_vet_topics = {
+        'корм', 'питание', 'лечение', 'препарат', 'лекарств', 'таблетк',
+        'операция', 'хирург', 'прививк', 'вакцин', 'усыплен', 'стерилизация',
+        'кастрация', 'диагноз', 'болезнь', 'симптом', 'ветеринар', 'клиник',
+        'осмотр', 'консультация', 'рецепт'
+    }
+    
+    # Лабораторные ключевые слова
+    lab_keywords = {
+        'анализ', 'тест', 'лаборатор', 'биоматериал', 'кров', 'моч', 'кал',
+        'исследование', 'проба', 'образец', 'контейнер', 'транспортировка',
+        'хранение', 'преаналитик', 'диагностик', 'an', 'ан'
+    }
+    
+    if any(topic in question_lower for topic in non_lab_vet_topics):
+        has_lab_context = any(word in question_lower for word in lab_keywords)
+        return not has_lab_context
+    
+    return False
 
 
-@questions_router.callback_query(F.data == "search_by_name")
-async def handle_search_by_name_callback(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    await callback.message.answer(
-        "Введите название или описание теста:", reply_markup=get_back_to_menu_kb()
-    )
-    await state.set_state(QuestionStates.waiting_for_name)
+async def _is_unhelpful_answer(answer: str, question: str) -> bool:
+    """Определяет, является ли ответ неинформативным"""
+    answer_lower = answer.lower()
+    
+    unhelpful_phrases = {
+        "не могу найти информацию", "не располагаю данными", 
+        "не имею информации", "не могу ответить",
+        "обратитесь к специалисту", "не уверен в ответе",
+        "не могу дать точный ответ", "информация отсутствует",
+        "не нашел данных", "не могу помочь с этим вопросом",
+        "не входит в мою компетенцию", "не могу предоставить информацию",
+        "не удалось найти ответ", "не понимаю вопрос",
+        "уточните вопрос", "переформулируйте вопрос"
+    }
+    
+    if any(phrase in answer_lower for phrase in unhelpful_phrases):
+        return True
+    
+    # Слишком короткий ответ с упоминанием ограничений
+    if len(answer.split()) < 25:
+        limitation_words = {'ограничен', 'ограничения', 'контекст', 'специалист', 'уточнить'}
+        if any(word in answer_lower for word in limitation_words):
+            return True
+    
+    # Много извинений
+    apology_words = ['извините', 'сожалею', 'к сожалению', 'unfortunately']
+    apology_count = sum(1 for word in apology_words if word in answer_lower)
+    if apology_count >= 2 and len(answer.split()) < 40:
+        return True
+    
+    return False
 
 
-# Обработчики
-@questions_router.callback_query(F.data.startswith("show_test:"))
-async def handle_show_test_callback(callback: CallbackQuery, state: FSMContext):
-    """Обработчик для показа информации о тесте из inline кнопки."""
-    action, test_code = TestCallback.unpack(callback.data)
-
-    # Отвечаем на callback чтобы убрать "часики"
-    await callback.answer()
-
-    try:
-        processor = DataProcessor()
-        processor.load_vector_store()
-
-        # Сначала пробуем точный поиск
-        results = processor.search_test(filter_dict={"test_code": test_code})
-
-        # Если не нашли - пробуем с нормализацией
-        if not results:
-            normalized_code = normalize_test_code(test_code)
-            results = processor.search_test(filter_dict={"test_code": normalized_code})
-
-        # Если не нашли - используем fuzzy поиск с высоким порогом
-        if not results:
-            print(
-                f"[DEBUG] Test {test_code} not found with exact search. Trying fuzzy..."
-            )
-            fuzzy_results = await fuzzy_test_search(processor, test_code, threshold=85)
-
-            if fuzzy_results:
-                # Ищем точное совпадение среди fuzzy результатов
-                for doc, score in fuzzy_results:
-                    if doc.metadata.get("test_code", "").upper() == test_code.upper():
-                        results = [(doc, score)]
-                        print(
-                            f"[DEBUG] Found exact match in fuzzy results: {doc.metadata.get('test_code')}"
-                        )
-                        break
-
-                # Если точного не нашли - берем первый с высоким score
-                if not results and fuzzy_results[0][1] >= 90:
-                    results = [fuzzy_results[0]]
-                    print(
-                        f"[DEBUG] Using best fuzzy match: {fuzzy_results[0][0].metadata.get('test_code')} (score: {fuzzy_results[0][1]})"
-                    )
-
-        # Последняя попытка - текстовый поиск
-        if not results:
-            print(f"[DEBUG] Trying text search for {test_code}")
-            text_results = processor.search_test(query=test_code, top_k=50)
-
-            # Ищем точное совпадение кода
-            for doc, score in text_results:
-                doc_code = doc.metadata.get("test_code", "")
-                # Проверяем точное совпадение с учетом регистра и пробелов
-                if doc_code.strip().upper() == test_code.strip().upper():
-                    results = [(doc, score)]
-                    print(f"[DEBUG] Found via text search: {doc_code}")
-                    break
-
-        # Если все еще не нашли - используем smart_test_search
-        if not results:
-            result, found_variant, match_type = await smart_test_search(
-                processor, test_code
-            )
-            if result:
-                results = [result]
-                print(
-                    f"[DEBUG] Found via smart search: {found_variant} (type: {match_type})"
-                )
-
-        if not results:
-            print(f"[ERROR] Test {test_code} not found after all attempts")
-            await callback.message.answer(f"❌ Тест {test_code} не найден в базе данных")
-            return
-
-        doc = results[0][0] if isinstance(results[0], tuple) else results[0]
-        test_data = format_test_data(doc.metadata)
-
-        # Формируем полный ответ
-        response = f"<b>Информация о выбранном тесте:</b>\n\n"
-        response += format_test_info(test_data)
-
-        # Обновляем статистику
-        user_id = callback.from_user.id
-        await db.add_search_history(
-            user_id=user_id,
-            search_query=f"Выбор из списка: {test_code}",
-            found_test_code=test_data["test_code"],
-            search_type="code",
-            success=True,
-        )
-        await db.update_user_frequent_test(
-            user_id=user_id,
-            test_code=test_data["test_code"],
-            test_name=test_data["test_name"],
-        )
-
-        # Обновляем связанные тесты
-        data = await state.get_data()
-        if (
-            "last_viewed_test" in data
-            and data["last_viewed_test"] != test_data["test_code"]
-        ):
-            await db.update_related_tests(
-                user_id=user_id,
-                test_code_1=data["last_viewed_test"],
-                test_code_2=test_data["test_code"],
-            )
-
-        # --- Блок рекомендаций закомментирован по запросу ---
-        # # Получаем связанные тесты из истории пользователя
-        # related_tests = await db.get_user_related_tests(user_id, test_data["test_code"])
-        #
-        # # Ищем похожие тесты для этого теста
-        # similar_tests = await fuzzy_test_search(
-        #     processor, test_data["test_code"], threshold=40
-        # )
-        #
-        # # Фильтруем, чтобы не показывать сам тест
-        # similar_tests = [
-        #     (d, s)
-        #     for d, s in similar_tests
-        #     if d.metadata.get("test_code") != test_data["test_code"]
-        # ]
-        #
-        # # Создаем клавиатуру если есть похожие или связанные
-        # reply_markup = None
-        # if related_tests or similar_tests:
-        #     keyboard = []
-        #     row = []
-        #
-        #     # Сначала связанные из истории (приоритет)
-        #     for related in related_tests[:4]:
-        #         row.append(
-        #             InlineKeyboardButton(
-        #                 text=f"⭐ {related['test_code']}",
-        #                 callback_data=TestCallback.pack(
-        #                     "show_test", related["test_code"]
-        #                 ),
-        #             )
-        #         )
-        #         if len(row) >= 2:
-        #             keyboard.append(row)
-        #             row = []
-        #
-        #     # Затем похожие
-        #     for doc, _ in similar_tests[:4]:
-        #         if len(keyboard) * 2 + len(row) >= 8:  # Максимум 8 кнопок
-        #             break
-        #         code = doc.metadata.get("test_code")
-        #         if not any(r["test_code"] == code for r in related_tests):
-        #             row.append(
-        #                 InlineKeyboardButton(
-        #                     text=code,
-        #                     callback_data=TestCallback.pack("show_test", code),
-        #                 )
-        #             )
-        #             if len(row) >= 2:
-        #                 keyboard.append(row)
-        #                 row = []
-        #
-        #     if row:
-        #         keyboard.append(row)
-        #
-        #     reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
-        # --- Конец закомментированного блока ---
-
-        # Отправляем информацию с фото ТОЛЬКО ОДИН РАЗ
-        await send_test_info_with_photo(callback.message, test_data, response)
-
-        # # Если есть рекомендации - отправляем их отдельным сообщением
-        # if reply_markup:
-        #     await callback.message.answer(
-        #         "🎯 Рекомендуем также:", reply_markup=reply_markup
-        #     )
-
-        # Обновляем состояние с текущим тестом
-        await state.set_state(QuestionStates.in_dialog)
-        await state.update_data(
-            current_test=test_data, last_viewed_test=test_data["test_code"]
-        )
-
-        # Показываем клавиатуру для продолжения диалога
-        await callback.message.answer(
-            "Можете задать вопрос об этом тесте или выбрать действие:",
-            reply_markup=get_dialog_kb()
-        )
-
-    except Exception as e:
-        print(f"[ERROR] Callback handling failed: {e}")
-        import traceback
-
-        traceback.print_exc()
-        await callback.message.answer("⚠️ Ошибка при загрузке информации о тесте")
+async def _should_initiate_new_search(
+    text: str, 
+    current_test_data: Optional[Dict], 
+    query_type: str, 
+    confidence: float
+) -> bool:
+    """
+    Определяет, нужно ли начинать новый поиск
+    
+    Args:
+        text: Текст запроса
+        current_test_data: Данные текущего теста (если есть)
+        query_type: Тип запроса из классификатора
+        confidence: Уверенность классификатора
+    
+    Returns:
+        True если нужен новый поиск, False если вопрос о текущем тесте
+    """
+    if not current_test_data:
+        return True
+    
+    # Высокая уверенность в не-общем запросе
+    if query_type != "general" and confidence > CONFIDENCE_HIGH:
+        return True
+    
+    text_lower = text.lower()
+    
+    # Ключевые слова нового поиска
+    new_search_keywords = {
+        'найди', 'ищи', 'покажи', 'поиск', 'найти',
+        'другой', 'еще', 'следующий', 'иной',
+        'код', 'тест', 'анализ', 'профиль'
+    }
+    
+    has_search_intent = any(keyword in text_lower for keyword in new_search_keywords)
+    
+    # Проверка на другой код теста
+    has_other_code = await _contains_other_test_code(text, current_test_data.get("test_code", ""))
+    
+    return has_search_intent or has_other_code
 
 
-@questions_router.callback_query(F.data.startswith("quick_test:"))
-async def handle_quick_test_selection(callback: CallbackQuery, state: FSMContext):
-    """Обработчик быстрого выбора теста из подсказок"""
-    test_code = callback.data.split(":")[1]
+async def _contains_other_test_code(text: str, current_test_code: str) -> bool:
+    """Проверяет, содержит ли текст код другого теста"""
+    code_patterns = [
+        r'[AА][NН]\d+[A-ZА-Я\-]*',
+        r'\b\d+[A-ZА-Я\-]*',
+        r'[A-ZА-Я]+\d+[A-ZА-Я\-]*',
+    ]
+    
+    found_codes = set()
+    for pattern in code_patterns:
+        matches = re.findall(pattern, text, re.IGNORECASE)
+        for match in matches:
+            normalized = normalize_test_code(match)
+            if normalized and normalized.upper() != current_test_code.upper():
+                found_codes.add(normalized)
+    
+    return len(found_codes) > 0
 
-    try:
-        # Используем DataProcessor напрямую для поиска
-        processor = DataProcessor()
-        processor.load_vector_store()
-
-        # Нормализуем код теста
-        normalized_code = normalize_test_code(test_code)
-
-        # Сначала пробуем точный поиск по нормализованному коду
-        results = processor.search_test(filter_dict={"test_code": normalized_code})
-
-        # Если не нашли - пробуем оригинальный код
-        if not results:
-            results = processor.search_test(filter_dict={"test_code": test_code})
-
-        # Если не нашли - пробуем fuzzy поиск
-        if not results:
-            print(
-                f"[DEBUG] Test {test_code} not found with filter. Trying fuzzy search..."
-            )
-            fuzzy_results = await fuzzy_test_search(processor, test_code, threshold=90)
-
-            if fuzzy_results:
-                # Берем первый результат с высоким score
-                results = [fuzzy_results[0]]
-                print(
-                    f"[DEBUG] Found via fuzzy search: {results[0][0].metadata.get('test_code')}"
-                )
-            else:
-                # Пробуем текстовый поиск
-                print(f"[DEBUG] Trying text search for {test_code}")
-                text_results = processor.search_test(query=test_code, top_k=10)
-
-                # Фильтруем по точному совпадению кода
-                for doc, score in text_results:
-                    doc_code = doc.metadata.get("test_code", "")
-                    if (
-                        doc_code.upper() == test_code.upper()
-                        or doc_code.upper() == normalized_code.upper()
-                    ):
-                        results = [(doc, score)]
-                        print(f"[DEBUG] Found via text search: {doc_code}")
-                        break
-
-        if not results:
-            # Последняя попытка - используем smart_test_search
-            result, found_variant, match_type = await smart_test_search(
-                processor, test_code
-            )
-            if result:
-                results = [result]
-                print(
-                    f"[DEBUG] Found via smart search: {found_variant} (type: {match_type})"
-                )
-
-        if not results:
-            print(f"[ERROR] Test {test_code} not found after all attempts")
-            await callback.message.answer(f"❌ Тест {test_code} не найден в базе данных")
-            await callback.answer()
-            return
-
-        doc = results[0][0] if isinstance(results[0], tuple) else results[0]
-        test_data = format_test_data(doc.metadata)
-
-        # Формируем ответ
-        response = f"<b>Информация о выбранном тесте:</b>\n\n"
-        response += format_test_info(test_data)
-
-        # Обновляем статистику
-        user_id = callback.from_user.id
-        await db.add_search_history(
-            user_id=user_id,
-            search_query=f"Быстрый выбор: {test_code}",
-            found_test_code=test_data["test_code"],
-            search_type="code",
-            success=True,
-        )
-        await db.update_user_frequent_test(
-            user_id=user_id,
-            test_code=test_data["test_code"],
-            test_name=test_data["test_name"],
-        )
-
-        # Обновляем связанные тесты
-        data = await state.get_data()
-        if (
-            "last_viewed_test" in data
-            and data["last_viewed_test"] != test_data["test_code"]
-        ):
-            await db.update_related_tests(
-                user_id=user_id,
-                test_code_1=data["last_viewed_test"],
-                test_code_2=test_data["test_code"],
-            )
-
-        # --- Блок рекомендаций закомментирован по запросу ---
-        # # Получаем связанные тесты из истории пользователя
-        # related_tests = await db.get_user_related_tests(user_id, test_data["test_code"])
-        #
-        # # Ищем похожие тесты для этого теста
-        # similar_tests = await fuzzy_test_search(
-        #     processor, test_data["test_code"], threshold=40
-        # )
-        #
-        # # Фильтруем, чтобы не показывать сам тест
-        # similar_tests = [
-        #     (d, s)
-        #     for d, s in similar_tests
-        #     if d.metadata.get("test_code") != test_data["test_code"]
-        # ]
-        #
-        # # Создаем клавиатуру если есть похожие или связанные
-        # reply_markup = None
-        # if related_tests or similar_tests:
-        #     keyboard = []
-        #     row = []
-        #
-        #     # Сначала связанные из истории (приоритет)
-        #     for related in related_tests[:4]:
-        #         row.append(
-        #             InlineKeyboardButton(
-        #                 text=f"⭐ {related['test_code']}",
-        #                 callback_data=TestCallback.pack(
-        #                     "show_test", related["test_code"]
-        #                 ),
-        #             )
-        #         )
-        #         if len(row) >= 2:
-        #             keyboard.append(row)
-        #             row = []
-        #
-        #     # Затем похожие
-        #     for doc, _ in similar_tests[:4]:
-        #         if len(keyboard) * 2 + len(row) >= 8:  # Максимум 8 кнопок
-        #             break
-        #         code = doc.metadata.get("test_code")
-        #         if not any(r["test_code"] == code for r in related_tests):
-        #             row.append(
-        #                 InlineKeyboardButton(
-        #                     text=code,
-        #                     callback_data=TestCallback.pack("show_test", code),
-        #                 )
-        #             )
-        #             if len(row) >= 2:
-        #                 keyboard.append(row)
-        #                 row = []
-        #
-        #     if row:
-        #         keyboard.append(row)
-        #
-        #     reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
-        # --- Конец закомментированного блока ---
-
-        # Отправляем информацию с фото ТОЛЬКО ОДИН РАЗ
-        await send_test_info_with_photo(callback.message, test_data, response)
-
-        # # Если есть рекомендации - отправляем их отдельным сообщением
-        # if reply_markup:
-        #     await callback.message.answer(
-        #         "🎯 Рекомендуем также:", reply_markup=reply_markup
-        #     )
-
-        # Обновляем состояние с текущим тестом
-        await state.set_state(QuestionStates.in_dialog)
-        await state.update_data(
-            current_test=test_data, last_viewed_test=test_data["test_code"]
-        )
-
-        # Показываем клавиатуру для продолжения диалога
-        await callback.message.answer(
-            "Можете задать вопрос об этом тесте или выбрать действие:",
-            reply_markup=get_dialog_kb()
-        )
-
-    except Exception as e:
-        print(f"[ERROR] Quick test selection failed: {e}")
-        import traceback
-
-        traceback.print_exc()
-        await callback.message.answer("⚠️ Ошибка при загрузке информации о тесте")
-
-    await callback.answer()  # Закрываем уведомление о нажатии
-
-
-@questions_router.callback_query(F.data == "ignore")
-async def handle_ignore_callback(callback: CallbackQuery):
-    """Обработчик для информационных кнопок"""
-    await callback.answer()
-
+# ============================================================================
+# ОСНОВНЫЕ ОБРАБОТЧИКИ СООБЩЕНИЙ
+# ============================================================================
 
 @questions_router.message(F.text == "🔬 Задать вопрос ассистенту")
 async def start_question(message: Message, state: FSMContext):
-    """Начало диалога с ассистентом без выбора типа поиска."""
+    """Начало диалога с ассистентом"""
     user_id = message.from_user.id
     user = await db.get_user(user_id)
 
     if not user:
         await message.answer(
-            "Для использования этой функции необходимо пройти регистрацию.\nИспользуйте команду /start"
+            "Для использования этой функции необходимо пройти регистрацию.\n"
+            "Используйте команду /start"
         )
         return
 
-    # Используем обновленную функцию
     user_name = get_user_first_name(user)
 
     prompt = f"""Привет, {user_name} 👋
 
-🔬 Я ассистент ветеринарной лаборатории VetUnion и помогу вам найти информацию о:
+🔬 Я ассистент ветеринарной лаборатории VetUnion и помогу вам найти информацию оff:
 
 📋 <b>Лабораторных тестах и анализах:</b>
 • По коду теста (например: AN116, ан116, АН116 или просто 116)
@@ -1198,70 +761,98 @@ async def start_question(message: Message, state: FSMContext):
 ✏️ Просто напишите ваш вопрос или код теста:"""
 
     await db.clear_buffer(user_id)
-    await message.answer(prompt, reply_markup=get_back_to_menu_kb())
-
+    await message.answer(prompt, reply_markup=get_back_to_menu_kb(), parse_mode="HTML")
     await state.set_state(QuestionStates.waiting_for_search_type)
 
 
-# Глобальный хендлер для кнопки завершения диалога (работает в любом состоянии)
 @questions_router.message(F.text == "❌ Завершить диалог")
 async def handle_end_dialog(message: Message, state: FSMContext):
+    """Завершение диалога с ботом"""
     current_state = await state.get_state()
     user = await db.get_user(message.from_user.id)
 
-    # Исправленная обработка role
+    role = "user"
     if user:
         try:
-            role = user["role"] if user["role"] else "user"
-        except (KeyError, TypeError):
+            role = user.get("role", "user") or "user"
+        except (KeyError, TypeError, AttributeError):
             role = "user"
-    else:
-        role = "user"
 
-    # Используем обновленную функцию
     user_name = get_user_first_name(user)
 
-    # Исключение: если пользователь нажал "задать вопрос ассистенту" и не ввел вопрос
+    # Если нажали сразу после входа
     if current_state == QuestionStates.waiting_for_search_type:
-        # Возвращаем в главное меню
         await state.clear()
         farewell = get_time_based_farewell(user_name)
         await message.answer(farewell, reply_markup=get_menu_by_role(role))
         return
 
-    # Во всех остальных случаях завершаем диалог
+    # Во всех остальных случаях
     await state.clear()
     farewell = get_time_based_farewell(user_name)
     await message.answer(farewell, reply_markup=get_menu_by_role(role))
-    return
 
 
-# Обработчик для старой кнопки (для совместимости)
-@questions_router.message(F.text == "🔙 Вернуться в главное меню")
-async def handle_back_to_menu_legacy(message: Message, state: FSMContext):
-    await state.clear()
-    user = await db.get_user(message.from_user.id)
-    role = user["role"] if "role" in user.keys() else "staff"
-    await message.answer("Операция отменена.", reply_markup=get_menu_by_role(role))
-    return
+@questions_router.message(F.text == "🔄 Новый вопрос")
+async def handle_new_question_in_dialog(message: Message, state: FSMContext):
+    """Обработчик для новых вопросов в режиме диалога"""
+    data = await state.get_data()
+    last_viewed = data.get("last_viewed_test")
+
+    await message.answer(
+        "💡 Введите код теста (например: AN5) или опишите, что вы ищете:",
+        reply_markup=get_back_to_menu_kb(),
+    )
+
+    await state.set_state(QuestionStates.waiting_for_search_type)
+    if last_viewed:
+        await state.update_data(last_viewed_test=last_viewed)
 
 
 @questions_router.message(QuestionStates.waiting_for_search_type)
 async def handle_universal_search(message: Message, state: FSMContext):
-    """Универсальный обработчик запросов - автоматически определяет тип поиска."""
+    """Универсальный обработчик запросов - автоматически определяет тип поиска"""
     text = message.text.strip()
     user_id = message.from_user.id
 
-    if text == "🔄 Новый вопрос":
-        await handle_new_question_in_dialog(message, state)
+    # Игнорируем служебные кнопки
+    if text in ("🔙 Вернуться в главное меню", "❌ Завершить диалог", "🔄 Новый вопрос"):
         return
+
+    # ============================================================
+    # FIX: Предварительная проверка на явный общий вопрос
+    # ============================================================
+    
+    text_lower = text.lower()
+    is_obvious_question = (
+        text.strip().endswith('?') or 
+        any(text_lower.startswith(q + ' ') for q in [
+            'как', 'что', 'где', 'когда', 'почему', 'зачем', 
+            'какой', 'какая', 'какие', 'можно ли', 'нужно ли'
+        ])
+    )
+    
+    # Если это явный вопрос И нет кода формата AN123
+    has_explicit_code = bool(re.search(r'\b[AА][NН]\d+\b', text, re.IGNORECASE))
+    
+    if is_obvious_question and not has_explicit_code:
+        logger.info(f"[PRE-CHECK] Obvious general question detected: {text}")
+        
+        # Сразу обрабатываем как общий вопрос
+        expanded_query = expand_query_with_abbreviations(text)
+        await db.add_request_stat(
+            user_id=user_id, request_type="question", request_text=text
+        )
+        await handle_general_question(message, state, expanded_query)
+        return
+    
+    # ============================================================
+    # ОРИГИНАЛЬНАЯ ЛОГИКА КЛАССИФИКАЦИИ
+    # ============================================================
 
     expanded_query = expand_query_with_abbreviations(text)
-    # Проверяем, не кнопка ли это возврата
-    if text == "🔙 Вернуться в главное меню" or text == "❌ Завершить диалог":
-        return
 
-    # Используем классификатор для определения типа запроса
+    # Классификация запроса
     query_type, confidence, metadata = await ultimate_classifier.classify_with_certainty(expanded_query)
 
     # Сохраняем информацию о классификации
@@ -1274,114 +865,152 @@ async def handle_universal_search(message: Message, state: FSMContext):
         }
     )
 
-    # Если уверенность высокая (>0.85) - сразу обрабатываем
-    if confidence > 0.85:
-        await _process_confident_query(message, state, query_type, text, metadata)
-    else:
-        # Если уверенность средняя (0.7-0.85) - просим подтверждение
-        await _ask_confirmation(message, state, query_type, expanded_query, confidence)
+    logger.info(
+        f"[CLASSIFIER] Query: '{text}' | Type: {query_type} | "
+        f"Confidence: {confidence:.2f}"
+    )
 
-    # Если уверенность низкая (<0.7) - используем LLM для уточнения
-    if confidence < 0.7:
+    # Высокая уверенность - сразу обрабатываем
+    if confidence > CONFIDENCE_HIGH:
+        await _process_confident_query(message, state, query_type, text, metadata)
+    # Средняя уверенность - запрашиваем подтверждение
+    elif confidence > CONFIDENCE_MEDIUM:
+        await _ask_confirmation(message, state, query_type, expanded_query, confidence)
+    # Низкая уверенность - нужно уточнение
+    else:
         await _clarify_with_llm(message, state, expanded_query, query_type, confidence)
 
 
-async def _process_confident_query(message: Message, state: FSMContext, query_type: str, text: str, metadata: Dict):
+@questions_router.message(QuestionStates.in_dialog)
+async def handle_dialog(message: Message, state: FSMContext):
+    """Обработчик диалога с текущим тестом"""
+    text = message.text.strip()
     user_id = message.from_user.id
+
+    if text == "🔄 Новый вопрос":
+        await handle_new_question_in_dialog(message, state)
+        return
+
+    data = await state.get_data()
+    test_data = data.get("current_test")
+
     expanded_query = expand_query_with_abbreviations(text)
     
-    # Дополнительная проверка для общих вопросов
-    general_question_keywords = [
-        'как', 'что', 'где', 'когда', 'почему', 'зачем', 'сколько',
-        'хранить', 'хранение', 'транспортировка', 'подготовка', 'правила',
-        'можно ли', 'нужно ли', 'должен ли', 'следует ли',
-        'температура', 'время', 'срок', 'условия',
-        'рекомендации', 'советы', 'инструкция'
-    ]
-    
-    # Если запрос содержит вопросительные слова и не содержит конкретных кодов тестов
+    # Классификация
+    query_type, confidence, metadata = await ultimate_classifier.classify_with_certainty(expanded_query)
+
+    # Проверка на общий вопрос
     text_lower = text.lower()
-    has_general_keywords = any(keyword in text_lower for keyword in general_question_keywords)
+    has_general_keywords = any(keyword in text_lower for keyword in GENERAL_QUESTION_KEYWORDS)
     has_test_code = bool(re.search(r'\b[AА][NН]\d+\b|\b\d{2,4}[A-ZА-Я]+\b', text, re.IGNORECASE))
-    
-    # Переопределяем тип запроса для общих вопросов - ДОБАВЬТЕ RETURN
-    if has_general_keywords and not has_test_code:
-        print(f"[CLASSIFICATION] Overriding to 'general' for question: {text}")
-        await db.add_request_stat(
-            user_id=user_id, request_type="question", request_text=text
+
+    # Если общий вопрос без кода - контекстный вопрос о текущем тесте
+    if has_general_keywords and not has_test_code and query_type in ["name", "code"]:
+        logger.info(f"[DIALOG] Contextual question: {text}")
+        await _handle_contextual_question(message, state, expanded_query, test_data)
+        return
+
+    # Проверяем, нужен ли новый поиск
+    needs_new_search = await _should_initiate_new_search(
+        expanded_query, test_data, query_type, confidence
+    )
+
+    if needs_new_search:
+        # Сохраняем классификацию
+        await state.update_data(
+            query_classification={
+                "type": query_type,
+                "confidence": confidence,
+                "metadata": metadata,
+                "original_query": text
+            }
         )
-        await handle_general_question(message, state, expanded_query)
-        return 
-    
-    # Дополнительная проверка для профилей
-    profile_keywords = ['обс', 'профили', 'профиль', 'комплексы', 'комплекс', 'панели', 'панель']
-    should_show_profiles = any(keyword in text.lower() for keyword in profile_keywords)
-    
-    if should_show_profiles:
-        print(f"[PROFILES] Detected profile keywords, setting show_profiles=True")
-        await state.update_data(show_profiles=True)
-    
-    if any(keyword in text.lower() for keyword in profile_keywords):
-        query_type = "profile"
-        print(f"[PROFILE DETECTED] Changed query_type to 'profile' for text: {text}")
 
-    # ОСНОВНАЯ ЛОГИКА МАРШРУТИЗАЦИИ
-    if query_type == "code":
-        await state.set_state(QuestionStates.waiting_for_code)
-        await handle_code_search_with_text(message, state, expanded_query)
-    elif query_type == "name":
-        await state.set_state(QuestionStates.waiting_for_name)
-        await handle_name_search_with_text(message, state, expanded_query)
-    elif query_type == "profile":
-        print(f"[PROFILE BRANCH] Setting show_profiles=True for query: {text}")
-        await state.update_data(show_profiles=True)
-        await state.set_state(QuestionStates.waiting_for_name)
-        await handle_name_search_with_text(message, state, expanded_query)
-    else:  # general
-        await db.add_request_stat(
-            user_id=user_id, request_type="question", request_text=text
-        )
-        await handle_general_question(message, state, expanded_query)
+        # Обрабатываем как новый поиск
+        if confidence > CONFIDENCE_HIGH:
+            await _process_confident_query(message, state, query_type, expanded_query, metadata)
+        elif confidence > CONFIDENCE_MEDIUM:
+            await _ask_confirmation(message, state, query_type, expanded_query, confidence)
+        else:
+            await _clarify_with_llm(message, state, expanded_query, query_type, confidence)
+        return
+
+    # Вопрос о текущем тесте
+    await _handle_contextual_question(message, state, expanded_query, test_data)
 
 
-async def _ask_confirmation(message: Message, state: FSMContext, query_type: str, text: str, confidence: float):
-    """Запрос подтверждения типа поиска с inline кнопками"""
-    type_descriptions = {
-        "code": "поиск по коду теста",
-        "name": "поиск по названию теста", 
-        "profile": "поиск профиля тестов",
-        "general": "общий вопрос"
+@questions_router.message(QuestionStates.confirming_search_type)
+async def handle_search_confirmation(message: Message, state: FSMContext):
+    """Обработчик подтверждения типа поиска (для текстовых команд)"""
+    await message.answer("Пожалуйста, используйте кнопки выше для выбора действия.")
+
+
+@questions_router.message(QuestionStates.clarifying_search, F.text)
+async def handle_text_input_during_clarification(message: Message, state: FSMContext):
+    """Обработчик текстового ввода во время уточнения типа поиска"""
+    text = message.text.strip()
+
+    # Служебные кнопки игнорируем
+    service_buttons = {
+        "🔢 Поиск по коду теста", "📝 Поиск по названию",
+        "🔬 Поиск профиля тестов", "❓ Общий вопрос", "❌ Завершить диалог"
     }
 
-    confirmation_text = (
-        f"🤔 Я понял ваш запрос как <b>{type_descriptions[query_type]}</b> "
-        f"(уверенность: {confidence:.0%}).\n\n"
-        f"Это правильный тип поиска?"
+    if text and text not in service_buttons:
+        # Обрабатываем как новый запрос
+        await state.set_state(QuestionStates.waiting_for_search_type)
+        await handle_universal_search(message, state)
+    else:
+        await message.answer("Пожалуйста, используйте кнопки выше для выбора типа поиска.")
+
+
+@questions_router.message(QuestionStates.clarifying_search)
+async def handle_search_clarification(message: Message, state: FSMContext):
+    """Обработчик уточнения типа поиска"""
+    await message.answer("Пожалуйста, используйте кнопки выше для выбора типа поиска.")
+
+# ============================================================================
+# ОБРАБОТЧИКИ CALLBACK QUERIES
+# ============================================================================
+
+@questions_router.callback_query(F.data == "new_search")
+async def handle_new_search(callback: CallbackQuery, state: FSMContext):
+    """Начать новый поиск"""
+    await callback.answer()
+
+    data = await state.get_data()
+    last_viewed = data.get("last_viewed_test")
+
+    await callback.message.answer(
+        "💡 Введите код теста (например: AN5) или опишите, что вы ищете:",
+        reply_markup=get_back_to_menu_kb(),
     )
 
-    # Создаем inline клавиатуру
-    inline_keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="✅ Да", 
-                    callback_data="confirm_search:yes"
-                ),
-                InlineKeyboardButton(
-                    text="❌ Нет", 
-                    callback_data="confirm_search:no"
-                )
-            ]
-        ]
-    )
+    await state.set_state(QuestionStates.waiting_for_search_type)
+    if last_viewed:
+        await state.update_data(last_viewed_test=last_viewed)
 
-    await message.answer(
-        confirmation_text,
-        parse_mode="HTML",
-        reply_markup=inline_keyboard  # Используем inline клавиатуру
+
+@questions_router.callback_query(F.data == "search_by_code")
+async def handle_search_by_code_callback(callback: CallbackQuery, state: FSMContext):
+    """Поиск по коду теста"""
+    await callback.answer()
+    await callback.message.answer(
+        "Введите код теста (например, AN5):", 
+        reply_markup=get_back_to_menu_kb()
     )
-    
-    await state.set_state(QuestionStates.confirming_search_type)
+    await state.set_state(QuestionStates.waiting_for_code)
+
+
+@questions_router.callback_query(F.data == "search_by_name")
+async def handle_search_by_name_callback(callback: CallbackQuery, state: FSMContext):
+    """Поиск по названию"""
+    await callback.answer()
+    await callback.message.answer(
+        "Введите название или описание теста:", 
+        reply_markup=get_back_to_menu_kb()
+    )
+    await state.set_state(QuestionStates.waiting_for_name)
 
 
 @questions_router.callback_query(F.data.startswith("confirm_search:"))
@@ -1394,18 +1023,18 @@ async def handle_confirm_search_callback(callback: CallbackQuery, state: FSMCont
     data = await state.get_data()
     classification = data.get("query_classification", {})
     
-    def create_mock_msg(text):
-        return create_mock_message(callback.message, text)
-    
     if action == "yes":
         query_type = classification.get("type", "general")
         original_query = classification.get("original_query", "")
         expanded_query = original_query
 
         await callback.message.edit_reply_markup(reply_markup=None)
-        await callback.message.answer("✅ Принято! Обрабатываю запрос...", reply_markup=get_dialog_kb())
+        await callback.message.answer(
+            "✅ Принято! Обрабатываю запрос...", 
+            reply_markup=get_dialog_kb()
+        )
 
-        mock_msg = create_mock_msg(original_query)
+        mock_msg = create_mock_message(callback.message, original_query)
 
         if query_type == "code":
             await state.set_state(QuestionStates.waiting_for_code)
@@ -1414,12 +1043,13 @@ async def handle_confirm_search_callback(callback: CallbackQuery, state: FSMCont
             await state.set_state(QuestionStates.waiting_for_name)
             await handle_name_search_with_text(mock_msg, state, expanded_query)
         elif query_type == "profile":
-            await state.update_data(show_profiles=True)
             await state.set_state(QuestionStates.waiting_for_name)
             await handle_name_search_with_text(mock_msg, state, expanded_query)
         else:
             await db.add_request_stat(
-                user_id=user_id, request_type="question", request_text=original_query
+                user_id=user_id, 
+                request_type="question", 
+                request_text=original_query
             )
             await handle_general_question(mock_msg, state, expanded_query)
 
@@ -1429,7 +1059,7 @@ async def handle_confirm_search_callback(callback: CallbackQuery, state: FSMCont
         await state.set_state(QuestionStates.clarifying_search)
 
         original_query = classification.get("original_query", "")
-        mock_msg = create_mock_msg(original_query)
+        mock_msg = create_mock_message(callback.message, original_query)
         
         await _clarify_with_llm(
             mock_msg, state,
@@ -1437,130 +1067,6 @@ async def handle_confirm_search_callback(callback: CallbackQuery, state: FSMCont
             classification.get("type", "general"),
             classification.get("confidence", 0.5)
         )
-
-
-
-def create_mock_message(original_message, text):
-    """Создает полнофункциональный mock сообщение"""
-    # Получаем оригинальный bot объект из callback
-    bot = original_message.bot if hasattr(original_message, 'bot') else None
-    
-    mock_msg = type('MockMessage', (), {})()
-    
-    # Основные атрибуты
-    mock_msg.text = text
-    mock_msg.from_user = original_message.from_user
-    mock_msg.chat = original_message.chat
-    mock_msg.message_id = getattr(original_message, 'message_id', None)
-    mock_msg.bot = bot
-    
-    # Методы для отправки сообщений
-    async def answer_animation(animation, caption="", reply_markup=None):
-        if bot:
-            return await bot.send_animation(
-                chat_id=original_message.chat.id,
-                animation=animation,
-                caption=caption,
-                reply_markup=reply_markup
-            )
-    
-    async def answer(text, reply_markup=None, parse_mode=None, disable_web_page_preview=None):
-        if bot:
-            return await bot.send_message(
-                chat_id=original_message.chat.id,
-                text=text,
-                reply_markup=reply_markup,
-                parse_mode=parse_mode,
-                disable_web_page_preview=disable_web_page_preview
-            )
-    
-    async def answer_photo(photo, caption="", reply_markup=None, parse_mode=None):
-        if bot:
-            return await bot.send_photo(
-                chat_id=original_message.chat.id,
-                photo=photo,
-                caption=caption,
-                reply_markup=reply_markup,
-                parse_mode=parse_mode
-            )
-    
-    async def reply(text, reply_markup=None, parse_mode=None):
-        if bot:
-            return await bot.send_message(
-                chat_id=original_message.chat.id,
-                text=text,
-                reply_to_message_id=original_message.message_id,
-                reply_markup=reply_markup,
-                parse_mode=parse_mode
-            )
-    
-    async def edit_text(text, reply_markup=None, parse_mode=None, disable_web_page_preview=None):
-        if bot and hasattr(original_message, 'message_id'):
-            return await bot.edit_message_text(
-                chat_id=original_message.chat.id,
-                message_id=original_message.message_id,
-                text=text,
-                reply_markup=reply_markup,
-                parse_mode=parse_mode,
-                disable_web_page_preview=disable_web_page_preview
-            )
-    
-    # Присваиваем методы
-    mock_msg.answer_animation = answer_animation
-    mock_msg.answer = answer
-    mock_msg.answer_photo = answer_photo
-    mock_msg.reply = reply
-    mock_msg.edit_text = edit_text
-    
-    return mock_msg
-
-
-async def _clarify_with_llm(message: Message, state: FSMContext, text: str, initial_type: str, confidence: float):
-    """Уточнение типа поиска с inline кнопками"""
-    clarification_text = (
-        f"🔍 Я не совсем уверен, что вы ищете.\n\n"
-        f"Ваш запрос: <b>{html.escape(text)}</b>\n\n"
-        f"Пожалуйста, выберите тип поиска:"
-    )
-
-    # Inline клавиатура для уточнения
-    inline_keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🔢 Поиск по коду",
-                    callback_data="clarify_search:code"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📝 Поиск по названию", 
-                    callback_data="clarify_search:name"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🔬 Поиск профиля",
-                    callback_data="clarify_search:profile"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="❓ Общий вопрос",
-                    callback_data="clarify_search:general"
-                )
-            ]
-        ]
-    )
-
-    await message.answer(
-        clarification_text,
-        parse_mode="HTML",
-        reply_markup=inline_keyboard  # Используем inline клавиатуру
-    )
-    
-    await state.set_state(QuestionStates.clarifying_search)
-
 
 
 @questions_router.callback_query(F.data.startswith("clarify_search:"))
@@ -1575,12 +1081,12 @@ async def handle_clarify_search_callback(callback: CallbackQuery, state: FSMCont
     expanded_query = original_query
 
     await callback.message.edit_reply_markup(reply_markup=None)
-    await callback.message.answer(f"✅ Ищу как {search_type}...", reply_markup=get_dialog_kb())
+    await callback.message.answer(
+        f"✅ Ищу как {search_type}...", 
+        reply_markup=get_dialog_kb()
+    )
 
-    def create_mock_msg(text):
-        return create_mock_message(callback.message, text)
-
-    mock_msg = create_mock_msg(original_query)
+    mock_msg = create_mock_message(callback.message, original_query)
 
     if search_type == "code":
         await state.set_state(QuestionStates.waiting_for_code)
@@ -1589,253 +1095,1235 @@ async def handle_clarify_search_callback(callback: CallbackQuery, state: FSMCont
         await state.set_state(QuestionStates.waiting_for_name)
         await handle_name_search_with_text(mock_msg, state, expanded_query)
     elif search_type == "profile":
-        await state.update_data(show_profiles=True)
         await state.set_state(QuestionStates.waiting_for_name)
         await handle_name_search_with_text(mock_msg, state, expanded_query)
     else:  # general
         await db.add_request_stat(
-            user_id=user_id, request_type="question", request_text=original_query
+            user_id=user_id, 
+            request_type="question", 
+            request_text=original_query
         )
         await handle_general_question(mock_msg, state, expanded_query)
 
 
-@questions_router.message(QuestionStates.confirming_search_type)
-async def handle_search_confirmation(message: Message, state: FSMContext):
-    """Обработчик подтверждения типа поиска (для текстовых команд)"""
-    user_id = message.from_user.id
-    text = message.text.strip()
-    data = await state.get_data()
-    classification = data.get("query_classification", {})
+@questions_router.callback_query(F.data.startswith("show_test:"))
+async def handle_show_test_callback(callback: CallbackQuery, state: FSMContext):
+    """Показать информацию о выбранном тесте"""
+    action, test_code = TestCallback.unpack(callback.data)
+    await callback.answer()
 
-    # Если пользователь ввел текст вместо нажатия кнопки
-    await message.answer("Пожалуйста, используйте кнопки выше для выбора действия.")
+    try:
+        processor = DataProcessor()
+        processor.load_vector_store()
+
+        # Поиск теста
+        results = processor.search_test(filter_dict={"test_code": test_code})
+
+        if not results:
+            normalized_code = normalize_test_code(test_code)
+            if normalized_code:
+                results = processor.search_test(filter_dict={"test_code": normalized_code})
+
+        if not results:
+            logger.warning(f"[CALLBACK] Test {test_code} not found with filter search")
+            fuzzy_results = await fuzzy_test_search(
+                processor, test_code, threshold=FUZZY_SEARCH_THRESHOLD_EXACT
+            )
+
+            if fuzzy_results:
+                for doc, score in fuzzy_results:
+                    if doc.metadata.get("test_code", "").upper() == test_code.upper():
+                        results = [(doc, score)]
+                        break
+
+                if not results and fuzzy_results[0][1] >= 90:
+                    results = [fuzzy_results[0]]
+
+        if not results:
+            result, found_variant, match_type = await smart_test_search(processor, test_code)
+            if result:
+                results = [result]
+
+        if not results:
+            await callback.message.answer(f"❌ Тест {test_code} не найден в базе данных")
+            return
+
+        doc = results[0][0] if isinstance(results[0], tuple) else results[0]
+        test_data = format_test_data(doc.metadata)
+
+        response = f"<b>Информация о выбранном тесте:</b>\n\n"
+        response += format_test_info(test_data)
+
+        # Статистика
+        user_id = callback.from_user.id
+        await db.add_search_history(
+            user_id=user_id,
+            search_query=f"Выбор из списка: {test_code}",
+            found_test_code=test_data["test_code"],
+            search_type="code",
+            success=True,
+        )
+        await db.update_user_frequent_test(
+            user_id=user_id,
+            test_code=test_data["test_code"],
+            test_name=test_data["test_name"],
+        )
+
+        # Связанные тесты
+        data = await state.get_data()
+        if "last_viewed_test" in data and data["last_viewed_test"] != test_data["test_code"]:
+            await db.update_related_tests(
+                user_id=user_id,
+                test_code_1=data["last_viewed_test"],
+                test_code_2=test_data["test_code"],
+            )
+
+        # Отправляем информацию
+        await send_test_info_with_photo(callback.message, test_data, response)
+
+        # Обновляем состояние
+        await state.set_state(QuestionStates.in_dialog)
+        await state.update_data(
+            current_test=test_data, 
+            last_viewed_test=test_data["test_code"]
+        )
+
+        await callback.message.answer(
+            "Можете задать вопрос об этом тесте или выбрать действие:",
+            reply_markup=get_dialog_kb()
+        )
+
+    except Exception as e:
+        logger.error(f"[CALLBACK] Failed to show test: {e}", exc_info=True)
+        await callback.message.answer("⚠️ Ошибка при загрузке информации о тесте")
 
 
-@questions_router.message(QuestionStates.clarifying_search, F.text)
-async def handle_text_input_during_clarification(message: Message, state: FSMContext):
-    """Обработчик текстового ввода во время уточнения типа поиска"""
-    text = message.text.strip()
-
-    # Если пользователь ввел текст вместо выбора кнопки, обрабатываем как новый запрос
-    if text and text not in ["🔢 Поиск по коду теста", "📝 Поиск по названию",
-                           "🔬 Поиск профиля тестов", "❓ Общий вопрос", "❌ Завершить диалог"]:
-
-        # Очищаем состояние уточнения
-        await state.set_state(QuestionStates.waiting_for_search_type)
-
-        # Обрабатываем как новый запрос
-        await handle_universal_search(message, state)
-    else:
-        # Если это одна из кнопок, передаем обработку основному обработчику
-        await handle_search_clarification(message, state)
-
-@questions_router.message(QuestionStates.clarifying_search)
-async def handle_search_clarification(message: Message, state: FSMContext):
-    """Обработчик уточнения типа поиска (для текстовых команд)"""
-    # Если пользователь ввел текст вместо нажатия кнопки
-    await message.answer("Пожалуйста, используйте кнопки выше для выбора типа поиска.")
+@questions_router.callback_query(F.data.startswith("quick_test:"))
+async def handle_quick_test_selection(callback: CallbackQuery, state: FSMContext):
+    """Быстрый выбор теста из подсказок"""
+    test_code = callback.data.split(":")[1]
     
+    # Переиспользуем логику show_test
+    await handle_show_test_callback(callback, state)
 
-@questions_router.message(QuestionStates.in_dialog, F.text == "📷 Показать контейнер")
-async def handle_show_container_photo(message: Message, state: FSMContext):
-    """Показывает фото контейнеров для текущего теста."""
+
+@questions_router.callback_query(F.data.startswith("page:"))
+async def handle_pagination(callback: CallbackQuery, state: FSMContext):
+    """Обработчик переключения страниц с сохранением фильтрации"""
+    await callback.answer()
+    
+    action, page, search_id, current_view = PaginationCallback.unpack(callback.data)
+    
     data = await state.get_data()
-    test_data = data.get("current_test")
+    search_data = data.get(f"search_results_{search_id}")
+    
+    if not search_data:
+        await callback.answer("Результаты поиска устарели. Выполните новый поиск.", show_alert=True)
+        return
+    
+    # Извлекаем результаты
+    all_results = search_data.get('data', [])
+    
+    if not all_results:
+        await callback.answer("Результаты не найдены", show_alert=True)
+        return
+    
+    # Фильтрация по типу
+    if current_view == "tests":
+        display_results = [
+            item for item in all_results 
+            if not is_profile_test(item.get('metadata', {}).get("test_code", ""))
+        ]
+        view_name = "тесты"
+    elif current_view == "profiles":
+        display_results = [
+            item for item in all_results 
+            if is_profile_test(item.get('metadata', {}).get("test_code", ""))
+        ]
+        view_name = "профили"
+    else:
+        display_results = all_results
+        view_name = "результаты"
+    
+    # Считаем для кнопок фильтров
+    tests_count = sum(
+        1 for item in all_results 
+        if not is_profile_test(item.get('metadata', {}).get("test_code", ""))
+    )
+    profiles_count = sum(
+        1 for item in all_results 
+        if is_profile_test(item.get('metadata', {}).get("test_code", ""))
+    )
+    total_count = len(all_results)
+    
+    # Клавиатура
+    keyboard, total_pages, items_shown = create_paginated_keyboard(
+        display_results,
+        current_page=page,
+        items_per_page=ITEMS_PER_PAGE,
+        search_id=search_id,
+        include_filters=True,
+        tests_count=tests_count,
+        profiles_count=profiles_count,
+        total_count=total_count,
+        current_view=current_view
+    )
+    
+    # Формируем текст
+    start_idx = page * ITEMS_PER_PAGE
+    end_idx = start_idx + items_shown
+    
+    response = f"🔍 <b>Найдено {len(display_results)} {view_name}</b>"
+    
+    if total_pages > 1:
+        response += f" <b>(страница {page + 1} из {total_pages}):</b>\n\n"
+    else:
+        response += ":\n\n"
+    
+    for i, item in enumerate(display_results[start_idx:end_idx], start=start_idx + 1):
+        metadata = item.get('metadata', {})
+        score = item.get('score', 0)
+        
+        test_code = sanitize_test_code_for_display(metadata.get("test_code", ""))
+        test_name = html.escape(metadata.get("test_name", ""))
+        department = html.escape(metadata.get("department", "Не указано"))
+        
+        type_label = "🔬 Профиль" if is_profile_test(test_code) else "🧪 Тест"
+        link = create_test_link(test_code)
+        
+        response += (
+            f"<b>{i}.</b> {type_label}: <a href='{link}'>{test_code}</a>\n"
+            f"📝 {test_name}\n"
+            f"📋 {department}\n"
+        )
+        
+        # Показываем score если есть
+        if score > 0:
+            response += f"📊 Схожесть: {score}%\n"
+        
+        response += "\n"
+    
+    response += "\n💡 <i>Нажмите на код теста или выберите из кнопок ниже</i>"
+    
+    try:
+        await callback.message.edit_text(
+            response,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=keyboard
+        )
+    except Exception as e:
+        logger.error(f"[PAGINATION] Failed to update message: {e}")
+        await callback.answer("Ошибка обновления сообщения", show_alert=True)
 
-    if not test_data:
-        await message.answer("❌ Сначала выберите тест")
+
+@questions_router.callback_query(F.data.startswith("switch_view:"))
+async def handle_switch_view(callback: CallbackQuery, state: FSMContext):
+    """Переключение между тестами/профилями/все"""
+    await callback.answer()
+    
+    parts = callback.data.split(":")
+    view_type = parts[1]
+    search_id = parts[2] if len(parts) > 2 else ""
+    
+    data = await state.get_data()
+    search_data = data.get(f"search_results_{search_id}")
+    
+    if not search_data:
+        await callback.answer("Результаты поиска устарели", show_alert=True)
+        return
+    
+    all_results = search_data.get('data', [])
+    
+    # Фильтрация
+    if view_type == "tests":
+        filtered_results = [
+            item for item in all_results 
+            if not is_profile_test(item.get('metadata', {}).get("test_code", ""))
+        ]
+        view_name = "тесты"
+    elif view_type == "profiles":
+        filtered_results = [
+            item for item in all_results 
+            if is_profile_test(item.get('metadata', {}).get("test_code", ""))
+        ]
+        view_name = "профили"
+    else:
+        filtered_results = all_results
+        view_name = "результаты"
+    
+    if not filtered_results:
+        await callback.answer(f"❌ {view_name.capitalize()} не найдены", show_alert=True)
+        return
+    
+    # Считаем для фильтров
+    tests_count = sum(
+        1 for item in all_results 
+        if not is_profile_test(item.get('metadata', {}).get("test_code", ""))
+    )
+    profiles_count = sum(
+        1 for item in all_results 
+        if is_profile_test(item.get('metadata', {}).get("test_code", ""))
+    )
+    total_count = len(all_results)
+    
+    # Клавиатура (первая страница)
+    keyboard, total_pages, items_shown = create_paginated_keyboard(
+        filtered_results,
+        current_page=0,
+        items_per_page=ITEMS_PER_PAGE,
+        search_id=search_id,
+        include_filters=True,
+        tests_count=tests_count,
+        profiles_count=profiles_count,
+        total_count=total_count,
+        current_view=view_type
+    )
+    
+    # Формируем ответ
+    response = f"🔍 <b>Найдено {len(filtered_results)} {view_name}</b>"
+    
+    if total_pages > 1:
+        response += f" <b>(страница 1 из {total_pages}):</b>\n\n"
+    else:
+        response += ":\n\n"
+    
+    for i, item in enumerate(filtered_results[:items_shown], 1):
+        metadata = item.get('metadata', {})
+        score = item.get('score', 0)
+        
+        test_code = sanitize_test_code_for_display(metadata.get("test_code", ""))
+        test_name = html.escape(metadata.get("test_name", ""))
+        department = html.escape(metadata.get("department", "Не указано"))
+        
+        type_label = "🔬 Профиль" if is_profile_test(test_code) else "🧪 Тест"
+        link = create_test_link(test_code)
+        
+        response += (
+            f"<b>{i}.</b> {type_label}: <a href='{link}'>{test_code}</a>\n"
+            f"📝 {test_name}\n"
+            f"📋 {department}\n"
+        )
+        
+        if score > 0:
+            response += f"📊 Схожесть: {score}%\n"
+        
+        response += "\n"
+    
+    response += "\n💡 <i>Нажмите на код теста или выберите из кнопок ниже</i>"
+    
+    try:
+        await callback.message.edit_text(
+            response,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=keyboard
+        )
+    except Exception as e:
+        logger.error(f"[SWITCH_VIEW] Failed: {e}")
+        await callback.answer("Ошибка переключения", show_alert=True)
+
+
+@questions_router.callback_query(F.data.startswith("show_container_photos:"))
+async def handle_show_container_photos_callback(callback: CallbackQuery):
+    """Показать фото контейнеров для теста"""
+    await callback.answer()
+
+    test_code = callback.data.split(":", 1)[1]
+
+    try:
+        processor = DataProcessor()
+        processor.load_vector_store()
+
+        results = processor.search_test(filter_dict={"test_code": test_code})
+
+        if not results:
+            await callback.message.answer("❌ Тест не найден")
+            return
+
+        doc = results[0][0] if isinstance(results[0], tuple) else results[0]
+        raw_metadata = doc.metadata
+
+        # Собираем контейнеры
+        all_containers = []
+        
+        def split_by_or(container_str: str) -> List[str]:
+            """Разделяет строку по 'или' только между отдельными контейнерами"""
+            if " или " in container_str.lower():
+                # Разделяем по "или" только если дальше идет заглавная буква (новый контейнер)
+                parts = re.split(r'\s+или\s+(?=[А-ЯA-Z])', container_str, flags=re.IGNORECASE)
+                return [part.strip() for part in parts if part.strip()]
+            return [container_str]
+        
+        # primary_container_type
+        primary_container = str(raw_metadata.get("primary_container_type", "")).strip()
+        if primary_container and primary_container.lower() not in ["не указан", "нет", "-", "", "none", "null"]:
+            primary_container = primary_container.replace('"', "").replace("\n", " ")
+            primary_container = " ".join(primary_container.split())
+            
+            if "*I*" in primary_container:
+                parts = [ct.strip() for ct in primary_container.split("*I*")]
+            else:
+                parts = [primary_container]
+            
+            for part in parts:
+                all_containers.extend(split_by_or(part))
+        
+        # container_type
+        container_type_raw = str(raw_metadata.get("container_type", "")).strip()
+        if container_type_raw and container_type_raw.lower() not in ["не указан", "нет", "-", "", "none", "null"]:
+            container_type_raw = container_type_raw.replace('"', "").replace("\n", " ")
+            container_type_raw = " ".join(container_type_raw.split())
+            
+            if "*I*" in container_type_raw:
+                parts = [ct.strip() for ct in container_type_raw.split("*I*")]
+            else:
+                parts = [container_type_raw]
+            
+            for part in parts:
+                all_containers.extend(split_by_or(part))
+        
+        # Дедупликация
+        unique_containers = deduplicate_container_names(all_containers)
+        
+        if not unique_containers:
+            await callback.message.answer("❌ Для этого теста не указаны типы контейнеров")
+            return
+        
+        # Ищем фото
+        found_photos = []
+        already_shown_file_ids = set()
+        not_found_containers = []
+        
+        for container in unique_containers:
+            photo_data = await db.get_container_photo(container)
+            
+            if not photo_data:
+                photo_data = await find_container_photo_smart(db, container)
+            
+            if photo_data:
+                file_id = photo_data.get("file_id")
+                
+                if file_id not in already_shown_file_ids:
+                    already_shown_file_ids.add(file_id)
+                    found_photos.append({
+                        "container_type": container,
+                        "file_id": file_id,
+                        "description": photo_data.get("description")
+                    })
+            else:
+                not_found_containers.append(container)
+        
+        # Отправляем фото
+        if found_photos:
+            if len(found_photos) == 1:
+                # Одно фото
+                photo_info = found_photos[0]
+                container_name = html.escape(photo_info['container_type'])
+                caption = f"📦 Контейнер: {container_name}"
+                
+                if photo_info.get('description'):
+                    description = html.escape(photo_info['description'])
+                    caption += f"\n📝 {description}"
+                
+                hide_keyboard = InlineKeyboardMarkup(
+                    inline_keyboard=[[
+                        InlineKeyboardButton(
+                            text="🙈 Скрыть фото",
+                            callback_data=f"hide_single:{test_code}",
+                        )
+                    ]]
+                )
+                
+                await callback.message.answer_photo(
+                    photo=photo_info['file_id'],
+                    caption=caption,
+                    parse_mode="HTML",
+                    reply_markup=hide_keyboard
+                )
+            else:
+                # Несколько фото
+                sent_messages = []
+                
+                for i, photo_info in enumerate(found_photos):
+                    container_name = html.escape(photo_info['container_type'])
+                    caption = f"📦 {container_name}"
+                    
+                    sent_msg = await callback.message.answer_photo(
+                        photo=photo_info['file_id'],
+                        caption=caption,
+                        parse_mode="HTML"
+                    )
+                    sent_messages.append(sent_msg)
+                    
+                    if i < len(found_photos) - 1:
+                        await asyncio.sleep(0.3)
+                
+                # Кнопка "Скрыть все"
+                message_ids_str = ",".join(str(msg.message_id) for msg in sent_messages)
+                
+                hide_keyboard = InlineKeyboardMarkup(
+                    inline_keyboard=[[
+                        InlineKeyboardButton(
+                            text="🙈 Скрыть все фото",
+                            callback_data=f"hide_multiple:{message_ids_str}",
+                        )
+                    ]]
+                )
+                
+                await callback.message.answer(
+                    f"Показано {len(found_photos)} фото контейнеров",
+                    reply_markup=hide_keyboard
+                )
+            
+            # Если есть контейнеры без фото
+            if not_found_containers:
+                not_found_msg = "\n⚠️ Не найдены фото для:\n"
+                for ct in not_found_containers[:5]:
+                    not_found_msg += f"• {ct}\n"
+                if len(not_found_containers) > 5:
+                    not_found_msg += f"... и еще {len(not_found_containers) - 5}"
+                
+                await callback.message.answer(not_found_msg)
+        else:
+            # Все не найдены
+            not_found_msg = "❌ Фото контейнеров не найдены в базе\n\n🔍 Искали типы:\n"
+            for ct in unique_containers[:10]:
+                not_found_msg += f"• {ct}\n"
+            if len(unique_containers) > 10:
+                not_found_msg += f"... и еще {len(unique_containers) - 10}"
+            
+            await callback.message.answer(not_found_msg)
+
+    except Exception as e:
+        logger.error(f"[CONTAINER_PHOTOS] Failed: {e}", exc_info=True)
+        await callback.message.answer("❌ Ошибка при загрузке фото")
+
+
+@questions_router.callback_query(F.data.startswith("hide_single:"))
+async def handle_hide_single_photo(callback: CallbackQuery):
+    """Скрыть одиночное фото"""
+    await callback.answer("Фото скрыто")
+    
+    try:
+        await callback.message.delete()
+    except Exception as e:
+        logger.warning(f"[HIDE_PHOTO] Failed: {e}")
+
+
+@questions_router.callback_query(F.data.startswith("hide_multiple:"))
+async def handle_hide_multiple_photos(callback: CallbackQuery):
+    """Скрыть несколько фото"""
+    await callback.answer("Фото скрыты")
+    
+    try:
+        parts = callback.data.split(":")
+        if len(parts) > 1:
+            message_ids_str = parts[1]
+            message_ids = [int(mid) for mid in message_ids_str.split(",") if mid.isdigit()]
+            
+            for message_id in message_ids:
+                try:
+                    await callback.bot.delete_message(
+                        chat_id=callback.message.chat.id,
+                        message_id=message_id
+                    )
+                except Exception:
+                    continue
+        
+        await callback.message.delete()
+        
+    except Exception as e:
+        logger.error(f"[HIDE_MULTIPLE] Failed: {e}")
+        await callback.answer("Ошибка при скрытии фото", show_alert=True)
+
+
+@questions_router.callback_query(F.data == "close_keyboard")
+async def handle_close_keyboard(callback: CallbackQuery):
+    """Закрыть клавиатуру"""
+    await callback.answer()
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+
+@questions_router.callback_query(F.data == "ignore")
+async def handle_ignore_callback(callback: CallbackQuery):
+    """Информационная кнопка"""
+    await callback.answer()
+
+
+@questions_router.callback_query(F.data == "redirect_to_callback")
+async def handle_redirect_to_callback(callback: CallbackQuery, state: FSMContext):
+    """Перенаправление на заказ звонка"""
+    await callback.answer()
+    
+    user_id = callback.from_user.id
+    user = await db.get_user(user_id)
+    
+    if not user:
+        await callback.message.answer(
+            "Для заказа звонка необходимо пройти регистрацию.\n"
+            "Используйте команду /start"
+        )
         return
 
+    country = user.get('country', 'BY')
+    await state.update_data(user_country=country)
+    
+    phone_formats = {
+        'BY': "+375 (XX) XXX-XX-XX",
+        'RU': "+7 (XXX) XXX-XX-XX", 
+        'KZ': "+7 (7XX) XXX-XX-XX",
+        'AM': "+374 (XX) XXX-XXX"
+    }
+    
+    format_hint = phone_formats.get(country, phone_formats['BY'])
+    
+    await callback.message.answer(
+        f"📞 Заказ обратного звонка\n\n"
+        f"Пожалуйста, отправьте ваш номер телефона или введите вручную.\n"
+        f"Формат для вашей страны: {format_hint}",
+        reply_markup=get_phone_kb()
+    )
+    
+    await state.set_state(CallbackStates.waiting_for_phone)
+
+# ============================================================================
+# ПОИСК ПО КОДУ
+# ============================================================================
+
+@questions_router.message(QuestionStates.waiting_for_code)
+async def handle_code_search(message: Message, state: FSMContext):
+    """Обработчик поиска по коду теста"""
+    await handle_code_search_with_text(message, state, message.text.strip())
+
+
+async def handle_code_search_with_text(
+    message: Message, 
+    state: FSMContext, 
+    search_text: str
+):
+    """Wrapper для поиска по коду"""
+    await _handle_code_search_internal(message, state, search_text)
+
+
+async def _handle_code_search_internal(
+    message: Message, 
+    state: FSMContext, 
+    search_text: Optional[str] = None
+):
+    """
+    Внутренняя функция поиска по коду теста
+    
+    Исправлено:
+    - Добавлен Lock для предотвращения race conditions
+    - Корректная обработка animation_task
+    - Сохранение минимизированных данных в state
+    - Увеличен threshold для fuzzy search
+    - Проверка на None после normalize_test_code
+    """
+    user_id = message.from_user.id
+    
+    # FIX #18: Атомарная блокировка
+    async with user_processing_locks[user_id]:
+        data = await state.get_data()
+        original_input = search_text if search_text else message.text.strip()
+        original_query = data.get("original_query", original_input)
+
+        await db.add_request_stat(
+            user_id=user_id, 
+            request_type="question", 
+            request_text=original_query
+        )
+
+        gif_msg = None
+        loading_msg = None
+        animation_task = None
+
+        try:
+            # Загрузка GIF
+            try:
+                if LOADING_GIF_ID:
+                    gif_msg = await message.answer_animation(LOADING_GIF_ID, caption="")
+            except Exception:
+                gif_msg = None
+
+            loading_msg = await message.answer("🔍 Ищу по коду...\n⏳ Анализирую данные...")
+            
+            if loading_msg:
+                animation_task = asyncio.create_task(animate_loading(loading_msg))
+
+            processor = DataProcessor()
+            processor.load_vector_store()
+
+            # FIX #21: Проверка нормализации
+            normalized_input = normalize_test_code(original_input)
+            if not normalized_input:
+                await safe_cancel_animation(animation_task)
+                await safe_delete_message(loading_msg)
+                await safe_delete_message(gif_msg)
+                
+                await message.answer(
+                    f"❌ Не удалось распознать код теста: {html.escape(original_input[:50])}",
+                    reply_markup=get_back_to_menu_kb(),
+                    parse_mode="HTML"
+                )
+                return
+
+            # Умный поиск
+            result, found_variant, match_type = await smart_test_search(
+                processor, original_input
+            )
+
+            # Фильтр по животным
+            animal_types = set()
+            if not result:
+                animal_types = animal_filter.extract_animals_from_query(original_query)
+
+            # Если не нашли - fuzzy поиск
+            if not result:
+                # FIX #25: Увеличен threshold
+                similar_tests = await fuzzy_test_search(
+                    processor, normalized_input, threshold=FUZZY_SEARCH_THRESHOLD_MIN
+                )
+
+                # Применяем фильтр по животным
+                if animal_types:
+                    similar_tests, _ = await apply_animal_filter(similar_tests, original_query)
+
+                await safe_cancel_animation(animation_task)
+                await safe_delete_message(loading_msg)
+                await safe_delete_message(gif_msg)
+
+                await db.add_search_history(
+                    user_id=user_id,
+                    search_query=original_query,
+                    search_type="code",
+                    success=False,
+                )
+
+                if similar_tests:
+                    # FIX #17 & #19: Сохраняем минимизированные данные СО score
+                    search_id = hashlib.md5(
+                        f"{user_id}_{datetime.now().timestamp()}_{normalized_input}".encode()
+                    ).hexdigest()[:8]
+                    
+                    simplified_results = [
+                        {
+                            'metadata': {
+                                'test_code': doc.metadata.get('test_code'),
+                                'test_name': doc.metadata.get('test_name'),
+                                'department': doc.metadata.get('department')
+                            },
+                            'score': score
+                        }
+                        for doc, score in similar_tests
+                    ]
+                    
+                    await state.update_data(**{
+                        f"search_results_{search_id}": {
+                            'data': simplified_results,
+                            'timestamp': datetime.now().timestamp(),
+                            'query': normalized_input
+                        }
+                    })
+                    
+                    await cleanup_old_search_results(state)
+                    
+                    # Считаем типы
+                    tests_count = sum(
+                        1 for item in simplified_results 
+                        if not is_profile_test(item['metadata'].get('test_code', ''))
+                    )
+                    profiles_count = sum(
+                        1 for item in simplified_results 
+                        if is_profile_test(item['metadata'].get('test_code', ''))
+                    )
+                    
+                    keyboard, total_pages, items_shown = create_paginated_keyboard(
+                        simplified_results,
+                        current_page=0,
+                        items_per_page=ITEMS_PER_PAGE,
+                        search_id=search_id,
+                        include_filters=True,
+                        tests_count=tests_count,
+                        profiles_count=profiles_count,
+                        total_count=len(simplified_results),
+                        current_view="all"
+                    )
+                    
+                    response = (
+                        f"❌ Точное совпадение для кода '<code>{html.escape(normalized_input)}</code>' не найдено.\n\n"
+                    )
+                    
+                    if animal_types:
+                        animal_display = animal_filter.get_animal_display_names(animal_types)
+                        response += f"🐾 <b>Фильтр по животным:</b> {animal_display}\n\n"
+                    
+                    response += f"🔍 <b>Найдены похожие результаты ({len(similar_tests)} шт.)</b>"
+                    
+                    if total_pages > 1:
+                        response += f" <b>(страница 1 из {total_pages}):</b>\n\n"
+                    else:
+                        response += ":\n\n"
+                    
+                    # FIX #17: Правильное использование данных со score
+                    for i, item in enumerate(simplified_results[:items_shown], 1):
+                        metadata = item['metadata']
+                        score = item['score']
+                        
+                        test_code = sanitize_test_code_for_display(metadata['test_code'])
+                        test_name = html.escape(metadata['test_name'])
+                        
+                        type_label = "🔬 Профиль" if is_profile_test(test_code) else "🧪 Тест"
+                        link = create_test_link(test_code)
+                        
+                        response += (
+                            f"<b>{i}.</b> {type_label}: <a href='{link}'>{test_code}</a> - {test_name}\n"
+                            f"   📊 Схожесть: {score}%\n\n"
+                        )
+                    
+                    response += "\n💡 <i>Нажмите на код теста или используйте кнопки для выбора</i>"
+                    
+                    if total_pages > 1:
+                        response += f"\n📄 <i>Используйте навигацию для просмотра всех результатов</i>"
+                    
+                    await message.answer(
+                        response,
+                        parse_mode="HTML",
+                        disable_web_page_preview=True,
+                        reply_markup=keyboard
+                    )
+                else:
+                    # Ничего не найдено
+                    error_msg = f"❌ Код '<code>{html.escape(normalized_input)}</code>' не найден в базе данных.\n"
+                    
+                    if animal_types:
+                        animal_display = animal_filter.get_animal_display_names(animal_types)
+                        error_msg += f"🐾 <b>Фильтр по животным:</b> {animal_display}\n\n"
+                    
+                    error_msg += "💡 Попробуйте проверить правильность написания кода."
+                    
+                    await message.answer(
+                        error_msg, 
+                        reply_markup=get_back_to_menu_kb(), 
+                        parse_mode="HTML"
+                    )
+
+                await state.set_state(QuestionStates.in_dialog)
+                return
+
+            # Найден точный результат
+            doc = result[0]
+            test_data = format_test_data(doc.metadata)
+
+            type_info = ""
+            if is_profile_test(test_data["test_code"]):
+                type_info = "🔬 <b>Это профиль тестов</b>\n\n"
+
+            response = type_info + format_test_info(test_data)
+
+            # Статистика
+            await db.add_search_history(
+                user_id=user_id,
+                search_query=original_query,
+                found_test_code=test_data["test_code"],
+                search_type="code",
+                success=True,
+            )
+
+            await db.update_user_frequent_test(
+                user_id=user_id,
+                test_code=test_data["test_code"],
+                test_name=test_data["test_name"],
+            )
+
+            await safe_cancel_animation(animation_task)
+            await safe_delete_message(loading_msg)
+            await safe_delete_message(gif_msg)
+
+            # Отправляем информацию
+            await send_test_info_with_photo(message, test_data, response)
+
+            # Связанные тесты
+            if "last_viewed_test" in data and data["last_viewed_test"] != test_data["test_code"]:
+                await db.update_related_tests(
+                    user_id=user_id,
+                    test_code_1=data["last_viewed_test"],
+                    test_code_2=test_data["test_code"],
+                )
+
+            # Обновляем состояние
+            await state.set_state(QuestionStates.in_dialog)
+            await state.update_data(
+                current_test=test_data,
+                last_viewed_test=test_data["test_code"]
+            )
+
+            await message.answer(
+                "Можете задать вопрос об этом тесте или выбрать действие:",
+                reply_markup=get_dialog_kb()
+            )
+
+        except asyncio.CancelledError:
+            await safe_cancel_animation(animation_task)
+            await safe_delete_message(loading_msg)
+            await safe_delete_message(gif_msg)
+            await message.answer("⏹ Поиск остановлен.", reply_markup=get_back_to_menu_kb())
+
+        except Exception as e:
+            logger.error(f"[CODE_SEARCH] Failed: {e}", exc_info=True)
+            
+            await safe_cancel_animation(animation_task)
+            await safe_delete_message(loading_msg)
+            await safe_delete_message(gif_msg)
+
+            await message.answer(
+                "⚠️ Ошибка при поиске. Попробуйте позже",
+                reply_markup=get_back_to_menu_kb()
+            )
+            await state.set_state(QuestionStates.waiting_for_search_type)
+
+# ============================================================================
+# ПОИСК ПО НАЗВАНИЮ
+# ============================================================================
 
 @questions_router.message(QuestionStates.waiting_for_name)
 async def handle_name_search(message: Message, state: FSMContext):
-    """Handle test name search using RAG."""
-    await _handle_name_search_internal(message, state)
+    """Обработчик поиска по названию"""
+    await handle_name_search_with_text(message, state, message.text.strip())
 
 
-@questions_router.message(QuestionStates.in_dialog)
-async def handle_dialog(message: Message, state: FSMContext):
-    text = message.text.strip()
+async def handle_name_search_with_text(
+    message: Message, 
+    state: FSMContext, 
+    search_text: Optional[str] = None
+):
+    """Wrapper для поиска по названию"""
+    await _handle_name_search_internal(message, state, search_text)
+
+
+async def _handle_name_search_internal(
+    message: Message, 
+    state: FSMContext, 
+    search_text: Optional[str] = None
+):
+    """
+    Внутренняя функция поиска по названию
+    
+    Исправлено:
+    - Добавлен Lock для предотвращения race conditions
+    - Минимизированные данные в state
+    - Применение фильтра по животным
+    - Корректная обработка animation_task
+    """
     user_id = message.from_user.id
 
-    if text == "🔄 Новый вопрос":
-        await handle_new_question_in_dialog(message, state)
-        return
+    # FIX #18: Атомарная блокировка
+    async with user_processing_locks[user_id]:
+        data = await state.get_data()
+        original_query = data.get("original_query", message.text if not search_text else search_text)
+        text = search_text if search_text else message.text.strip()
 
-    data = await state.get_data()
-    test_data = data.get("current_test")
-
-    expanded_query = expand_query_with_abbreviations(text)
-    # Используем классификатор для определения типа нового запроса
-    query_type, confidence, metadata = await ultimate_classifier.classify_with_certainty(expanded_query)
-
-    # Дополнительная проверка для общих вопросов в диалоге
-    general_question_keywords = [
-        'как', 'что', 'где', 'когда', 'почему', 'зачем', 'сколько',
-        'хранить', 'хранение', 'транспортировка', 'подготовка', 'правила',
-        'можно ли', 'нужно ли', 'должен ли', 'следует ли',
-        'температура', 'время', 'срок', 'условия',
-        'рекомендации', 'советы', 'инструкция'
-    ]
-    
-    text_lower = text.lower()
-    has_general_keywords = any(keyword in text_lower for keyword in general_question_keywords)
-    has_test_code = bool(re.search(r'\b[AА][NН]\d+\b|\b\d{2,4}[A-ZА-Я]+\b', text, re.IGNORECASE))
-    
-    # Если это общий вопрос без кода теста, обрабатываем как контекстный вопрос
-    if has_general_keywords and not has_test_code and query_type in ["name", "code"]:
-        print(f"[DIALOG] Treating as contextual question: {text}")
-        await _handle_contextual_question(message, state, expanded_query, test_data)
-        return
-
-    # Проверяем, нужен ли новый поиск (не общий вопрос о текущем тесте)
-    needs_new_search = await _should_initiate_new_search(expanded_query, test_data, query_type, confidence)
-
-    if needs_new_search:
-        # Сохраняем информацию о классификации для последующих шагов
-        await state.update_data(
-            query_classification={
-                "type": query_type,
-                "confidence": confidence,
-                "metadata": metadata,
-                "original_query": text
-            }
+        await db.add_request_stat(
+            user_id=user_id, 
+            request_type="question", 
+            request_text=original_query
         )
 
-        # Высокая уверенность — сразу маршрутизируем
-        if confidence > 0.85:
-            await _process_confident_query(message, state, query_type, expanded_query, metadata)
-        else:
-            # Средняя уверенность — спросить подтверждение
-            await _ask_confirmation(message, state, query_type, expanded_query, confidence)
-            # Низкая уверенность — дополнительное уточнение через LLM
-            if confidence < 0.7:
-                await _clarify_with_llm(message, state, expanded_query, query_type, confidence)
-        return
+        gif_msg = None
+        loading_msg = None
+        animation_task = None
 
-    # Вопрос относится к текущему тесту — обрабатываем в контексте, остаёмся в in_dialog
-    await _handle_contextual_question(message, state, expanded_query, test_data)
+        try:
+            search_description = "🔍 Ищу тесты по запросу..."
 
+            if LOADING_GIF_ID:
+                try:
+                    gif_msg = await message.answer_animation(LOADING_GIF_ID, caption="")
+                except Exception:
+                    gif_msg = None
+                
+                loading_msg = await message.answer(
+                    f"{search_description}\n⏳ Анализирую данные..."
+                )
+                animation_task = asyncio.create_task(animate_loading(loading_msg))
+            else:
+                loading_msg = await message.answer(search_description)
 
-async def _should_initiate_new_search(text: str, current_test_data: Dict, query_type: str, confidence: float) -> bool:
-    """Определяет, нужно ли начинать новый поиск"""
-    if not current_test_data:
-        return True
+            processor = DataProcessor()
+            processor.load_vector_store()
 
-    # Если запрос явно указывает на новый поиск
-    if query_type != "general" and confidence > 0.8:
-        return True
+            # Поиск
+            rag_hits = processor.search_test(text, top_k=TEXT_SEARCH_TOP_K)
 
-    # Эвристики для определения нового поиска
-    text_lower = text.lower()
+            # Реранжирование
+            rag_hits = _rerank_hits_by_query(rag_hits, original_query)
 
-    # Ключевые слова, указывающие на новый поиск
-    new_search_keywords = [
-        'найди', 'ищи', 'покажи', 'поиск', 'найти',
-        'другой', 'еще', 'следующий', 'иной',
-        'код', 'тест', 'анализ', 'профиль'
-    ]
+            # Применяем фильтр по животным
+            rag_hits, animal_types = await apply_animal_filter(rag_hits, original_query)
 
-    # Проверяем, содержит ли запрос указание на новый поиск
-    has_search_intent = any(keyword in text_lower for keyword in new_search_keywords)
+            if not rag_hits:
+                await db.add_search_history(
+                    user_id=user_id,
+                    search_query=original_query,
+                    search_type="text",
+                    success=False
+                )
 
-    # Проверяем, не упоминается ли код другого теста
-    has_other_code = await _contains_other_test_code(text, current_test_data.get("test_code", ""))
+                await safe_cancel_animation(animation_task)
+                await safe_delete_message(loading_msg)
+                await safe_delete_message(gif_msg)
 
-    return has_search_intent or has_other_code
+                not_found_msg = f"❌ Тесты по запросу '<b>{html.escape(text)}</b>' не найдены.\n\n"
+                
+                if animal_types:
+                    animal_display = animal_filter.get_animal_display_names(animal_types)
+                    not_found_msg += f"🐾 <b>Фильтр по животным:</b> {animal_display}\n\n"
 
-async def _contains_other_test_code(text: str, current_test_code: str) -> bool:
-    """Проверяет, содержит ли текст код другого теста"""
-    # Извлекаем все возможные коды тестов из текста
-    code_patterns = [
-        r'[AА][NН]\d+[A-ZА-Я\-]*',
-        r'\b\d+[A-ZА-Я\-]*',
-        r'[A-ZА-Я]+\d+[A-ZА-Я\-]*',
-    ]
+                await message.answer(
+                    not_found_msg,
+                    reply_markup=get_back_to_menu_kb(),
+                    parse_mode="HTML"
+                )
+                await state.set_state(QuestionStates.in_dialog)
+                return
 
-    found_codes = set()
-    for pattern in code_patterns:
-        matches = re.findall(pattern, text, re.IGNORECASE)
-        for match in matches:
-            normalized = normalize_test_code(match)
-            if normalized and normalized != current_test_code:
-                found_codes.add(normalized)
+            # Выбираем лучшие совпадения
+            selected_docs = await select_best_match(text, rag_hits[:SIMILAR_TESTS_TOP_K])
 
-    return len(found_codes) > 0
+            # Записываем статистику
+            for doc in selected_docs[:1]:
+                await db.add_search_history(
+                    user_id=user_id,
+                    search_query=original_query,
+                    found_test_code=doc.metadata["test_code"],
+                    search_type="text",
+                    success=True
+                )
 
-async def _ask_dialog_clarification(message: Message, state: FSMContext, text: str, query_type: str, confidence: float):
-    """Запрос уточнения в режиме диалога"""
-    clarification_text = (
-        f"🔍 Вы хотите задать вопрос о текущем тесте или начать новый поиск?\n\n"
-        f"Запрос: <b>{html.escape(text)}</b>"
-    )
+                await db.update_user_frequent_test(
+                    user_id=user_id,
+                    test_code=doc.metadata["test_code"],
+                    test_name=doc.metadata["test_name"],
+                )
 
-    keyboard = InlineKeyboardMarkup(
-        keyboard=[
-            [InlineKeyboardButton(text="❓ Вопрос о текущем тесте")],
-            [InlineKeyboardButton(text="🔍 Новый поиск")],
-            [InlineKeyboardButton(text="❌ Завершить диалог")]
-        ],
-        resize_keyboard=True
-    )
+            await safe_cancel_animation(animation_task)
+            await safe_delete_message(loading_msg)
+            await safe_delete_message(gif_msg)
 
-    await message.answer(clarification_text, parse_mode="HTML", reply_markup=keyboard)
-    await state.set_state(QuestionStates.clarifying_search)
+            # FIX #17 & #19: Минимизированные данные
+            search_id = hashlib.md5(
+                f"{user_id}_{datetime.now().timestamp()}_{text}".encode()
+            ).hexdigest()[:8]
+            
+            simplified_results = [
+                {
+                    'metadata': {
+                        'test_code': doc.metadata.get('test_code'),
+                        'test_name': doc.metadata.get('test_name'),
+                        'department': doc.metadata.get('department')
+                    },
+                    'score': 0  # Для name search score не так важен
+                }
+                for doc in selected_docs
+            ]
+            
+            await state.update_data(**{
+                f"search_results_{search_id}": {
+                    'data': simplified_results,
+                    'timestamp': datetime.now().timestamp(),
+                    'query': text
+                }
+            })
+            
+            await cleanup_old_search_results(state)
+            
+            # Считаем типы
+            tests_count = sum(
+                1 for item in simplified_results 
+                if not is_profile_test(item['metadata'].get('test_code', ''))
+            )
+            profiles_count = sum(
+                1 for item in simplified_results 
+                if is_profile_test(item['metadata'].get('test_code', ''))
+            )
+            total_count = len(simplified_results)
+            
+            keyboard, total_pages, items_shown = create_paginated_keyboard(
+                simplified_results,
+                current_page=0,
+                items_per_page=ITEMS_PER_PAGE,
+                search_id=search_id,
+                include_filters=True,
+                tests_count=tests_count,
+                profiles_count=profiles_count,
+                total_count=total_count,
+                current_view="all"
+            )
+            
+            # Формируем ответ
+            response = f"🔍 <b>Найдено {total_count} результаты</b>"
+            
+            if animal_types:
+                animal_display = animal_filter.get_animal_display_names(animal_types)
+                response += f" <b>(фильтр: {animal_display})</b>"
+            
+            if total_pages > 1:
+                response += f" <b>(страница 1 из {total_pages}):</b>\n\n"
+            else:
+                response += ":\n\n"
+            
+            for i, item in enumerate(simplified_results[:items_shown], 1):
+                metadata = item['metadata']
+                
+                test_code = sanitize_test_code_for_display(metadata['test_code'])
+                test_name = html.escape(metadata['test_name'])
+                department = html.escape(metadata.get('department', 'Не указано'))
+                
+                type_label = "🔬 Профиль" if is_profile_test(test_code) else "🧪 Тест"
+                link = create_test_link(test_code)
+                
+                response += (
+                    f"<b>{i}.</b> {type_label}: <a href='{link}'>{test_code}</a>\n"
+                    f"📝 {test_name}\n"
+                    f"📋 {department}\n\n"
+                )
+            
+            response += "\n💡 <i>Нажмите на код теста в сообщении выше или выберите из кнопок</i>"
+            
+            if total_pages > 1:
+                response += f"\n📄 <i>Используйте кнопки навигации для просмотра всех результатов</i>"
+            
+            await message.answer(
+                response,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+                reply_markup=keyboard
+            )
+            
+            # Сохраняем последний тест
+            if simplified_results:
+                last_metadata = simplified_results[0]['metadata']
+                last_test_data = {
+                    'test_code': last_metadata['test_code'],
+                    'test_name': last_metadata['test_name'],
+                    'department': last_metadata.get('department', '')
+                }
+                
+                await state.set_state(QuestionStates.in_dialog)
+                await state.update_data(
+                    current_test=last_test_data,
+                    last_viewed_test=last_test_data['test_code']
+                )
+                
+                await message.answer(
+                    "Можете задать вопрос об этом тесте или выбрать действие:",
+                    reply_markup=get_dialog_kb()
+                )
 
-async def _handle_contextual_question(message: Message, state: FSMContext, question: str, test_data: Dict):
-    """Обработка вопроса о текущем тесте"""
+        except Exception as e:
+            logger.error(f"[NAME_SEARCH] Failed: {e}", exc_info=True)
+
+            await safe_cancel_animation(animation_task)
+            await safe_delete_message(loading_msg)
+            await safe_delete_message(gif_msg)
+
+            error_msg = (
+                "❌ Тесты не найдены"
+                if str(e) == "Тесты не найдены"
+                else "⚠️ Ошибка поиска. Попробуйте позже."
+            )
+            await message.answer(error_msg, reply_markup=get_back_to_menu_kb())
+            await state.set_state(QuestionStates.in_dialog)
+
+# ============================================================================
+# ОБРАБОТКА КОНТЕКСТНЫХ ВОПРОСОВ
+# ============================================================================
+
+async def _handle_contextual_question(
+    message: Message, 
+    state: FSMContext, 
+    question: str, 
+    test_data: Optional[Dict]
+):
+    """
+    Обработка вопроса о текущем тесте через LLM
+    
+    Исправлено:
+    - Добавлен timeout для LLM
+    - Корректная обработка animation_task
+    """
     if not test_data:
         await message.answer("Контекст потерян. Задайте новый вопрос.")
         await state.set_state(QuestionStates.waiting_for_search_type)
         return
 
-    # Обработка через LLM с контекстом текущего теста
     gif_msg = None
     loading_msg = None
     animation_task = None
 
     try:
-        # Показ загрузки (не падаем, если GIF недоступен)
         try:
-            gif_msg = await message.answer_animation(LOADING_GIF_ID, caption="")
+            if LOADING_GIF_ID:
+                gif_msg = await message.answer_animation(LOADING_GIF_ID, caption="")
         except Exception:
             gif_msg = None
+        
         loading_msg = await message.answer("Обрабатываю ваш вопрос...")
         animation_task = asyncio.create_task(animate_loading(loading_msg))
 
         system_msg = SystemMessage(
             content=f"""
-            Ты - ассистент лаборатории VetUnion и отвечаешь только в области ветеринарии.
+Ты - ассистент лаборатории VetUnion и отвечаешь только в области ветеринарии.
 
-            Текущий тест:
-            Код: {test_data['test_code']}
-            Название: {test_data['test_name']}
+Текущий тест:
+Код: {test_data.get('test_code', 'N/A')}
+Название: {test_data.get('test_name', 'N/A')}
 
-            ВАЖНОЕ ПРАВИЛО:
-            Если пользователь спрашивает про ДРУГОЙ тест или анализ (упоминает другой код, название или тип анализа),
-            ты ДОЛЖЕН ответить ТОЧНО так:
-            "NEED_NEW_SEARCH: [запрос пользователя]"
+ВАЖНОЕ ПРАВИЛО:
+Если пользователь спрашивает про ДРУГОЙ тест или анализ (упоминает другой код, название или тип анализа),
+ты ДОЛЖЕН ответить ТОЧНО так:
+"NEED_NEW_SEARCH: [запрос пользователя]"
 
-            Если вопрос касается текущего теста или просто пользователь хочет поинтересоваться по другому вопросу, предоставляй всю необходимую информацию в области ветеринарии с пониманием профессионального сленга.
-        """
+Если вопрос касается текущего теста или общего вопроса по ветеринарии, 
+предоставляй всю необходимую информацию с пониманием профессионального сленга.
+"""
         )
 
-        # Запрашиваем ответ у LLM
-        response = await llm.agenerate([[system_msg, HumanMessage(content=question)]])
+        # FIX #5: Timeout для LLM
+        try:
+            response = await asyncio.wait_for(
+                llm.agenerate([[system_msg, HumanMessage(content=question)]]),
+                timeout=LLM_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError:
+            await safe_cancel_animation(animation_task)
+            await safe_delete_message(loading_msg)
+            await safe_delete_message(gif_msg)
+            
+            await message.answer(
+                "⏱ Превышено время ожидания ответа. Попробуйте переформулировать вопрос.",
+                reply_markup=get_dialog_kb()
+            )
+            return
+
         answer = response.generations[0][0].text.strip()
 
-        # Проверка на необходимость нового поиска
+        # Проверка на новый поиск
         if answer.startswith("NEED_NEW_SEARCH:"):
-            # Отменяем анимацию и удаляем лоадеры
-            if animation_task:
-                animation_task.cancel()
+            await safe_cancel_animation(animation_task)
             await safe_delete_message(loading_msg)
             await safe_delete_message(gif_msg)
 
             search_query = answer.replace("NEED_NEW_SEARCH:", "").strip() or question
 
-            # Классифицируем новый запрос
-            query_type, confidence, metadata = await ultimate_classifier.classify_with_certainty(search_query)
+            # Классифицируем
+            query_type, confidence, metadata = await ultimate_classifier.classify_with_certainty(
+                search_query
+            )
 
             await state.update_data(
                 query_classification={
@@ -1846,253 +2334,59 @@ async def _handle_contextual_question(message: Message, state: FSMContext, quest
                 }
             )
 
-            if confidence > 0.85:
+            if confidence > CONFIDENCE_HIGH:
                 await _process_confident_query(message, state, query_type, search_query, metadata)
-            else:
+            elif confidence > CONFIDENCE_MEDIUM:
                 await _ask_confirmation(message, state, query_type, search_query, confidence)
-                if confidence < 0.7:
-                    await _clarify_with_llm(message, state, search_query, query_type, confidence)
+            else:
+                await _clarify_with_llm(message, state, search_query, query_type, confidence)
             return
 
-        # Обычный ответ по текущему тесту
+        # Обычный ответ
         answer = fix_bold(answer)
+        
+        await safe_cancel_animation(animation_task)
+        await safe_delete_message(gif_msg)
+        
         await loading_msg.edit_text(answer, parse_mode="HTML")
         await message.answer("Выберите действие:", reply_markup=get_dialog_kb())
 
     except Exception as e:
-        print(f"[ERROR] Dialog processing failed: {e}")
-        if animation_task:
-            animation_task.cancel()
+        logger.error(f"[CONTEXTUAL] Failed: {e}", exc_info=True)
+        
+        await safe_cancel_animation(animation_task)
         await safe_delete_message(loading_msg)
         await safe_delete_message(gif_msg)
 
-        await state.set_state(QuestionStates.waiting_for_name)
-        await handle_name_search(message, state)
-    finally:
-        if animation_task and not animation_task.cancelled():
-            animation_task.cancel()
-        await safe_delete_message(gif_msg)
-
-
-async def handle_context_switch(message: Message, state: FSMContext, new_query: str):
-    """Обрабатывает переключение контекста на новый тест."""
-
-    # Сохраняем историю
-    data = await state.get_data()
-    if "current_test" in data:
-        last_test = data["current_test"]["test_code"]
-        # Можно сохранить в историю диалога
-        await state.update_data(
-            previous_tests=data.get("previous_tests", []) + [last_test]
+        await message.answer(
+            "⚠️ Ошибка обработки вопроса. Попробуйте переформулировать.",
+            reply_markup=get_dialog_kb()
         )
 
-    # Определяем тип поиска для нового запроса
-    if is_test_code_pattern(new_query):
-        await state.set_state(QuestionStates.waiting_for_code)
-        message.text = new_query  # Подменяем текст для обработчика
-        await handle_code_search_with_text(message, state, new_query)
-    else:
-        await state.set_state(QuestionStates.waiting_for_name)
-        message.text = new_query
-        await handle_name_search(message, state)
+# ============================================================================
+# ОБРАБОТКА ОБЩИХ ВОПРОСОВ
+# ============================================================================
 
-async def send_test_info_with_photo(
-    message: Message, test_data: Dict, response_text: str
+async def handle_general_question(
+    message: Message, 
+    state: FSMContext, 
+    question_text: str
 ):
-    """Отправляет информацию о тесте с кнопкой для показа фото контейнеров"""
-    
-    # Собираем все типы контейнеров для проверки
-    raw_container_types = []
-    
-    # Проверяем primary_container_type
-    primary_container = str(test_data.get("primary_container_type", "")).strip()
-    if primary_container and primary_container.lower() not in ["не указан", "нет", "-", "", "none", "null"]:
-        primary_container = primary_container.replace('"', "").replace("\n", " ")
-        primary_container = " ".join(primary_container.split())
-        
-        if "*I*" in primary_container:
-            parts = [ct.strip() for ct in primary_container.split("*I*")]
-            raw_container_types.extend(parts)
-        else:
-            raw_container_types.append(primary_container)
-    
-    # Проверяем обычный container_type
-    container_type_raw = str(test_data.get("container_type", "")).strip()
-    if container_type_raw and container_type_raw.lower() not in ["не указан", "нет", "-", "", "none", "null"]:
-        container_type_raw = container_type_raw.replace('"', "").replace("\n", " ")
-        container_type_raw = " ".join(container_type_raw.split())
-        
-        if "*I*" in container_type_raw:
-            parts = [ct.strip() for ct in container_type_raw.split("*I*")]
-            raw_container_types.extend(parts)
-        else:
-            raw_container_types.append(container_type_raw)
-    
-    # Дедуплицируем контейнеры с нормализацией
-    unique_containers = deduplicate_container_names(raw_container_types)
-    has_containers = len(unique_containers) > 0
-    
-    keyboard = None
-    
-    if has_containers:
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="📷 Показать фото контейнеров",
-                        callback_data=f"show_container_photos:{test_data['test_code']}",
-                    )
-                ]
-            ]
-        )
-    
-    await message.answer(
-        response_text,
-        parse_mode="HTML",
-        disable_web_page_preview=True,
-        reply_markup=keyboard,
-    )
-    return True
-
-
-def create_similar_tests_keyboard(
-    similar_tests: List[Tuple[Document, float]], current_test_code: str = None
-) -> InlineKeyboardMarkup:
-    """Создает компактную inline клавиатуру с похожими тестами."""
-    keyboard = []
-    row = []
-
-    count = 0
-    for doc, score in similar_tests:
-        test_code = doc.metadata.get("test_code", "")
-
-        # Пропускаем текущий тест
-        if current_test_code and test_code == current_test_code:
-            continue
-
-        # Создаем компактную кнопку только с кодом
-        button = InlineKeyboardButton(
-            text=test_code, callback_data=TestCallback.pack("show_test", test_code)
-        )
-
-        row.append(button)
-        count += 1
-
-        # По 4 кнопки в ряд для компактности
-        if len(row) >= 4:
-            keyboard.append(row)
-            row = []
-
-        # Максимум 20 кнопок (5 рядов по 4)
-        if count >= 20:
-            break
-
-    # Добавляем оставшиеся кнопки
-    if row:
-        keyboard.append(row)
-
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-def sanitize_test_code_for_display(test_code: str) -> str:
-    """Обрезает слишком длинные коды тестов для корректного отображения"""
-    if not test_code:
-        return test_code
-    
-    # Специальная обработка для проблемного теста со сканированием
-    if "AN520" in test_code and "," in test_code:
-        # Берем только первый код из списка
-        return "AN520ГИЭ"
-    
-    # Для остальных - если код слишком длинный, обрезаем
-    if len(test_code) > 20:
-        return test_code[:17] + "..."
-    
-    return test_code
-
-def replace_test_codes_with_links(text: str, all_test_codes: set) -> tuple[str, dict]:
     """
-    Заменяет коды тестов в тексте на HTML ссылки.
+    Обработка общих вопросов через LLM
     
-    Args:
-        text: Исходный текст
-        all_test_codes: Множество всех доступных кодов тестов
-    
-    Returns:
-        Tuple[str, Dict]: Текст с маркерами и словарь замен
+    Исправлено:
+    - Проверка на off-topic вопросы
+    - Проверка на неинформативные ответы LLM
+    - Timeout для LLM
+    - Корректная обработка длинных ответов
     """
-    # Находим ВСЕ коды и их позиции
-    all_matches = []
-    
-    patterns = [
-        r'\b[AА][NН]\d+[A-ZА-Я\-]*\b',  # AN116, AN116-X
-        r'\b[A-ZА-Я]+\d+[A-ZА-Я\-]*\b', # ABC123
-        r'\b\d{2,4}[A-ZА-Я]+\b',        # 123ABC
-    ]
-    
-    for pattern in patterns:
-        for match in re.finditer(pattern, text, re.IGNORECASE):
-            found_code = match.group()
-            normalized_code = normalize_test_code(found_code)
-            
-            # Проверяем что код валидный и существует
-            if normalized_code and normalized_code.upper() in all_test_codes:
-                all_matches.append({
-                    'start': match.start(),
-                    'end': match.end(),
-                    'code': found_code,
-                    'normalized': normalized_code
-                })
-    
-    # Удаляем пересекающиеся совпадения (оставляем самые длинные)
-    filtered_matches = []
-    for match in all_matches:
-        overlap = False
-        for other in filtered_matches:
-            # Проверяем пересечение
-            if (match['start'] < other['end'] and match['end'] > other['start']):
-                # Если текущий match короче - пропускаем его
-                if len(match['code']) <= len(other['code']):
-                    overlap = True
-                    break
-                else:
-                    # Если текущий длиннее - удаляем короткий
-                    filtered_matches = [m for m in filtered_matches if m != other]
-        
-        if not overlap:
-            filtered_matches.append(match)
-    
-    # Сортируем по позиции с конца (чтобы не сбивать индексы)
-    filtered_matches.sort(key=lambda x: x['start'], reverse=True)
-    
-    # Заменяем найденные коды на специальные маркеры
-    result = text
-    replacements = {}
-    
-    for i, match in enumerate(filtered_matches):
-        marker = f"__TEST_LINK_{i}__{match['normalized']}__"  # Изменен формат маркера
-        result = result[:match['start']] + marker + result[match['end']:]
-        
-        # Создаем ссылку и проверяем ее валидность
-        link = create_test_link(match['normalized'])
-        
-        # Убеждаемся что ссылка корректная
-        if link and 'https://t.me/' in link:
-            # Экранируем только отображаемый текст, не саму ссылку
-            display_text = html.escape(match["code"])
-            replacements[marker] = f'<a href="{link}">{display_text}</a>'
-        else:
-            # Если ссылка не сгенерировалась - просто текст
-            replacements[marker] = html.escape(match["code"])
-    
-    return result, replacements
-
-async def handle_general_question(message: Message, state: FSMContext, question_text: str):
     user = await db.get_user(message.from_user.id)
     
     loading_msg = await message.answer("🤔 Анализирую вопрос...")
 
     try:
-        # 1. Проверка на релевантность тематике
+        # 1. Проверка на нерелевантность
         if await _is_off_topic_question(question_text):
             await loading_msg.delete()
             
@@ -2117,7 +2411,7 @@ async def handle_general_question(message: Message, state: FSMContext, question_
         relevant_docs = processor.search_test(query=question_text, top_k=70)
         relevant_tests = [doc for doc, score in relevant_docs if score > 0.3]
         
-        # 3. Если нет релевантных тестов и вопрос достаточно сложный - предлагаем звонок
+        # 3. Если нет результатов и вопрос сложный
         question_words = len(question_text.split())
         if not relevant_tests and question_words > 3:
             await loading_msg.delete()
@@ -2135,14 +2429,14 @@ async def handle_general_question(message: Message, state: FSMContext, question_
             )
             return
 
-        # 4. Собираем релевантную информацию (существующий код)
+        # 4. Собираем контекст
         context_info = ""
         all_test_codes = set()
         
         if relevant_tests:
             context_info = "\n\nРЕЛЕВАНТНАЯ ИНФОРМАЦИЯ ДЛЯ ВАШЕГО ВОПРОСА:\n"
             
-            for doc in relevant_tests[:10]:  
+            for doc in relevant_tests[:10]:
                 test_data = doc.metadata
                 test_code = test_data.get('test_code', '')
                 
@@ -2178,69 +2472,68 @@ async def handle_general_question(message: Message, state: FSMContext, question_
                     
                     context_info += "  ─────────────────────────\n"
 
-        # 5. Добавляем общую статистику если нужно
-        if "сколько" in question_text.lower() or "статистик" in question_text.lower():
-            all_docs = processor.search_test(query="", top_k=20)
-            departments = set()
-            
-            for doc, score in all_docs:
-                if dept := doc.metadata.get('department'):
-                    departments.add(dept)
-            
-            context_info += f"\n📊 Общая статистика: {len(departments)} видов исследований\n"
-            
         user_name = get_user_first_name(user)
 
-        # 6. Промпт для LLM
+        # 5. Промпт для LLM
         system_prompt = f"""
-            # Роль: Ассистент ветеринарной лаборатории VetUnion
+# Роль: Ассистент ветеринарной лаборатории VetUnion
 
-            Ты - профессиональный консультант ветеринарной лаборатории, специализирующийся на лабораторной диагностике животных.
+Ты - профессиональный консультант ветеринарной лаборатории, специализирующийся на лабораторной диагностике животных.
 
-            ## Источники информации
-            Контекст: {context_info}
-            В начале общения обращайся к пользователю без приветствия. Его зовут: {user_name}
+## Источники информации
+Контекст: {context_info}
+В начале общения обращайся к пользователю без приветствия. Его зовут: {user_name}
 
-            ## Основные принципы работы
+## Основные принципы работы
 
-            **Точность и безопасность:**
-            - Используй ТОЛЬКО информацию из предоставленного контекста
-            - При недостатке данных честно сообщай об ограничениях
-            - Никогда не давай экстренных медицинских советов - направляй к ветеринару
-            - Не интерпретируй результаты анализов без достаточной информации
+**Точность и безопасность:**
+- Используй ТОЛЬКО информацию из предоставленного контекста
+- При недостатке данных честно сообщай об ограничениях
+- Никогда не давай экстренных медицинских советов - направляй к ветеринару
+- Не интерпретируй результаты анализов без достаточной информации
 
-            **Качество ответов:**
-            - Адаптируй детализацию к сложности вопроса
-            - Используй профессиональную ветеринарную терминологию
-            - Указывай коды тестов при упоминании конкретных исследований
-            - Структурируй информацию логично
-            - Добавляй в ответ много эмодзи по смыслу
+**Качество ответов:**
+- Адаптируй детализацию к сложности вопроса
+- Используй профессиональную ветеринарную терминологию
+- Указывай коды тестов при упоминании конкретных исследований
+- Структурируй информацию логично
+- Добавляй в ответ много эмодзи по смыслу
+
+## Ограничения
+- Не предоставляй информацию, отсутствующую в контексте
+- Не ставь диагнозы и не интерпретируй результаты
+- При критических вопросах направляй к специалисту нашей лаборатории
+- Не давай советы по лечению
+- Не задавай вопросов, старайся разобраться сам
+
+## Важно!
+Если информации в контексте недостаточно для полноценного ответа, 
+честно скажи об этом и предложи обратиться к специалисту.
+"""
+
+        # 6. Отправляем в LLM с timeout
+        try:
+            response = await asyncio.wait_for(
+                llm.agenerate([
+                    [
+                        SystemMessage(content=system_prompt),
+                        HumanMessage(content=question_text),
+                    ]
+                ]),
+                timeout=LLM_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError:
+            await loading_msg.delete()
             
-            ## Ограничения
-            - Не предоставляй информацию, отсутствующую в контексте
-            - Не ставь диагнозы и не интерпретируй результаты
-            - При критических вопросах направляй к специалисту нашей лаборатории
-            - Не давай советы по лечению
-            - Не задавай вопросов, старайся разобраться сам
-
-            ## Важно!
-            Если информации в контексте недостаточно для полноценного ответа, 
-            честно скажи об этом и предложи обратиться к специалисту.
-        """
-
-        # 7. Отправляем в LLM
-        response = await llm.agenerate(
-            [
-                [
-                    SystemMessage(content=system_prompt),
-                    HumanMessage(content=question_text),
-                ]
-            ]
-        )
+            await message.answer(
+                "⏱ Превышено время ожидания ответа. Попробуйте упростить вопрос или обратитесь к специалисту:",
+                reply_markup=_get_callback_support_keyboard(question_text)
+            )
+            return
 
         answer = response.generations[0][0].text.strip()
         
-        # 8. Проверка качества ответа LLM
+        # 7. Проверка качества ответа
         if await _is_unhelpful_answer(answer, question_text):
             await loading_msg.delete()
             
@@ -2257,33 +2550,35 @@ async def handle_general_question(message: Message, state: FSMContext, question_
             )
             return
 
-        # 9. Обработка успешного ответа (существующий код)
-        # Находим все коды тестов и создаем словарь замен
-        code_to_link = {}
-        
-        patterns = [
+        # 8. Обработка успешного ответа
+        # Находим коды тестов и создаем ссылки
+        code_patterns = [
             r'\b[AА][NН]\d+[A-ZА-Я\-]*\b',
             r'\b[A-ZА-Я]+\d+[A-ZА-Я\-]*\b',
             r'\b\d{2,4}[A-ZА-Я]+\b',
         ]
         
         found_codes = set()
-        for pattern in patterns:
+        for pattern in code_patterns:
             for match in re.finditer(pattern, answer, re.IGNORECASE):
                 code = match.group()
                 normalized = normalize_test_code(code)
                 if normalized and normalized.upper() in all_test_codes:
                     found_codes.add((code, normalized))
         
+        # Создаем словарь замен
+        code_to_link = {}
         for original, normalized in found_codes:
             link = create_test_link(normalized)
             if link and 'https://t.me/' in link:
                 code_to_link[original] = f'<a href="{link}">{html.escape(original)}</a>'
         
+        # Обрабатываем форматирование
         processed_text = html.escape(answer)
         processed_text = re.sub(r'\*\*([^\*]+)\*\*', r'<b>\1</b>', processed_text)
         processed_text = re.sub(r'(?<!\*)\*([^\*]+)\*(?!\*)', r'<i>\1</i>', processed_text)
         
+        # Заменяем коды на ссылки (от длинных к коротким)
         sorted_codes = sorted(code_to_link.keys(), key=len, reverse=True)
         for code in sorted_codes:
             escaped_code = html.escape(code)
@@ -2292,7 +2587,7 @@ async def handle_general_question(message: Message, state: FSMContext, question_
         
         await loading_msg.delete()
         
-        # 10. Проверка длины и отправка
+        # 9. Отправка ответа (с разбивкой если длинный)
         if len(processed_text) > 4000:
             parts = []
             current = ""
@@ -2320,7 +2615,7 @@ async def handle_general_question(message: Message, state: FSMContext, question_
                     if i < len(parts) - 1:
                         await asyncio.sleep(0.5)
                 except Exception as e:
-                    print(f"[ERROR] Failed to send part {i+1}: {e}")
+                    logger.error(f"[GENERAL_Q] Failed to send part {i+1}: {e}")
                     clean_part = re.sub(r'<[^>]+>', '', part)
                     await message.answer(clean_part)
         else:
@@ -2331,11 +2626,11 @@ async def handle_general_question(message: Message, state: FSMContext, question_
                     disable_web_page_preview=True
                 )
             except Exception as e:
-                print(f"[ERROR] Failed to send HTML message: {e}")
+                logger.error(f"[GENERAL_Q] Failed to send HTML: {e}")
                 clean_text = re.sub(r'<[^>]+>', '', answer)
                 await message.answer(clean_text, disable_web_page_preview=True)
 
-        # 11. Кнопки для дальнейших действий
+        # 10. Кнопки для дальнейших действий
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
                 [
@@ -2359,10 +2654,7 @@ async def handle_general_question(message: Message, state: FSMContext, question_
         await message.answer("Что бы вы хотели сделать дальше?", reply_markup=keyboard)
 
     except Exception as e:
-        # 12. При ошибках тоже предлагаем звонок
-        print(f"[ERROR] General question handling failed: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"[GENERAL_Q] Failed: {e}", exc_info=True)
         
         await safe_delete_message(loading_msg)
         
@@ -2377,851 +2669,277 @@ async def handle_general_question(message: Message, state: FSMContext, question_
             reply_markup=_get_callback_support_keyboard(question_text)
         )
 
-async def _is_off_topic_question(question: str) -> bool:
-    """Определяет, относится ли вопрос к нерелевантной тематике"""
-    question_lower = question.lower()
-    
-    # Темы, которые НЕ относятся к лабораторной диагностике
-    off_topic_keywords = [
-        # Медицинские вопросы (не ветеринарные)
-        'человек', 'люди', 'доктор', 'больница', 'поликлиника', 'терапевт',
-        # Коммерческие вопросы
-        'цена', 'стоимость', 'купить', 'продать', 'заказ', 'доставка',
-        'оплата', 'прайс', 'сколько стоит', 'тариф', 'услуг', 'заказать',
-        # Административные
-        'график работы', 'часы работы', 'адрес', 'ваканс', 'работа', 
-        'сотрудничество', 'реквизит', 'договор', 'юридическ',
-        # Технические (не по тестам)
-        'сайт', 'приложение', 'техническ', 'баг', 'ошибка', 'сломал',
-        'не работает', 'глюк', 'софт', 'программ',
-        # Общие (не специфичные)
-        'погода', 'новости', 'политика', 'спорт', 'кино', 'музыка',
-        'игра', 'развлечен', 'хобби', 'личное',
-        # Не относящиеся к ветеринарии
-        'растен', 'автомоб', 'ремонт', 'строительств', 'недвижимость'
-    ]
-    
-    # Ветеринарные темы, но не лабораторные
-    non_lab_vet_topics = [
-        'корм', 'питание', 'лечение', 'препарат', 'лекарств', 'таблетк',
-        'операция', 'хирург', 'прививк', 'вакцин', 'усыплен', 'стерилизация',
-        'кастрация', 'диагноз', 'болезнь', 'симптом', 'ветеринар', 'клиник',
-        'осмотр', 'консультация', 'рецепт'
-    ]
-    
-    # Ключевые слова лабораторной диагностики
-    lab_keywords = [
-        'анализ', 'тест', 'лаборатор', 'биоматериал', 'кров', 'моч', 'кал',
-        'исследование', 'проба', 'образец', 'контейнер', 'транспортировка',
-        'хранение', 'преаналитик', 'диагностик', 'лаборатори', 'an', 'ан'
-    ]
-    
-    # Если есть явно нерелевантные темы
-    if any(topic in question_lower for topic in off_topic_keywords):
-        return True
-        
-    # Если есть ветеринарные темы, но не лабораторные
-    if any(topic in question_lower for topic in non_lab_vet_topics):
-        # Проверяем, есть ли контекст лаборатории
-        has_lab_context = any(word in question_lower for word in lab_keywords)
-        return not has_lab_context
-        
-    return False
+# ============================================================================
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ МАРШРУТИЗАЦИИ
+# ============================================================================
 
-async def _is_unhelpful_answer(answer: str, question: str) -> bool:
-    """Определяет, является ли ответ неинформативным"""
-    answer_lower = answer.lower()
-    question_lower = question.lower()
+async def _process_confident_query(
+    message: Message, 
+    state: FSMContext, 
+    query_type: str, 
+    text: str, 
+    metadata: Dict
+):
+    """Обработка запроса с высокой уверенностью классификатора"""
+    user_id = message.from_user.id
+    expanded_query = expand_query_with_abbreviations(text)
     
-    # Ключевые фразы, указывающие на неинформативный ответ
-    unhelpful_phrases = [
-        "не могу найти информацию",
-        "не располагаю данными", 
-        "не имею информации",
-        "не могу ответить",
-        "обратитесь к специалисту",
-        "не уверен в ответе",
-        "не могу дать точный ответ",
-        "информация отсутствует",
-        "не нашел данных",
-        "не могу помочь с этим вопросом",
-        "не входит в мою компетенцию",
-        "не могу предоставить информацию",
-        "ограничен доступом к информации",
-        "не удалось найти ответ",
-        "не знаю как ответить",
-        "не понимаю вопрос",
-        "уточните вопрос",
-        "переформулируйте вопрос"
-    ]
+    # ============================================================
+    # FIX: Улучшенная проверка для общих вопросов с аббревиатурами
+    # ============================================================
     
-    # Если ответ содержит любую из этих фраз
-    if any(phrase in answer_lower for phrase in unhelpful_phrases):
-        return True
+    text_lower = text.lower()
     
-    # Если ответ слишком короткий и содержит отсылку к ограничениям
-    if len(answer.split()) < 25:
-        limitation_words = ['ограничен', 'ограничения', 'контекст', 'специалист', 'уточнить']
-        if any(word in answer_lower for word in limitation_words):
-            return True
+    # Проверяем наличие вопросительных слов
+    has_general_keywords = any(keyword in text_lower for keyword in GENERAL_QUESTION_KEYWORDS)
     
-    # Если ответ состоит в основном из извинений
-    apology_words = ['извините', 'сожалею', 'к сожалению', 'unfortunately']
-    apology_count = sum(1 for word in apology_words if word in answer_lower)
-    if apology_count >= 2 and len(answer.split()) < 40:
-        return True
-        
-    return False
+    # Проверяем наличие ЯВНЫХ кодов тестов (AN123, 1234ABC и т.п.)
+    has_explicit_test_code = bool(re.search(
+        r'\b[AА][NН]\d+[A-ZА-Я\-]*\b|\b\d{2,4}[A-ZА-Я\-]+\b', 
+        text, 
+        re.IGNORECASE
+    ))
+    
+    # Проверяем, является ли это вопросом (начинается с вопросительного слова или содержит '?')
+    is_question = text.strip().endswith('?') or any(
+        text_lower.startswith(q) for q in ['как', 'что', 'где', 'когда', 'почему', 'зачем', 'какой', 'какая', 'какие']
+    )
+    
+    # Определяем, содержит ли запрос ТОЛЬКО аббревиатуру (без контекста)
+    # Убираем вопросительные слова и знаки препинания
+    clean_text = text_lower
+    for keyword in GENERAL_QUESTION_KEYWORDS:
+        clean_text = clean_text.replace(keyword, '')
+    clean_text = re.sub(r'[^\w\s]', '', clean_text).strip()
+    
+    # Если после очистки осталось мало слов - это может быть просто код
+    words_after_cleanup = [w for w in clean_text.split() if len(w) > 1]
+    is_short_query = len(words_after_cleanup) <= 2
+    
+    # ============================================================
+    # ЛОГИКА ПЕРЕОПРЕДЕЛЕНИЯ НА ОБЩИЙ ВОПРОС
+    # ============================================================
+    
+    should_be_general = False
+    
+    # Случай 1: Вопросительные слова + нет явного кода + это вопрос
+    if has_general_keywords and not has_explicit_test_code and is_question:
+        should_be_general = True
+        logger.info(f"[CLASSIFICATION] General question with keywords detected: {text}")
+    
+    # Случай 2: Расширенный запрос сильно отличается от оригинала (аббревиатура была расширена)
+    # И при этом есть контекст вопроса
+    elif expanded_query != text and len(expanded_query) > len(text) * 1.5 and has_general_keywords:
+        should_be_general = True
+        logger.info(f"[CLASSIFICATION] Abbreviation in general question detected: '{text}' -> '{expanded_query}'")
+    
+    # Случай 3: Это НЕ короткий запрос и есть вопросительные слова
+    elif not is_short_query and (has_general_keywords or is_question):
+        should_be_general = True
+        logger.info(f"[CLASSIFICATION] Complex general question detected: {text}")
+    
+    # Применяем переопределение
+    if should_be_general:
+        logger.info(f"[CLASSIFICATION] Overriding '{query_type}' to 'general' for: {text}")
+        await db.add_request_stat(
+            user_id=user_id, request_type="question", request_text=text
+        )
+        await handle_general_question(message, state, expanded_query)
+        return
+    
+    # ============================================================
+    # ОРИГИНАЛЬНАЯ ЛОГИКА ПРОДОЛЖАЕТСЯ
+    # ============================================================
+    
+    # Проверка на профили
+    profile_keywords = ['обс', 'профили', 'профиль', 'комплексы', 'комплекс', 'панели', 'панель']
+    if any(keyword in text.lower() for keyword in profile_keywords):
+        query_type = "profile"
+        logger.info(f"[PROFILE] Detected profile keywords in: {text}")
 
-def _get_callback_support_keyboard(question: str = "") -> InlineKeyboardMarkup:
-    """Создает клавиатуру с кнопкой для заказа звонка"""
-    return InlineKeyboardMarkup(
+    # Маршрутизация
+    if query_type == "code":
+        await state.set_state(QuestionStates.waiting_for_code)
+        await handle_code_search_with_text(message, state, expanded_query)
+    elif query_type in ("name", "profile"):
+        await state.set_state(QuestionStates.waiting_for_name)
+        await handle_name_search_with_text(message, state, expanded_query)
+    else:  # general
+        await db.add_request_stat(
+            user_id=user_id, request_type="question", request_text=text
+        )
+        await handle_general_question(message, state, expanded_query)
+
+
+async def _ask_confirmation(
+    message: Message, 
+    state: FSMContext, 
+    query_type: str, 
+    text: str, 
+    confidence: float
+):
+    """Запрос подтверждения типа поиска"""
+    type_descriptions = {
+        "code": "поиск по коду теста",
+        "name": "поиск по названию теста", 
+        "profile": "поиск профиля тестов",
+        "general": "общий вопрос"
+    }
+
+    confirmation_text = (
+        f"🤔 Я понял ваш запрос как <b>{type_descriptions[query_type]}</b> "
+        f"(уверенность: {confidence:.0%}).\n\n"
+        f"Это правильный тип поиска?"
+    )
+
+    inline_keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="📞 Позвонить специалисту",
-                    callback_data="redirect_to_callback"
-                )
-            ],
-            [
+                    text="✅ Да", 
+                    callback_data="confirm_search:yes"
+                ),
                 InlineKeyboardButton(
-                    text="🔄 Задать другой вопрос",
-                    callback_data="new_search"
+                    text="❌ Нет", 
+                    callback_data="confirm_search:no"
                 )
             ]
         ]
     )
 
-@questions_router.callback_query(F.data == "redirect_to_callback")
-async def handle_redirect_to_callback(callback: CallbackQuery, state: FSMContext):
-    """Перенаправление на заказ звонка через inline кнопку"""
-    await callback.answer()
-    
-    # Просто отправляем пользователя в раздел заказа звонка
-    # Используем существующий обработчик из feedback.py
-    user_id = callback.from_user.id
-    user = await db.get_user(user_id)
-    
-    if not user:
-        await callback.message.answer("Для заказа звонка необходимо пройти регистрацию.\nИспользуйте команду /start")
-        return
-
-    # Получаем страну пользователя
-    country = user['country'] if 'country' in user.keys() else 'BY'
-    await state.update_data(user_country=country)
-    
-    phone_formats = {
-        'BY': "+375 (XX) XXX-XX-XX",
-        'RU': "+7 (XXX) XXX-XX-XX", 
-        'KZ': "+7 (7XX) XXX-XX-XX",
-        'AM': "+374 (XX) XXX-XXX"
-    }
-    
-    format_hint = phone_formats.get(country, phone_formats['BY'])
-    
-    await callback.message.answer(
-        f"📞 Заказ обратного звонка\n\n"
-        f"Пожалуйста, отправьте ваш номер телефона или введите вручную.\n"
-        f"Формат для вашей страны: {format_hint}",
-        reply_markup=get_phone_kb()  # Импортируйте из feedback.py
+    await message.answer(
+        confirmation_text,
+        parse_mode="HTML",
+        reply_markup=inline_keyboard
     )
     
-    # Переходим в состояние ожидания телефона
-    from bot.handlers.feedback import CallbackStates
-    await state.set_state(CallbackStates.waiting_for_phone)
+    await state.set_state(QuestionStates.confirming_search_type)
 
 
-async def handle_code_search_with_text(message: Message, state: FSMContext, search_text: str):
-    """Wrapper для handle_code_search с передачей текста"""
-    # Вызываем основной обработчик, но используем переданный текст
-    await _handle_code_search_internal(message, state, search_text)
-    
-async def cleanup_old_search_results(state: FSMContext, keep_last: int = 3):
-    """Очищает старые результаты поиска из состояния"""
-    data = await state.get_data()
-    search_keys = [k for k in data.keys() if k.startswith("search_results_")]
-    
-    # Если результатов больше, чем нужно хранить
-    if len(search_keys) > keep_last:
-        # Сортируем по времени (ID содержит timestamp)
-        search_keys.sort()
-        
-        # Удаляем старые
-        for key in search_keys[:-keep_last]:
-            await state.update_data(**{key: None})
-
-async def handle_name_search_with_text(message: Message, state: FSMContext, search_text: str):
-    """Wrapper для handle_name_search с передачей текста"""
-    await _handle_name_search_internal(message, state, search_text)
-
-
-# Модифицируем функцию _handle_name_search_internal
-async def _handle_name_search_internal(message: Message, state: FSMContext, search_text: str = None):
-    """Внутренняя функция обработки поиска по имени с inline фильтрацией"""
-    user_id = message.from_user.id
-
-    # Получаем данные из состояния
-    data = await state.get_data()
-    # УБИРАЕМ show_profiles - всегда показываем все результаты
-    original_query = data.get("original_query", message.text if not search_text else search_text)
-
-    # Используем переданный текст или текст из сообщения
-    text = search_text if search_text else message.text.strip()
-
-    # Сохраняем статистику с оригинальным запросом
-    await db.add_request_stat(
-        user_id=user_id, request_type="question", request_text=original_query
+async def _clarify_with_llm(
+    message: Message, 
+    state: FSMContext, 
+    text: str, 
+    initial_type: str, 
+    confidence: float
+):
+    """Уточнение типа поиска через inline кнопки"""
+    clarification_text = (
+        f"🔍 Я не совсем уверен, что вы ищете.\n\n"
+        f"Ваш запрос: <b>{html.escape(text)}</b>\n\n"
+        f"Пожалуйста, выберите тип поиска:"
     )
 
-    gif_msg = None
-    loading_msg = None
-    animation_task = None
-
-    try:
-        # Всегда ищем все результаты
-        search_description = "🔍 Ищу тесты по запросу..."
-
-        if LOADING_GIF_ID:
-            gif_msg = await message.answer_animation(LOADING_GIF_ID, caption="")
-            loading_msg = await message.answer(
-                f"{search_description}\n⏳ Анализирую данные..."
-            )
-            animation_task = asyncio.create_task(animate_loading(loading_msg))
-        else:
-            loading_msg = await message.answer(f"{search_description}")
-
-        processor = DataProcessor()
-        processor.load_vector_store()
-
-        # Ищем по тексту - ВСЕ результаты
-        rag_hits = processor.search_test(text, top_k=80)
-
-        # Универсальный реранж с учетом буквенного запроса/префикса
-        rag_hits = _rerank_hits_by_query(rag_hits, original_query)
-
-        # Фильтрация по животным
-        animal_types = animal_filter.extract_animals_from_query(original_query)
-        if animal_types:
-            print(f"[ANIMAL FILTER] Found animals in query: {animal_types}")
-            rag_hits = animal_filter.filter_tests_by_animals(rag_hits, animal_types)
-            print(f"[ANIMAL FILTER] After filtering: {len(rag_hits)} tests remain")
-
-        if not rag_hits:
-            await db.add_search_history(
-                user_id=user_id,
-                search_query=original_query,
-                search_type="text",
-                success=False
-            )
-
-            # Безопасная очистка
-            if animation_task:
-                animation_task.cancel()
-            await safe_delete_message(loading_msg)
-            await safe_delete_message(gif_msg)
-
-            not_found_msg = f"❌ Тесты по запросу '<b>{html.escape(text)}</b>' не найдены.\n\n"
-            
-            # Добавляем информацию о фильтрации по животным, если она применялась
-            if animal_types:
-                animal_display = animal_filter.get_animal_display_names(animal_types)
-                not_found_msg += f"🐾 <b>Фильтр по животным:</b> {animal_display}\n\n"
-
-            await message.answer(
-                not_found_msg,
-                reply_markup=get_back_to_menu_kb(),
-                parse_mode="HTML"
-            )
-            await state.set_state(QuestionStates.in_dialog)
-            return
-
-        # Выбираем лучшие совпадения
-        selected_docs = await select_best_match(text, rag_hits[:40])
-
-        # Записываем успешный поиск
-        for doc in selected_docs[:1]:
-            await db.add_search_history(
-                user_id=user_id,
-                search_query=original_query,
-                found_test_code=doc.metadata["test_code"],
-                search_type="text",
-                success=True
-            )
-
-            await db.update_user_frequent_test(
-                user_id=user_id,
-                test_code=doc.metadata["test_code"],
-                test_name=doc.metadata["test_name"],
-            )
-
-        # Безопасная очистка
-        if animation_task:
-            animation_task.cancel()
-        await safe_delete_message(loading_msg)
-        await safe_delete_message(gif_msg)
-
-        # Генерируем уникальный ID для этого поиска
-        search_id = hashlib.md5(
-            f"{user_id}_{datetime.now().isoformat()}_{text}".encode()
-        ).hexdigest()[:8]
-        
-        # Сохраняем ВСЕ результаты в состоянии
-        await state.update_data(**{f"search_results_{search_id}": selected_docs})
-        
-        # Очищаем старые результаты
-        await cleanup_old_search_results(state)
-        
-        # Считаем количества для кнопок
-        tests_count = len([doc for doc in selected_docs if not is_profile_test(doc.metadata.get("test_code", ""))])
-        profiles_count = len([doc for doc in selected_docs if is_profile_test(doc.metadata.get("test_code", ""))])
-        total_count = len(selected_docs)
-        
-        # Всегда показываем все результаты сначала
-        display_docs = selected_docs
-        view_name = "результаты"
-        current_view = "all"
-        
-        # Показываем первую страницу результатов
-        keyboard, total_pages, items_shown = create_paginated_keyboard(
-            display_docs,
-            current_page=0,
-            items_per_page=6,
-            search_id=search_id,
-            include_filters=True,
-            tests_count=tests_count,
-            profiles_count=profiles_count,
-            total_count=total_count,
-            current_view=current_view
-        )
-        
-        # Формируем текст для первой страницы
-        total_found = len(display_docs)
-        response = f"🔍 <b>Найдено {total_found} {view_name}</b>"
-        
-        if animal_types:
-            animal_display = animal_filter.get_animal_display_names(animal_types)
-            response += f" <b>(фильтр по животным: {animal_display})</b>"
-            
-        if total_pages > 1:
-            response += f" <b>(страница 1 из {total_pages}):</b>\n\n"
-        else:
-            response += ":\n\n"
-        
-        for i, doc in enumerate(display_docs[:items_shown], 1):
-            test_data = format_test_data(doc.metadata)
-            test_code = sanitize_test_code_for_display(test_data["test_code"])
-            test_name = html.escape(test_data["test_name"])
-            department = html.escape(test_data.get("department", "Не указано"))
-            
-            # Добавляем метку для профилей
-            type_label = "🔬 Профиль" if is_profile_test(test_code) else "🧪 Тест"
-            
-            link = create_test_link(test_code)
-            
-            response += (
-                f"<b>{i}.</b> {type_label}: <a href='{link}'>{test_code}</a>\n"
-                f"📝 {test_name}\n"
-                f"📋 {department}\n\n"
-            )
-        
-        # Добавляем подсказку
-        response += "\n💡 <i>Нажмите на код теста в сообщении выше или выберите из кнопок</i>"
-        
-        # Если страниц больше одной, добавляем информацию о навигации
-        if total_pages > 1:
-            response += f"\n📄 <i>Используйте кнопки навигации для просмотра всех результатов</i>"
-        
-        # Отправляем сообщение с готовой клавиатурой
-        await message.answer(
-            response,
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-            reply_markup=keyboard
-        )
-        
-        # Сохраняем последний найденный тест для контекста
-        if selected_docs:
-            last_test_data = format_test_data(selected_docs[0].metadata)
-            
-            await state.set_state(QuestionStates.in_dialog)
-            
-            await state.update_data(
-                current_test=last_test_data,
-                last_viewed_test=last_test_data["test_code"]
-            )
-            
-            # Показываем клавиатуру для продолжения диалога
-            await message.answer(
-                "Можете задать вопрос об этом тесте или выбрать действие:",
-                reply_markup=get_dialog_kb()
-            )
-
-    except Exception as e:
-        print(f"[ERROR] Name search failed: {e}")
-        import traceback
-        traceback.print_exc()
-
-        if animation_task:
-            animation_task.cancel()
-        await safe_delete_message(loading_msg)
-        await safe_delete_message(gif_msg)
-
-        error_msg = (
-            "❌ Тесты не найдены"
-            if str(e) == "Тесты не найдены"
-            else "⚠️ Ошибка поиска. Попробуйте позже."
-        )
-        await message.answer(error_msg, reply_markup=get_back_to_menu_kb())
-        await state.set_state(QuestionStates.in_dialog)
-
-
-
-@questions_router.callback_query(F.data.startswith("switch_view:"))
-async def handle_switch_view(callback: CallbackQuery, state: FSMContext):
-    """Обработчик переключения между тестами, профилями и всеми результатами"""
-    await callback.answer()
-    
-    parts = callback.data.split(":")
-    view_type = parts[1]  # tests, profiles, all
-    search_id = parts[2] if len(parts) > 2 else ""
-    
-    data = await state.get_data()
-    all_results = data.get(f"search_results_{search_id}", [])
-    
-    if not all_results:
-        await callback.answer("Результаты поиска устарели", show_alert=True)
-        return
-    
-    # Фильтруем результаты согласно выбранному виду
-    if view_type == "tests":
-        filtered_results = [doc for doc in all_results if not is_profile_test(doc.metadata.get("test_code", ""))]
-        view_name = "тесты"
-    elif view_type == "profiles":
-        filtered_results = [doc for doc in all_results if is_profile_test(doc.metadata.get("test_code", ""))]
-        view_name = "профили"
-    else:  # all
-        filtered_results = all_results
-        view_name = "результаты"
-    
-    if not filtered_results:
-        await callback.answer(f"❌ {view_name.capitalize()} не найдены", show_alert=True)
-        return
-    
-    # Считаем количества для кнопок (из всех результатов)
-    tests_count = len([doc for doc in all_results if not is_profile_test(doc.metadata.get("test_code", ""))])
-    profiles_count = len([doc for doc in all_results if is_profile_test(doc.metadata.get("test_code", ""))])
-    total_count = len(all_results)
-    
-    # Показываем первую страницу с отфильтрованными результатами
-    keyboard, total_pages, items_shown = create_paginated_keyboard(
-        filtered_results,  # ПЕРЕДАЕМ ОТФИЛЬТРОВАННЫЕ РЕЗУЛЬТАТЫ
-        current_page=0,    # Всегда начинаем с первой страницы
-        items_per_page=6,
-        search_id=search_id,
-        include_filters=True,
-        tests_count=tests_count,
-        profiles_count=profiles_count,
-        total_count=total_count,
-        current_view=view_type  # ПЕРЕДАЕМ ВЫБРАННЫЙ ВИД
-    )
-    
-    # Формируем ответ
-    total_found = len(filtered_results)
-    response = f"🔍 <b>Найдено {total_found} {view_name}</b>"
-    
-    if total_pages > 1:
-        response += f" <b>(страница 1 из {total_pages}):</b>\n\n"
-    else:
-        response += ":\n\n"
-    
-    for i, doc in enumerate(filtered_results[:items_shown], 1):
-        test_data = format_test_data(doc.metadata)
-        test_code = sanitize_test_code_for_display(test_data["test_code"])
-        test_name = html.escape(test_data["test_name"])
-        department = html.escape(test_data.get("department", "Не указано"))
-        
-        type_label = "🔬 Профиль" if is_profile_test(test_code) else "🧪 Тест"
-        link = create_test_link(test_code)
-        
-        response += (
-            f"<b>{i}.</b> {type_label}: <a href='{link}'>{test_code}</a>\n"
-            f"📝 {test_name}\n"
-            f"📋 {department}\n\n"
-        )
-    
-    response += "\n💡 <i>Нажмите на код теста или выберите из кнопок ниже</i>"
-    
-    try:
-        await callback.message.edit_text(
-            response,
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-            reply_markup=keyboard
-        )
-    except Exception as e:
-        print(f"[ERROR] Failed to switch view: {e}")
-        await callback.answer("Ошибка переключения", show_alert=True)
-
-async def _handle_code_search_internal(message: Message, state: FSMContext, search_text: str = None):
-    """Внутренняя функция обработки поиска по коду БЕЗ фильтрации по типу"""
-    data = await state.get_data()
-    if data.get("is_processing", False):
-        await message.answer(
-            "⏳ Подождите, идет обработка предыдущего запроса...",
-            reply_markup=get_back_to_menu_kb(),
-        )
-        return
-
-    await state.update_data(is_processing=True)
-
-    user_id = message.from_user.id
-
-    # Используем переданный текст или текст из сообщения
-    original_input = search_text if search_text else message.text.strip()
-
-    # Получаем оригинальный запрос из состояния
-    original_query = data.get("original_query", original_input)
-
-    # Сохраняем статистику
-    await db.add_request_stat(
-        user_id=user_id, request_type="question", request_text=original_query
-    )
-
-    gif_msg = None
-    loading_msg = None
-    animation_task = None
-
-    try:
-        current_task = asyncio.current_task()
-        await state.update_data(current_task=current_task)
-
-        try:
-            if LOADING_GIF_ID:
-                gif_msg = await message.answer_animation(LOADING_GIF_ID, caption="")
-        except Exception:
-            gif_msg = None
-
-        # Просто пишем "Ищу по коду" без указания типа
-        loading_msg = await message.answer(
-            f"🔍 Ищу по коду...\n⏳ Анализирую данные..."
-        )
-        if loading_msg:
-            animation_task = asyncio.create_task(animate_loading(loading_msg))
-
-        if current_task and current_task.cancelled():
-            raise asyncio.CancelledError()
-
-        processor = DataProcessor()
-        processor.load_vector_store()
-
-        # Нормализуем входной код
-        normalized_input = normalize_test_code(original_input)
-
-        # Используем умный поиск
-        result, found_variant, match_type = await smart_test_search(
-            processor, original_input
-        )
-
-        # НЕ фильтруем результат по типу - поиск по коду должен находить всё
-
-        if current_task and current_task.cancelled():
-            raise asyncio.CancelledError()
-
-        # Извлекаем животных из запроса для фильтрации (только если не нашли точный результат)
-        animal_types = set()
-        if not result:
-            animal_types = animal_filter.extract_animals_from_query(original_query)
-
-        if not result:
-            # Ищем похожие тесты БЕЗ фильтрации по типу
-            similar_tests = await fuzzy_test_search(
-                processor, normalized_input, threshold=30
-            )
-
-            # НЕ фильтруем по типу профиль/тест
-
-            # Применяем фильтр по животным, если он есть
-            if animal_types:
-                print(f"[ANIMAL FILTER] Found animals in query: {animal_types}")
-                similar_tests = animal_filter.filter_tests_by_animals(similar_tests, animal_types)
-                print(f"[ANIMAL FILTER] After filtering: {len(similar_tests)} tests remain")
-
-            if animation_task:
-                animation_task.cancel()
-            await safe_delete_message(loading_msg)
-            await safe_delete_message(gif_msg)
-
-            await db.add_search_history(
-                user_id=user_id,
-                search_query=original_query,
-                search_type="code",
-                success=False,
-            )
-
-            if similar_tests:
-                # Показываем найденные варианты с пагинацией
-                import hashlib
-                from datetime import datetime
-                
-                search_id = hashlib.md5(
-                    f"{user_id}_{datetime.now().isoformat()}_similar_{normalized_input}".encode()
-                ).hexdigest()[:8]
-                
-                # Сохраняем только Document объекты (без scores)
-                similar_docs = [doc for doc, _ in similar_tests]
-                await state.update_data(**{f"search_results_{search_id}": similar_docs})
-                
-                # Очищаем старые результаты
-                await cleanup_old_search_results(state)
-                
-                # Создаем клавиатуру с пагинацией
-                keyboard, total_pages, items_shown = create_paginated_keyboard(
-                    similar_docs,
-                    current_page=0,
-                    items_per_page=6,
-                    search_id=search_id
+    inline_keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔢 Поиск по коду",
+                    callback_data="clarify_search:code"
                 )
-                
-                response = (
-                    f"❌ Точное совпадение для кода '<code>{normalized_input}</code>' не найдено.\n\n"
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📝 Поиск по названию", 
+                    callback_data="clarify_search:name"
                 )
-                
-                # Добавляем информацию о фильтрации по животным, если она применялась
-                if animal_types:
-                    animal_display = animal_filter.get_animal_display_names(animal_types)
-                    response += f"🐾 <b>Фильтр по животным:</b> {animal_display}\n\n"
-                
-                response += f"🔍 <b>Найдены похожие результаты ({len(similar_tests)} шт.)</b>"
-                
-                if total_pages > 1:
-                    response += f" <b>(страница 1 из {total_pages}):</b>\n\n"
-                else:
-                    response += ":\n\n"
-                
-                # Показываем первые элементы
-                for i, (doc, score) in enumerate(similar_tests[:items_shown], 1):
-                    test_data = format_test_data(doc.metadata)
-                    test_code = sanitize_test_code_for_display(test_data["test_code"])
-                    test_name = html.escape(test_data["test_name"])
-                    
-                    # Добавляем метку типа для информативности
-                    type_label = "🔬 Профиль" if is_profile_test(test_code) else "🧪 Тест"
-                    
-                    link = create_test_link(test_code)
-                    response += (
-                        f"<b>{i}.</b> {type_label}: <a href='{link}'>{test_code}</a> - {test_name}\n"
-                        f"   📊 Схожесть: {score}%\n\n"
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔬 Поиск профиля",
+                    callback_data="clarify_search:profile"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❓ Общий вопрос",
+                    callback_data="clarify_search:general"
+                )
+            ]
+        ]
+    )
+
+    await message.answer(
+        clarification_text,
+        parse_mode="HTML",
+        reply_markup=inline_keyboard
+    )
+    
+    await state.set_state(QuestionStates.clarifying_search)
+
+# ============================================================================
+# ОТПРАВКА ИНФОРМАЦИИ О ТЕСТЕ
+# ============================================================================
+
+async def send_test_info_with_photo(
+    message: Message, 
+    test_data: Dict, 
+    response_text: str
+):
+    """Отправляет информацию о тесте с кнопкой для показа фото контейнеров"""
+    
+    # Собираем все типы контейнеров
+    raw_container_types = []
+    
+    primary_container = str(test_data.get("primary_container_type", "")).strip()
+    if primary_container and primary_container.lower() not in ["не указан", "нет", "-", "", "none", "null"]:
+        primary_container = primary_container.replace('"', "").replace("\n", " ")
+        primary_container = " ".join(primary_container.split())
+        
+        if "*I*" in primary_container:
+            parts = [ct.strip() for ct in primary_container.split("*I*")]
+            raw_container_types.extend(parts)
+        else:
+            raw_container_types.append(primary_container)
+    
+    container_type_raw = str(test_data.get("container_type", "")).strip()
+    if container_type_raw and container_type_raw.lower() not in ["не указан", "нет", "-", "", "none", "null"]:
+        container_type_raw = container_type_raw.replace('"', "").replace("\n", " ")
+        container_type_raw = " ".join(container_type_raw.split())
+        
+        if "*I*" in container_type_raw:
+            parts = [ct.strip() for ct in container_type_raw.split("*I*")]
+            raw_container_types.extend(parts)
+        else:
+            raw_container_types.append(container_type_raw)
+    
+    # Дедуплицируем
+    unique_containers = deduplicate_container_names(raw_container_types)
+    has_containers = len(unique_containers) > 0
+    
+    keyboard = None
+    
+    if has_containers:
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="📷 Показать фото контейнеров",
+                        callback_data=f"show_container_photos:{test_data['test_code']}",
                     )
-                
-                response += "\n💡 <i>Нажмите на код теста или используйте кнопки для выбора</i>"
-                
-                if total_pages > 1:
-                    response += f"\n📄 <i>Используйте навигацию для просмотра всех результатов</i>"
-                
-                await message.answer(
-                    response,
-                    parse_mode="HTML",
-                    disable_web_page_preview=True,
-                    reply_markup=keyboard
-                )
-            else:
-                # Ничего не найдено
-                error_msg = f"❌ Код '{normalized_input}' не найден в базе данных.\n"
-                
-                # Добавляем информацию о фильтрации по животным, если она применялась
-                if animal_types:
-                    animal_display = animal_filter.get_animal_display_names(animal_types)
-                    error_msg += f"🐾 <b>Фильтр по животным:</b> {animal_display}\n\n"
-                    
-                error_msg += "💡 Попробуйте проверить правильность написания кода."
-                    
-                await message.answer(error_msg, reply_markup=get_back_to_menu_kb(), parse_mode="HTML")
-
-            await state.set_state(QuestionStates.in_dialog)
-            # Убираем сброс флагов при поиске по коду
-            await state.update_data(search_text=None)
-            return
-
-        # Найден точный результат - показываем подробную информацию
-        doc = result[0]
-        test_data = format_test_data(doc.metadata)
-
-        # Добавляем информацию о типе
-        type_info = ""
-        if is_profile_test(test_data["test_code"]):
-            type_info = "🔬 <b>Это профиль тестов</b>\n\n"
-
-        response = type_info + format_test_info(test_data)
-
-        # Записываем в историю
-        await db.add_search_history(
-            user_id=user_id,
-            search_query=original_query,
-            found_test_code=test_data["test_code"],
-            search_type="code",
-            success=True,
+                ]
+            ]
         )
+    
+    await message.answer(
+        response_text,
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+        reply_markup=keyboard,
+    )
+    return True
 
-        await db.update_user_frequent_test(
-            user_id=user_id,
-            test_code=test_data["test_code"],
-            test_name=test_data["test_name"],
-        )
-
-        if animation_task:
-            animation_task.cancel()
-        await safe_delete_message(loading_msg)
-        await safe_delete_message(gif_msg)
-
-        # Отправляем информацию с фото
-        await send_test_info_with_photo(message, test_data, response)
-
-        # Обновляем связанные тесты
-        if "last_viewed_test" in data and data["last_viewed_test"] != test_data["test_code"]:
-            await db.update_related_tests(
-                user_id=user_id,
-                test_code_1=data["last_viewed_test"],
-                test_code_2=test_data["test_code"],
-            )
-
-        # Обновляем состояние
-        await state.set_state(QuestionStates.in_dialog)
-        await state.update_data(
-            current_test=test_data,
-            last_viewed_test=test_data["test_code"],
-            # Убираем сброс флагов при поиске по коду
-            search_text=None
-        )
-
-        # Показываем клавиатуру для продолжения диалога
-        await message.answer(
-            "Можете задать вопрос об этом тесте или выбрать действие:",
-            reply_markup=get_dialog_kb()
-        )
-
-    except asyncio.CancelledError:
-        if animation_task:
-            animation_task.cancel()
-        await safe_delete_message(loading_msg)
-        await safe_delete_message(gif_msg)
-        await message.answer("⏹ Поиск остановлен.", reply_markup=get_back_to_menu_kb())
-
-    except Exception as e:
-        print(f"[ERROR] Code search failed: {e}")
-        import traceback
-        traceback.print_exc()
-
-        if animation_task:
-            animation_task.cancel()
-        await safe_delete_message(loading_msg)
-        await safe_delete_message(gif_msg)
-
-        await message.answer(
-            "⚠️ Ошибка при поиске. Попробуйте позже",
-            reply_markup=get_back_to_menu_kb()
-        )
-        await state.set_state(QuestionStates.waiting_for_search_type)
-        await state.update_data(search_text=None)
-
-    finally:
-        await state.update_data(is_processing=False, current_task=None)
-
-async def check_if_needs_new_search(query: str, current_test_data: Dict) -> bool:
-    """Улучшенная проверка - нужен ли новый поиск."""
-
-    if not current_test_data:
-        return True
-
-    query_upper = query.upper().strip()
-    query_lower = query.lower().strip()
-    current_test_code = current_test_data.get("test_code", "").upper()
-    current_test_name = current_test_data.get("test_name", "").lower()
-
-    # Проверяем, не упоминается ли код другого теста
-    # Паттерны для поиска кодов тестов в тексте
-    code_patterns = [
-        r"\b[AА][NН]\d+[А-ЯA-Z]*\b",  # AN с цифрами и возможным суффиксом
-        r"\b\d{1,4}[А-ЯA-Z]+\b",  # Цифры с буквенным суффиксом
-        r"\b[AА][NН]\s*\d+\b",  # AN с пробелом и цифрами
-        r"\bан\s*\d+\b",  # ан в нижнем регистре
-    ]
-
-    for pattern in code_patterns:
-        matches = re.findall(pattern, query_upper, re.IGNORECASE)
-        for match in matches:
-            normalized_match = normalize_test_code(match)
-            if normalized_match != current_test_code:
-                # Найден другой код теста
-                return True
-
-    # Ключевые слова для поиска другого теста
-    search_keywords = [
-        "покажи",
-        "найди",
-        "поиск",
-        "информация о",
-        "что за тест",
-        "расскажи про",
-        "а что насчет",
-        "другой тест",
-        "еще тест",
-        "анализ на",
-        "тест на",
-        "найти тест",
-        "код теста",
-    ]
-
-    # Проверяем наличие ключевых слов поиска
-    for keyword in search_keywords:
-        if keyword in query_lower:
-            # Проверяем, не про текущий ли тест спрашивают
-            if current_test_code.lower() not in query_lower and not any(
-                word in current_test_name for word in query_lower.split()
-            ):
-                return True
-
-    # Проверяем упоминание конкретных типов анализов
-    test_categories = {
-        "биохимия": ["биохим", "алт", "аст", "креатинин", "мочевина", "глюкоза"],
-        "гематология": [
-            "оак",
-            "общий анализ крови",
-            "гемоглобин",
-            "эритроциты",
-            "лейкоциты",
-        ],
-        "гормоны": ["ттг", "т3", "т4", "кортизол", "тестостерон"],
-        "инфекции": ["пцр", "ифа", "антитела", "вирус", "бактерии"],
-        "моча": ["моча", "оам", "общий анализ мочи"],
-    }
-
-    # Определяем категорию текущего теста
-    current_category = None
-    for category, keywords in test_categories.items():
-        for keyword in keywords:
-            if keyword in current_test_name:
-                current_category = category
-                break
-
-    # Проверяем, не спрашивают ли про другую категорию
-    for category, keywords in test_categories.items():
-        if category != current_category:
-            for keyword in keywords:
-                if keyword in query_lower:
-                    return True
-
-    return False
-
+# ============================================================================
+# ЭКСПОРТЫ
+# ============================================================================
 
 __all__ = [
     "questions_router",
     "smart_test_search",
     "format_test_data",
     "format_test_info",
-    # "format_similar_tests_with_links",
     "QuestionStates",
     "get_dialog_kb",
     "create_test_link",
     "normalize_test_code",
 ]
-
