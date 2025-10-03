@@ -39,3 +39,4 @@ openai==1.95.1
 fuzzywuzzy==0.18.0
 xlsxwriter
 psutil
+pymorphy3

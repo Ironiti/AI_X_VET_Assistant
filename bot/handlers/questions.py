@@ -1669,8 +1669,19 @@ async def handle_redirect_to_callback(callback: CallbackQuery, state: FSMContext
         )
         return
 
+    # Сохраняем контекст диалога для возврата
+    data = await state.get_data()
+    current_state = await state.get_state()
+    
     country = user.get('country', 'BY')
-    await state.update_data(user_country=country)
+    
+    # Обновляем данные, сохраняя предыдущий контекст
+    await state.update_data(
+        user_country=country,
+        previous_state=current_state,
+        previous_test_data=data.get('current_test'),
+        return_to_dialog=True  # Флаг для возврата в диалог после callback
+    )
     
     phone_formats = {
         'BY': "+375 (XX) XXX-XX-XX",
@@ -1681,6 +1692,18 @@ async def handle_redirect_to_callback(callback: CallbackQuery, state: FSMContext
     
     format_hint = phone_formats.get(country, phone_formats['BY'])
     
+    # Добавляем кнопку отмены для возврата в диалог
+    cancel_keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="❌ Отменить и вернуться",
+                    callback_data="cancel_callback_return_to_dialog"
+                )
+            ]
+        ]
+    )
+    
     await callback.message.answer(
         f"📞 Заказ обратного звонка\n\n"
         f"Пожалуйста, отправьте ваш номер телефона или введите вручную.\n"
@@ -1688,11 +1711,49 @@ async def handle_redirect_to_callback(callback: CallbackQuery, state: FSMContext
         reply_markup=get_phone_kb()
     )
     
+    # Показываем кнопку отмены
+    await callback.message.answer(
+        "Или нажмите кнопку ниже, чтобы вернуться в диалог:",
+        reply_markup=cancel_keyboard
+    )
+    
     await state.set_state(CallbackStates.waiting_for_phone)
 
 # ============================================================================
 # ПОИСК ПО КОДУ
 # ============================================================================
+
+@questions_router.callback_query(F.data == "cancel_callback_return_to_dialog")
+async def handle_cancel_callback(callback: CallbackQuery, state: FSMContext):
+    """Отмена заказа звонка и возврат в диалог"""
+    await callback.answer("Возвращаемся в диалог")
+    
+    data = await state.get_data()
+    previous_state = data.get('previous_state')
+    current_test = data.get('current_test') or data.get('previous_test_data')
+    
+    # Возвращаем предыдущее состояние
+    if previous_state and previous_state.startswith('QuestionStates:'):
+        await state.set_state(previous_state)
+    else:
+        await state.set_state(QuestionStates.in_dialog)
+    
+    try:
+        await callback.message.edit_text("❌ Заказ звонка отменен")
+    except Exception:
+        await callback.message.answer("❌ Заказ звонка отменен")
+    
+    if current_test:
+        await callback.message.answer(
+            "✅ Продолжаем диалог.\n\n"
+            "Можете задать вопрос об этом тесте или выбрать действие:",
+            reply_markup=get_dialog_kb()
+        )
+    else:
+        await callback.message.answer(
+            "💡 Что бы вы хотели сделать?",
+            reply_markup=get_back_to_menu_kb()
+        )
 
 @questions_router.message(QuestionStates.waiting_for_code)
 async def handle_code_search(message: Message, state: FSMContext):

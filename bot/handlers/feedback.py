@@ -182,6 +182,51 @@ async def process_callback_message(message: Message, state: FSMContext):
     await db.add_request_stat(user_id, "callback_request", f"Телефон: {phone}, Сообщение: {message.text[:100]}...")
     print(f"[INFO] Callback stat saved for user {user_id}")
 
+    if data.get('return_to_dialog'):
+        # Импортируем необходимые модули
+        try:
+            from bot.handlers.questions import QuestionStates
+            from bot.keyboards import get_dialog_kb
+        except ImportError:
+            print(f"[ERROR] Failed to import QuestionStates for user {user_id}")
+            # Если не удалось импортировать, продолжаем обычный flow
+            pass
+        else:
+            previous_state = data.get('previous_state')
+            current_test = data.get('previous_test_data')
+            
+            await message.answer(
+                "✅ Ваша заявка на обратный звонок успешно отправлена!\n\n"
+                f"📞 Телефон: {phone}\n💬 Сообщение: {message.text}\n\n"
+                "Наш специалист свяжется с вами в ближайшее время."
+            )
+            
+            # Восстанавливаем состояние диалога
+            if previous_state and 'QuestionStates' in str(previous_state):
+                await state.set_state(previous_state)
+            else:
+                await state.set_state(QuestionStates.in_dialog)
+            
+            # Восстанавливаем данные теста
+            if current_test:
+                await state.update_data(
+                    current_test=current_test,
+                    last_viewed_test=current_test.get('test_code')
+                )
+                await message.answer(
+                    "Можете задать вопрос об этом тесте или выбрать действие:",
+                    reply_markup=get_dialog_kb()
+                )
+            else:
+                await message.answer(
+                    "Чем еще могу помочь?",
+                    reply_markup=get_dialog_kb()
+                )
+            
+            print(f"[INFO] User {user_id} returned to dialog after callback")
+            return  # ВАЖНО: выходим из функции, не выполняя код ниже
+        
+    # Обычный flow - если не нужно возвращаться в диалог
     user_role = user['role'] if user else 'user'
     await message.answer(
         "✅ Ваша заявка на обратный звонок успешно отправлена!\n\n"
