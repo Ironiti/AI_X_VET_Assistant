@@ -1023,6 +1023,11 @@ async def process_export_choice(message: Message, state: FSMContext):
             excel_data = await exporter.export_callbacks()
             filename = f"callbacks_{filename}"
             caption = "📞 Выгрузка запросов на звонок"
+            
+        elif message.text == "💬 История общения с ботом":
+            excel_data = await exporter.export_chat_history()
+            filename = f"chat_history_{filename}"
+            caption = "💬 История общения с ботом (вопросы и ответы)"
         
         elif message.text == "💡 Только обратная связь":
             excel_data = await exporter.export_feedback()

@@ -1,8 +1,3 @@
-"""
-Обработчики вопросов и поиска тестов
-Исправленная версия с устранением всех критических багов
-"""
-
 from aiogram import Router, F
 from aiogram.types import (
     Message,
@@ -820,6 +815,31 @@ async def handle_universal_search(message: Message, state: FSMContext):
         return
 
     # ============================================================
+    # FIX: ПРИОРИТЕТНАЯ проверка на код теста
+    # ============================================================
+    
+    if is_test_code_pattern(text):
+        logger.info(f"[PRE-CHECK] Test code pattern detected: {text}")
+        expanded_query = expand_query_with_abbreviations(text)
+        
+        await state.update_data(
+            query_classification={
+                "type": "code",
+                "confidence": 1.0,
+                "metadata": {"detected_by": "pattern_match"},
+                "original_query": text
+            }
+        )
+        
+        await db.add_request_stat(
+            user_id=user_id, request_type="code_search", request_text=text
+        )
+        
+        await state.set_state(QuestionStates.waiting_for_code)
+        await handle_code_search_with_text(message, state, expanded_query)
+        return
+
+    # ============================================================
     # FIX: Предварительная проверка на явный общий вопрос
     # ============================================================
     
@@ -832,13 +852,10 @@ async def handle_universal_search(message: Message, state: FSMContext):
         ])
     )
     
-    # Если это явный вопрос И нет кода формата AN123
-    has_explicit_code = bool(re.search(r'\b[AА][NН]\d+\b', text, re.IGNORECASE))
-    
-    if is_obvious_question and not has_explicit_code:
+    # Если это явный вопрос И нет кода теста
+    if is_obvious_question and not is_test_code_pattern(text):
         logger.info(f"[PRE-CHECK] Obvious general question detected: {text}")
         
-        # Сразу обрабатываем как общий вопрос
         expanded_query = expand_query_with_abbreviations(text)
         await db.add_request_stat(
             user_id=user_id, request_type="question", request_text=text
@@ -1180,6 +1197,23 @@ async def handle_show_test_callback(callback: CallbackQuery, state: FSMContext):
 
         # Отправляем информацию
         await send_test_info_with_photo(callback.message, test_data, response)
+        
+        try:
+            # Логируем выбор теста из списка
+            log_response = f"✅ Выбран тест из списка: {test_data['test_code']} - {test_data['test_name']}"
+            
+            await db.log_chat_interaction(
+                user_id=user_id,
+                user_name=callback.from_user.full_name or f"ID{user_id}",
+                question=f"Выбор из списка: {test_code}",
+                bot_response=log_response,
+                request_type='callback_selection',
+                search_success=True,
+                found_test_code=test_data['test_code']
+            )
+            logger.info(f"[LOGGING] Callback selection logged for user {user_id}")
+        except Exception as e:
+            logger.error(f"[LOGGING] Failed to log callback selection: {e}")
 
         # Обновляем состояние
         await state.set_state(QuestionStates.in_dialog)
@@ -1192,6 +1226,34 @@ async def handle_show_test_callback(callback: CallbackQuery, state: FSMContext):
             "Можете задать вопрос об этом тесте или выбрать действие:",
             reply_markup=get_dialog_kb()
         )
+        
+        try:
+            # Формируем список найденных тестов
+            found_tests_list = ", ".join([
+                item['metadata']['test_code'] 
+                for item in simplified_results[:5]
+            ])
+            
+            if total_count > 5:
+                found_tests_list += f" и еще {total_count - 5}"
+            
+            log_response = (
+                f"🔍 Найдено тестов: {total_count}\n"
+                f"📋 Коды: {found_tests_list}"
+            )
+            
+            await db.log_chat_interaction(
+                user_id=user_id,
+                user_name=message.from_user.full_name or f"ID{user_id}",
+                question=original_query,
+                bot_response=log_response,
+                request_type='name_search',
+                search_success=True,
+                found_test_code=simplified_results[0]['metadata']['test_code'] if simplified_results else None
+            )
+            logger.info(f"[LOGGING] Name search logged for user {user_id}")
+        except Exception as e:
+            logger.error(f"[LOGGING] Failed to log name search: {e}")
 
     except Exception as e:
         logger.error(f"[CALLBACK] Failed to show test: {e}", exc_info=True)
@@ -2007,6 +2069,22 @@ async def _handle_code_search_internal(
 
             # Отправляем информацию
             await send_test_info_with_photo(message, test_data, response)
+            
+            try:
+                # Формируем текст ответа для логирования
+                log_response = f"✅ Найден тест: {test_data['test_code']}\n\n{response}"
+                
+                await db.log_chat_interaction(
+                    user_id=user_id,
+                    user_name=message.from_user.full_name or f"ID{user_id}",
+                    question=original_query,
+                    bot_response=log_response,
+                    request_type='code_search',
+                    search_success=True,
+                    found_test_code=test_data['test_code']
+                )
+            except Exception as e:
+                logger.error(f"[LOGGING] Failed to log code search: {e}")
 
             # Связанные тесты
             if "last_viewed_test" in data and data["last_viewed_test"] != test_data["test_code"]:
@@ -2411,6 +2489,21 @@ async def _handle_contextual_question(
         
         await loading_msg.edit_text(answer, parse_mode="HTML")
         await message.answer("Выберите действие:", reply_markup=get_dialog_kb())
+        
+        try:
+            # Логируем каждый вопрос в диалоге
+            await db.log_chat_interaction(
+                user_id=message.from_user.id,
+                user_name=message.from_user.full_name or f"ID{message.from_user.id}",
+                question=question,  # Вопрос пользователя
+                bot_response=answer,  # Ответ LLM (уже очищенный)
+                request_type='dialog',  # Новый тип - вопрос в диалоге
+                search_success=True,
+                found_test_code=test_data.get('test_code') if test_data else None
+            )
+            logger.info(f"[LOGGING] Dialog interaction logged for user {message.from_user.id}")
+        except Exception as e:
+            logger.error(f"[LOGGING] Failed to log dialog interaction: {e}")
 
     except Exception as e:
         logger.error(f"[CONTEXTUAL] Failed: {e}", exc_info=True)
@@ -2713,6 +2806,23 @@ async def handle_general_question(
             ]
         )
         await message.answer("Что бы вы хотели сделать дальше?", reply_markup=keyboard)
+        
+        try:
+            # Извлекаем коды тестов из ответа (если есть)
+            found_codes = list(found_codes) if 'found_codes' in locals() else []
+            primary_test_code = found_codes[0][1] if found_codes else None
+            
+            await db.log_chat_interaction(
+                user_id=message.from_user.id,
+                user_name=message.from_user.full_name or f"ID{message.from_user.id}",
+                question=question_text,
+                bot_response=answer,  # Оригинальный ответ LLM
+                request_type='general',
+                search_success=len(relevant_tests) > 0,
+                found_test_code=primary_test_code
+            )
+        except Exception as e:
+            logger.error(f"[LOGGING] Failed to log general question: {e}")
 
     except Exception as e:
         logger.error(f"[GENERAL_Q] Failed: {e}", exc_info=True)
@@ -2813,7 +2923,7 @@ async def _process_confident_query(
     # ============================================================
     
     # Проверка на профили
-    profile_keywords = ['обс', 'профили', 'профиль', 'комплексы', 'комплекс', 'панели', 'панель']
+    profile_keywords = ['профили', 'профиль', 'комплексы', 'комплекс', 'панели', 'панель']
     if any(keyword in text.lower() for keyword in profile_keywords):
         query_type = "profile"
         logger.info(f"[PROFILE] Detected profile keywords in: {text}")

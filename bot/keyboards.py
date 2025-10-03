@@ -174,6 +174,7 @@ def get_excel_export_kb():
         [KeyboardButton(text="📊 Полная выгрузка")],
         [KeyboardButton(text="👥 Только пользователи")],
         [KeyboardButton(text="❓ Только вопросы")],
+        [KeyboardButton(text="💬 История общения с ботом")],
         [KeyboardButton(text="📞 Только звонки")],
         [KeyboardButton(text="💡 Только обратная связь")],
         [KeyboardButton(text="🔙 Вернуться в главное меню")]

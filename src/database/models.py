@@ -56,6 +56,56 @@ class Database:
             print(f"[ERROR] Failed to get container types: {e}")
             return []
         
+    async def log_chat_interaction(
+        self, 
+        user_id: int, 
+        user_name: str, 
+        question: str, 
+        bot_response: str, 
+        request_type: str = 'question',
+        search_success: bool = True,
+        found_test_code: str = None
+    ):
+        """
+        Сохраняет взаимодействие пользователя с ботом
+        
+        Args:
+            user_id: Telegram ID пользователя
+            user_name: Имя пользователя
+            question: Вопрос пользователя
+            bot_response: Ответ бота
+            request_type: Тип запроса (question/code_search/name_search/general)
+            search_success: Успешность поиска
+            found_test_code: Найденный код теста (если применимо)
+        """
+        try:
+            # Обрезаем слишком длинные ответы
+            if len(bot_response) > 5000:
+                bot_response = bot_response[:4997] + "..."
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    INSERT INTO chat_history 
+                    (user_id, user_name, question, bot_response, request_type, 
+                    search_success, found_test_code, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    user_id, 
+                    user_name, 
+                    question, 
+                    bot_response, 
+                    request_type,
+                    search_success,
+                    found_test_code,
+                    datetime.now()
+                ))
+                
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"[ERROR] Failed to log chat interaction: {e}")
+            return False
+        
     async def update_poll_media(self, poll_id, media_file_id, media_type):
         """Добавление благодарственного медиа к опросу"""
         async with aiosqlite.connect(self.db_path) as db:
@@ -885,17 +935,6 @@ class Database:
     
     async def create_tables(self):
         async with aiosqlite.connect(self.db_path) as db:
-
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS add_faq_history (
-                    id SERIAL PRIMARY KEY,
-                    user_id INTEGER,
-                    faq_id INTEGER,
-                    question TEXT,
-                    viewed_at TIMESTAMP 
-                )
-            ''')
-
             # ПРАВИЛЬНАЯ версия таблицы container_photos
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS container_photos (
@@ -1008,6 +1047,30 @@ class Database:
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+            
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS chat_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    user_name TEXT,
+                    question TEXT NOT NULL,
+                    bot_response TEXT,
+                    request_type TEXT DEFAULT 'question',
+                    search_success BOOLEAN DEFAULT TRUE,
+                    found_test_code TEXT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users (telegram_id)
+                )
+            ''')
+            
+            # Индекс для ускорения запросов к истории
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_chat_history_user_time 
+                ON chat_history(user_id, timestamp DESC)
+            ''')
+            # ============================================================
+            # КОНЕЦ ДОБАВЛЕНИЯ
+            # ============================================================
             
             await db.commit()
     
