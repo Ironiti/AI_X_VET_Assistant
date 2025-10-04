@@ -1220,8 +1220,13 @@ class Database:
     async def get_statistics(self):
         """Получение статистики для администратора"""
         async with aiosqlite.connect(self.db_path) as db:
-            # Статистика пользователей
-            cursor = await db.execute("SELECT user_type, COUNT(*) FROM users GROUP BY user_type")
+            # Статистика пользователей (ИСКЛЮЧАЯ админов)
+            cursor = await db.execute("""
+                SELECT user_type, COUNT(*) 
+                FROM users 
+                WHERE role != 'admin'
+                GROUP BY user_type
+            """)
             type_stats = await cursor.fetchall()
 
             stats = {'total_users': 0, 'clients': 0, 'employees': 0, 'admins': 0}

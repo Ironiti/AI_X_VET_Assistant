@@ -10,7 +10,7 @@ class ExcelExporter:
         self.db_path = db_path
     
     async def export_all_data(self) -> bytes:
-        """Экспорт всех данных в Excel"""
+        """Экспорт всех данных в Excel (БЕЗ администраторов)"""
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             
@@ -42,7 +42,7 @@ class ExcelExporter:
             return output.read()
         
     async def export_chat_history(self) -> bytes:
-        """Экспорт истории общения с ботом (вопросы и ответы)"""
+        """Экспорт истории общения с ботом (БЕЗ администраторов)"""
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             
@@ -84,7 +84,7 @@ class ExcelExporter:
             return output.read()
 
     async def _get_chat_history_dataframe(self, db) -> pd.DataFrame:
-        """Получить DataFrame с историей общения"""
+        """Получить DataFrame с историей общения (БЕЗ администраторов)"""
         cursor = await db.execute('''
             SELECT 
                 ch.id as "ID",
@@ -115,6 +115,7 @@ class ExcelExporter:
                 ch.timestamp as "Дата и время"
             FROM chat_history ch
             LEFT JOIN users u ON ch.user_id = u.telegram_id
+            WHERE u.role != 'admin' OR u.role IS NULL
             ORDER BY ch.timestamp DESC
         ''')
         
@@ -258,7 +259,7 @@ class ExcelExporter:
         return pd.DataFrame(stats)
     
     async def export_users(self) -> bytes:
-        """Экспорт только пользователей"""
+        """Экспорт только пользователей (БЕЗ администраторов)"""
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             
@@ -281,7 +282,7 @@ class ExcelExporter:
             return output.read()
     
     async def export_questions(self) -> bytes:
-        """Экспорт только вопросов"""
+        """Экспорт только вопросов (БЕЗ вопросов от администраторов)"""
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             
@@ -303,7 +304,7 @@ class ExcelExporter:
             return output.read()
     
     async def export_callbacks(self) -> bytes:
-        """Экспорт только запросов на звонок"""
+        """Экспорт только запросов на звонок (БЕЗ запросов от администраторов)"""
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             
@@ -322,7 +323,7 @@ class ExcelExporter:
             return output.read()
     
     async def export_feedback(self) -> bytes:
-        """Экспорт только обратной связи"""
+        """Экспорт только обратной связи (БЕЗ обращений от администраторов)"""
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             
@@ -341,7 +342,7 @@ class ExcelExporter:
             return output.read()
     
     async def _get_users_dataframe(self, db) -> pd.DataFrame:
-        """Получить DataFrame с пользователями для новой структуры БД"""
+        """Получить DataFrame с пользователями (БЕЗ администраторов)"""
         cursor = await db.execute('''
             SELECT 
                 telegram_id as "Telegram ID",
@@ -378,6 +379,7 @@ class ExcelExporter:
                     ELSE 'Неактивен'
                 END as "Статус"
             FROM users
+            WHERE role != 'admin'
             ORDER BY registration_date DESC
         ''')
         
@@ -385,7 +387,7 @@ class ExcelExporter:
         return pd.DataFrame(rows, columns=[desc[0] for desc in cursor.description])
     
     async def _get_questions_dataframe(self, db) -> pd.DataFrame:
-        """Получить DataFrame с вопросами"""
+        """Получить DataFrame с вопросами (БЕЗ вопросов от администраторов)"""
         cursor = await db.execute('''
             SELECT 
                 rs.id as "ID",
@@ -397,6 +399,7 @@ class ExcelExporter:
             FROM request_statistics rs
             LEFT JOIN users u ON rs.user_id = u.telegram_id
             WHERE rs.request_type IN ('question', 'general_question')
+              AND (u.role != 'admin' OR u.role IS NULL)
             ORDER BY rs.timestamp DESC
         ''')
         
@@ -413,7 +416,7 @@ class ExcelExporter:
         return df
     
     async def _get_callbacks_dataframe(self, db) -> pd.DataFrame:
-        """Получить DataFrame с запросами на звонок"""
+        """Получить DataFrame с запросами на звонок (БЕЗ запросов от администраторов)"""
         cursor = await db.execute('''
             SELECT 
                 rs.id as "ID",
@@ -426,6 +429,7 @@ class ExcelExporter:
             FROM request_statistics rs
             LEFT JOIN users u ON rs.user_id = u.telegram_id
             WHERE rs.request_type = 'callback_request'
+              AND (u.role != 'admin' OR u.role IS NULL)
             ORDER BY rs.timestamp DESC
         ''')
         
@@ -444,7 +448,7 @@ class ExcelExporter:
         return df
     
     async def _get_feedback_dataframe(self, db) -> pd.DataFrame:
-        """Получить DataFrame с обратной связью"""
+        """Получить DataFrame с обратной связью (БЕЗ обращений от администраторов)"""
         cursor = await db.execute('''
             SELECT 
                 f.id as "ID",
@@ -465,6 +469,7 @@ class ExcelExporter:
                 END as "Статус"
             FROM feedback f
             LEFT JOIN users u ON f.user_id = u.telegram_id
+            WHERE u.role != 'admin' OR u.role IS NULL
             ORDER BY f.timestamp DESC
         ''')
         

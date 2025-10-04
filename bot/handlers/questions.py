@@ -557,13 +557,13 @@ def create_paginated_keyboard(
         
         keyboard.append(nav_row)
     
-    # Кнопка закрытия
-    keyboard.append([
-        InlineKeyboardButton(
-            text="❌ Закрыть",
-            callback_data="close_keyboard"
-        )
-    ])
+    # # Кнопка закрытия
+    # keyboard.append([
+    #     InlineKeyboardButton(
+    #         text="❌ Закрыть",
+    #         callback_data="close_keyboard"
+    #     )
+    # ])
     
     return InlineKeyboardMarkup(inline_keyboard=keyboard), total_pages, end_idx - start_idx
 
@@ -647,6 +647,28 @@ async def _is_unhelpful_answer(answer: str, question: str) -> bool:
     
     return False
 
+async def _contains_specialist_recommendation(answer: str) -> bool:
+    """Проверяет, содержит ли ответ рекомендацию обратиться к специалисту"""
+    specialist_phrases = {
+        'обратитесь к специалисту',
+        'обратиться к специалисту',
+        'свяжитесь со специалистом',
+        'связаться со специалистом',
+        'позвоните специалисту',
+        'позвонить специалисту',
+        'проконсультируйтесь',
+        'консультация специалиста',
+        'рекомендую обратиться',
+        'рекомендую связаться',
+        'рекомендую позвонить',
+        'обратитесь в лабораторию',
+        'свяжитесь с лабораторией',
+        'направляю к специалисту',
+        'необходима консультация',
+    }
+    
+    answer_lower = answer.lower()
+    return any(phrase in answer_lower for phrase in specialist_phrases)
 
 async def _should_initiate_new_search(
     text: str, 
@@ -696,12 +718,11 @@ async def start_question(message: Message, state: FSMContext):
 
     prompt = f"""Привет, {user_name} 👋
 
-🔬 Я ассистент ветеринарной лаборатории VetUnion и помогу вам найти информацию оff:
+🔬 Я ассистент ветеринарной лаборатории VetUnion и помогу вам найти информацию о:
 
 📋 <b>Лабораторных тестах и анализах:</b>
 • По коду теста (например: AN116, ан116, АН116 или просто 116)
 • По названию или описанию (например: "общий анализ крови", "биохимия")
-• По профилям тестов (например: "профили биохимия")
 
 🧪 <b>Преаналитических требованиях:</b>
 • Подготовка пациента
@@ -712,7 +733,6 @@ async def start_question(message: Message, state: FSMContext):
 💡 <b>Как мне задать вопрос:</b>
 • Введите код теста: <code>AN116</code> или <code>116</code>
 • Опишите, что ищете: "анализ на глюкозу"
-• Для поиска профилей добавьте слово "профили"
 
 Я автоматически определю тип вашего запроса и найду нужную информацию.
 
@@ -746,11 +766,42 @@ async def handle_universal_search(message: Message, state: FSMContext):
         return
 
     # ============================================================
-    # FIX: ПРИОРИТЕТНАЯ проверка на код теста
+    # ПРИОРИТЕТ 1: Проверка на явный общий вопрос
+    # ============================================================
+    
+    text_lower = text.lower()
+    
+    # Проверяем, является ли это явным вопросом
+    is_obvious_question = (
+        text.strip().endswith('?') or 
+        any(text_lower.startswith(q + ' ') or f' {q} ' in text_lower for q in [
+            'как', 'что', 'где', 'когда', 'почему', 'зачем', 
+            'какой', 'какая', 'какие', 'можно ли', 'нужно ли',
+            'должен ли', 'следует ли', 'сколько'
+        ])
+    )
+    
+    # Проверяем наличие вопросительных ключевых слов
+    has_question_keywords = any(keyword in text_lower for keyword in GENERAL_QUESTION_KEYWORDS)
+    
+    # Если это явный вопрос ИЛИ содержит вопросительные слова
+    # то обрабатываем как общий вопрос, ДАЖЕ если там есть код теста
+    if is_obvious_question or has_question_keywords:
+        logger.info(f"[PRE-CHECK] General question with context detected: {text}")
+        
+        expanded_query = expand_query_with_abbreviations(text)
+        await db.add_request_stat(
+            user_id=user_id, request_type="question", request_text=text
+        )
+        await handle_general_question(message, state, expanded_query)
+        return
+    
+    # ============================================================
+    # ПРИОРИТЕТ 2: Проверка на код теста (ТОЛЬКО если нет вопросительного контекста)
     # ============================================================
     
     if is_test_code_pattern(text):
-        logger.info(f"[PRE-CHECK] Test code pattern detected: {text}")
+        logger.info(f"[PRE-CHECK] Pure test code pattern detected: {text}")
         expanded_query = expand_query_with_abbreviations(text)
         
         await state.update_data(
@@ -771,31 +822,7 @@ async def handle_universal_search(message: Message, state: FSMContext):
         return
 
     # ============================================================
-    # FIX: Предварительная проверка на явный общий вопрос
-    # ============================================================
-    
-    text_lower = text.lower()
-    is_obvious_question = (
-        text.strip().endswith('?') or 
-        any(text_lower.startswith(q + ' ') for q in [
-            'как', 'что', 'где', 'когда', 'почему', 'зачем', 
-            'какой', 'какая', 'какие', 'можно ли', 'нужно ли'
-        ])
-    )
-    
-    # Если это явный вопрос И нет кода теста
-    if is_obvious_question and not is_test_code_pattern(text):
-        logger.info(f"[PRE-CHECK] Obvious general question detected: {text}")
-        
-        expanded_query = expand_query_with_abbreviations(text)
-        await db.add_request_stat(
-            user_id=user_id, request_type="question", request_text=text
-        )
-        await handle_general_question(message, state, expanded_query)
-        return
-    
-    # ============================================================
-    # ОРИГИНАЛЬНАЯ ЛОГИКА КЛАССИФИКАЦИИ
+    # ПРИОРИТЕТ 3: Классификация через ML
     # ============================================================
 
     expanded_query = expand_query_with_abbreviations(text)
@@ -1222,7 +1249,7 @@ async def handle_pagination(callback: CallbackQuery, state: FSMContext):
         
         # Показываем score если есть
         if score > 0:
-            response += f"📊 Схожесть: {score}%\n"
+            response += f"📊 Схожесть: {score:.2f}%\n"
         
         response += "\n"
     
@@ -1329,7 +1356,7 @@ async def handle_switch_view(callback: CallbackQuery, state: FSMContext):
         )
         
         if score > 0:
-            response += f"📊 Схожесть: {score}%\n"
+            response += f"📊 Схожесть: {score:.2f}%\n"
         
         response += "\n"
     
@@ -1953,7 +1980,7 @@ async def _handle_code_search_internal(
                         
                         response += (
                             f"<b>{i}.</b> {type_label}: <a href='{link}'>{test_code}</a> - {test_name}\n"
-                            f"   📊 Схожесть: {score}%\n\n"
+                            f"   📊 Схожесть: {score:.2f}%\n\n"
                         )
                     
                     response += "\n💡 <i>Нажмите на код теста или используйте кнопки для выбора</i>"
@@ -2170,7 +2197,7 @@ async def _handle_name_search_internal(
                     reply_markup=get_back_to_menu_kb(),
                     parse_mode="HTML"
                 )
-                await state.set_state(QuestionStates.in_waiting_for_search_typedialog)
+                await state.set_state(QuestionStates.waiting_for_search_type)
                 return
 
             # Выбираем лучшие совпадения
@@ -2468,6 +2495,7 @@ async def handle_general_question(
 - При критических вопросах направляй к специалисту нашей лаборатории
 - Не давай советы по лечению
 - Не задавай вопросов, старайся разобраться сам
+- Если вопрос требует индивидуальной консультации, прямо укажи: "Рекомендую обратиться к специалисту нашей лаборатории"
 
 ## Важно!
 Если информации в контексте недостаточно для полноценного ответа, 
@@ -2599,22 +2627,31 @@ async def handle_general_question(
                 clean_text = re.sub(r'<[^>]+>', '', answer)
                 await message.answer(clean_text, disable_web_page_preview=True)
 
-        # 10. Кнопки для дальнейших действий
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="🔢 Найти тест по коду", 
-                        callback_data="search_by_code"
-                    ),
-                    InlineKeyboardButton(
-                        text="📝 Найти по названию", 
-                        callback_data="search_by_name"
-                    ),
+        # 10. Проверка на рекомендацию обратиться к специалисту
+        if await _contains_specialist_recommendation(answer):
+            # Показываем кнопку заказа звонка
+            await message.answer(
+                "📞 <b>Для получения детальной консультации вы можете заказать звонок специалиста:</b>",
+                parse_mode="HTML",
+                reply_markup=_get_callback_support_keyboard(question_text)
+            )
+        else:
+            # Обычные кнопки для дальнейших действий
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="🔢 Найти тест по коду", 
+                            callback_data="search_by_code"
+                        ),
+                        InlineKeyboardButton(
+                            text="📝 Найти по названию", 
+                            callback_data="search_by_name"
+                        ),
+                    ]
                 ]
-            ]
-        )
-        await message.answer("Что бы вы хотели сделать дальше?", reply_markup=keyboard)
+            )
+            await message.answer("Что бы вы хотели сделать дальше?", reply_markup=keyboard)
         
         try:
             # Извлекаем коды тестов из ответа (если есть)
