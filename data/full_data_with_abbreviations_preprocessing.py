@@ -27,6 +27,7 @@ GENERAL_FILES_ID = {
 ADDITIONAL_FILES_LINKS = {
     "БЕШЕНСТВО_Преаналитические_требования_к_тесту_AN239RAB_и_AN239RABCT": 
     "https://disk.yandex.ru/i/Thne1AF9yvmWlg",
+    "Методическое_пособие_по_гистологии": "https://disk.yandex.ru/i/XQi-S8W8lyyFow"
 }
 
 GENERAL_FILES_LINkS = {

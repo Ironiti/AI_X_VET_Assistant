@@ -136,7 +136,6 @@ class QuestionStates(StatesGroup):
     waiting_for_search_type = State()
     waiting_for_code = State()
     waiting_for_name = State()
-    in_dialog = State()
     processing = State()
     clarifying_search = State()
     confirming_search_type = State()
@@ -658,41 +657,8 @@ async def _should_initiate_new_search(
     query_type: str, 
     confidence: float
 ) -> bool:
-    """
-    Определяет, нужно ли начинать новый поиск
-    
-    Args:
-        text: Текст запроса
-        current_test_data: Данные текущего теста (если есть)
-        query_type: Тип запроса из классификатора
-        confidence: Уверенность классификатора
-    
-    Returns:
-        True если нужен новый поиск, False если вопрос о текущем тесте
-    """
-    if not current_test_data:
-        return True
-    
-    # Высокая уверенность в не-общем запросе
-    if query_type != "general" and confidence > CONFIDENCE_HIGH:
-        return True
-    
-    text_lower = text.lower()
-    
-    # Ключевые слова нового поиска
-    new_search_keywords = {
-        'найди', 'ищи', 'покажи', 'поиск', 'найти',
-        'другой', 'еще', 'следующий', 'иной',
-        'код', 'тест', 'анализ', 'профиль'
-    }
-    
-    has_search_intent = any(keyword in text_lower for keyword in new_search_keywords)
-    
-    # Проверка на другой код теста
-    has_other_code = await _contains_other_test_code(text, current_test_data.get("test_code", ""))
-    
-    return has_search_intent or has_other_code
-
+    """Всегда начинаем новый поиск"""
+    return True  # Всегда True вместо сложной логики
 
 async def _contains_other_test_code(text: str, current_test_code: str) -> bool:
     """Проверяет, содержит ли текст код другого теста"""
@@ -763,45 +729,13 @@ async def start_question(message: Message, state: FSMContext):
 @questions_router.message(F.text == "❌ Завершить диалог")
 async def handle_end_dialog(message: Message, state: FSMContext):
     """Завершение диалога с ботом"""
-    current_state = await state.get_state()
-    user = await db.get_user(message.from_user.id)
-
-    role = "user"
-    if user:
-        try:
-            role = user.get("role", "user") or "user"
-        except (KeyError, TypeError, AttributeError):
-            role = "user"
-
-    user_name = get_user_first_name(user)
-
-    # Если нажали сразу после входа
-    if current_state == QuestionStates.waiting_for_search_type:
-        await state.clear()
-        farewell = get_time_based_farewell(user_name)
-        await message.answer(farewell, reply_markup=get_menu_by_role(role))
-        return
-
-    # Во всех остальных случаях
     await state.clear()
+    user = await db.get_user(message.from_user.id)
+    role = user.get("role", "user") if user else "user"
+    user_name = get_user_first_name(user)
+    
     farewell = get_time_based_farewell(user_name)
     await message.answer(farewell, reply_markup=get_menu_by_role(role))
-
-
-@questions_router.message(F.text == "🔄 Новый вопрос")
-async def handle_new_question_in_dialog(message: Message, state: FSMContext):
-    """Обработчик для новых вопросов в режиме диалога"""
-    data = await state.get_data()
-    last_viewed = data.get("last_viewed_test")
-
-    await message.answer(
-        "💡 Введите код теста (например: AN5) или опишите, что вы ищете:",
-        reply_markup=get_back_to_menu_kb(),
-    )
-
-    await state.set_state(QuestionStates.waiting_for_search_type)
-    if last_viewed:
-        await state.update_data(last_viewed_test=last_viewed)
 
 
 @questions_router.message(QuestionStates.waiting_for_search_type)
@@ -811,7 +745,7 @@ async def handle_universal_search(message: Message, state: FSMContext):
     user_id = message.from_user.id
 
     # Игнорируем служебные кнопки
-    if text in ("🔙 Вернуться в главное меню", "❌ Завершить диалог", "🔄 Новый вопрос"):
+    if text in ("🔙 Вернуться в главное меню", "❌ Завершить диалог"):
         return
 
     # ============================================================
@@ -898,63 +832,6 @@ async def handle_universal_search(message: Message, state: FSMContext):
         await _clarify_with_llm(message, state, expanded_query, query_type, confidence)
 
 
-@questions_router.message(QuestionStates.in_dialog)
-async def handle_dialog(message: Message, state: FSMContext):
-    """Обработчик диалога с текущим тестом"""
-    text = message.text.strip()
-    user_id = message.from_user.id
-
-    if text == "🔄 Новый вопрос":
-        await handle_new_question_in_dialog(message, state)
-        return
-
-    data = await state.get_data()
-    test_data = data.get("current_test")
-
-    expanded_query = expand_query_with_abbreviations(text)
-    
-    # Классификация
-    query_type, confidence, metadata = await ultimate_classifier.classify_with_certainty(expanded_query)
-
-    # Проверка на общий вопрос
-    text_lower = text.lower()
-    has_general_keywords = any(keyword in text_lower for keyword in GENERAL_QUESTION_KEYWORDS)
-    has_test_code = bool(re.search(r'\b[AА][NН]\d+\b|\b\d{2,4}[A-ZА-Я]+\b', text, re.IGNORECASE))
-
-    # Если общий вопрос без кода - контекстный вопрос о текущем тесте
-    if has_general_keywords and not has_test_code and query_type in ["name", "code"]:
-        logger.info(f"[DIALOG] Contextual question: {text}")
-        await _handle_contextual_question(message, state, expanded_query, test_data)
-        return
-
-    # Проверяем, нужен ли новый поиск
-    needs_new_search = await _should_initiate_new_search(
-        expanded_query, test_data, query_type, confidence
-    )
-
-    if needs_new_search:
-        # Сохраняем классификацию
-        await state.update_data(
-            query_classification={
-                "type": query_type,
-                "confidence": confidence,
-                "metadata": metadata,
-                "original_query": text
-            }
-        )
-
-        # Обрабатываем как новый поиск
-        if confidence > CONFIDENCE_HIGH:
-            await _process_confident_query(message, state, query_type, expanded_query, metadata)
-        elif confidence > CONFIDENCE_MEDIUM:
-            await _ask_confirmation(message, state, query_type, expanded_query, confidence)
-        else:
-            await _clarify_with_llm(message, state, expanded_query, query_type, confidence)
-        return
-
-    # Вопрос о текущем тесте
-    await _handle_contextual_question(message, state, expanded_query, test_data)
-
 
 @questions_router.message(QuestionStates.confirming_search_type)
 async def handle_search_confirmation(message: Message, state: FSMContext):
@@ -994,19 +871,11 @@ async def handle_search_clarification(message: Message, state: FSMContext):
 async def handle_new_search(callback: CallbackQuery, state: FSMContext):
     """Начать новый поиск"""
     await callback.answer()
-
-    data = await state.get_data()
-    last_viewed = data.get("last_viewed_test")
-
     await callback.message.answer(
-        "💡 Введите код теста (например: AN5) или опишите, что вы ищете:",
+        "💡 Введите код теста или опишите, что вы ищете:",
         reply_markup=get_back_to_menu_kb(),
     )
-
     await state.set_state(QuestionStates.waiting_for_search_type)
-    if last_viewed:
-        await state.update_data(last_viewed_test=last_viewed)
-
 
 @questions_router.callback_query(F.data == "search_by_code")
 async def handle_search_by_code_callback(callback: CallbackQuery, state: FSMContext):
@@ -1216,15 +1085,11 @@ async def handle_show_test_callback(callback: CallbackQuery, state: FSMContext):
             logger.error(f"[LOGGING] Failed to log callback selection: {e}")
 
         # Обновляем состояние
-        await state.set_state(QuestionStates.in_dialog)
-        await state.update_data(
-            current_test=test_data, 
-            last_viewed_test=test_data["test_code"]
-        )
-
+        user = await db.get_user(callback.from_user.id)
+        user_role = user['role'] if user else 'user'
         await callback.message.answer(
-            "Можете задать вопрос об этом тесте или выбрать действие:",
-            reply_markup=get_dialog_kb()
+            "Выберите следующее действие:",
+            reply_markup=get_menu_by_role(user_role)
         )
         
         try:
@@ -1732,18 +1597,13 @@ async def handle_redirect_to_callback(callback: CallbackQuery, state: FSMContext
         return
 
     # Сохраняем контекст диалога для возврата
-    data = await state.get_data()
-    current_state = await state.get_state()
     
     country = user.get('country', 'BY')
     
     # Обновляем данные, сохраняя предыдущий контекст
     await state.update_data(
         user_country=country,
-        previous_state=current_state,
-        previous_test_data=data.get('current_test'),
-        return_to_dialog=True  # Флаг для возврата в диалог после callback
-    )
+     )
     
     phone_formats = {
         'BY': "+375 (XX) XXX-XX-XX",
@@ -1798,7 +1658,7 @@ async def handle_cancel_callback(callback: CallbackQuery, state: FSMContext):
     if previous_state and previous_state.startswith('QuestionStates:'):
         await state.set_state(previous_state)
     else:
-        await state.set_state(QuestionStates.in_dialog)
+        await state.set_state(QuestionStates.waiting_for_search_type)
     
     try:
         await callback.message.edit_text("❌ Заказ звонка отменен")
@@ -2035,7 +1895,7 @@ async def _handle_code_search_internal(
                         parse_mode="HTML"
                     )
 
-                await state.set_state(QuestionStates.in_dialog)
+                await state.set_state(QuestionStates.waiting_for_search_type)
                 return
 
             # Найден точный результат
@@ -2095,15 +1955,10 @@ async def _handle_code_search_internal(
                 )
 
             # Обновляем состояние
-            await state.set_state(QuestionStates.in_dialog)
-            await state.update_data(
-                current_test=test_data,
-                last_viewed_test=test_data["test_code"]
-            )
-
+            await state.set_state(QuestionStates.waiting_for_search_type)
             await message.answer(
-                "Можете задать вопрос об этом тесте или выбрать действие:",
-                reply_markup=get_dialog_kb()
+                "Готов к новому запросу! Введите код теста или опишите, что ищете:",
+                reply_markup=get_back_to_menu_kb()
             )
 
         except asyncio.CancelledError:
@@ -2227,7 +2082,7 @@ async def _handle_name_search_internal(
                     reply_markup=get_back_to_menu_kb(),
                     parse_mode="HTML"
                 )
-                await state.set_state(QuestionStates.in_dialog)
+                await state.set_state(QuestionStates.in_waiting_for_search_typedialog)
                 return
 
             # Выбираем лучшие совпадения
@@ -2344,24 +2199,11 @@ async def _handle_name_search_internal(
             )
             
             # Сохраняем последний тест
-            if simplified_results:
-                last_metadata = simplified_results[0]['metadata']
-                last_test_data = {
-                    'test_code': last_metadata['test_code'],
-                    'test_name': last_metadata['test_name'],
-                    'department': last_metadata.get('department', '')
-                }
-                
-                await state.set_state(QuestionStates.in_dialog)
-                await state.update_data(
-                    current_test=last_test_data,
-                    last_viewed_test=last_test_data['test_code']
-                )
-                
-                await message.answer(
-                    "Можете задать вопрос об этом тесте или выбрать действие:",
-                    reply_markup=get_dialog_kb()
-                )
+            await state.set_state(QuestionStates.waiting_for_search_type)
+            await message.answer(
+                "Готов к новому запросу! Введите код теста или опишите, что ищете:",
+                reply_markup=get_back_to_menu_kb()
+            )
 
         except Exception as e:
             logger.error(f"[NAME_SEARCH] Failed: {e}", exc_info=True)
@@ -2376,146 +2218,8 @@ async def _handle_name_search_internal(
                 else "⚠️ Ошибка поиска. Попробуйте позже."
             )
             await message.answer(error_msg, reply_markup=get_back_to_menu_kb())
-            await state.set_state(QuestionStates.in_dialog)
+            await state.set_state(QuestionStates.waiting_for_search_type)
 
-# ============================================================================
-# ОБРАБОТКА КОНТЕКСТНЫХ ВОПРОСОВ
-# ============================================================================
-
-async def _handle_contextual_question(
-    message: Message, 
-    state: FSMContext, 
-    question: str, 
-    test_data: Optional[Dict]
-):
-    """
-    Обработка вопроса о текущем тесте через LLM
-    
-    Исправлено:
-    - Добавлен timeout для LLM
-    - Корректная обработка animation_task
-    """
-    if not test_data:
-        await message.answer("Контекст потерян. Задайте новый вопрос.")
-        await state.set_state(QuestionStates.waiting_for_search_type)
-        return
-
-    gif_msg = None
-    loading_msg = None
-    animation_task = None
-
-    try:
-        try:
-            if LOADING_GIF_ID:
-                gif_msg = await message.answer_animation(LOADING_GIF_ID, caption="")
-        except Exception:
-            gif_msg = None
-        
-        loading_msg = await message.answer("Обрабатываю ваш вопрос...")
-        animation_task = asyncio.create_task(animate_loading(loading_msg))
-
-        system_msg = SystemMessage(
-            content=f"""
-Ты - ассистент лаборатории VetUnion и отвечаешь только в области ветеринарии.
-
-Текущий тест:
-Код: {test_data.get('test_code', 'N/A')}
-Название: {test_data.get('test_name', 'N/A')}
-
-ВАЖНОЕ ПРАВИЛО:
-Если пользователь спрашивает про ДРУГОЙ тест или анализ (упоминает другой код, название или тип анализа),
-ты ДОЛЖЕН ответить ТОЧНО так:
-"NEED_NEW_SEARCH: [запрос пользователя]"
-
-Если вопрос касается текущего теста или общего вопроса по ветеринарии, 
-предоставляй всю необходимую информацию с пониманием профессионального сленга.
-"""
-        )
-
-        # FIX #5: Timeout для LLM
-        try:
-            response = await asyncio.wait_for(
-                llm.agenerate([[system_msg, HumanMessage(content=question)]]),
-                timeout=LLM_TIMEOUT_SECONDS
-            )
-        except asyncio.TimeoutError:
-            await safe_cancel_animation(animation_task)
-            await safe_delete_message(loading_msg)
-            await safe_delete_message(gif_msg)
-            
-            await message.answer(
-                "⏱ Превышено время ожидания ответа. Попробуйте переформулировать вопрос.",
-                reply_markup=get_dialog_kb()
-            )
-            return
-
-        answer = response.generations[0][0].text.strip()
-
-        # Проверка на новый поиск
-        if answer.startswith("NEED_NEW_SEARCH:"):
-            await safe_cancel_animation(animation_task)
-            await safe_delete_message(loading_msg)
-            await safe_delete_message(gif_msg)
-
-            search_query = answer.replace("NEED_NEW_SEARCH:", "").strip() or question
-
-            # Классифицируем
-            query_type, confidence, metadata = await ultimate_classifier.classify_with_certainty(
-                search_query
-            )
-
-            await state.update_data(
-                query_classification={
-                    "type": query_type,
-                    "confidence": confidence,
-                    "metadata": metadata,
-                    "original_query": search_query
-                }
-            )
-
-            if confidence > CONFIDENCE_HIGH:
-                await _process_confident_query(message, state, query_type, search_query, metadata)
-            elif confidence > CONFIDENCE_MEDIUM:
-                await _ask_confirmation(message, state, query_type, search_query, confidence)
-            else:
-                await _clarify_with_llm(message, state, search_query, query_type, confidence)
-            return
-
-        # Обычный ответ
-        answer = fix_bold(answer)
-        
-        await safe_cancel_animation(animation_task)
-        await safe_delete_message(gif_msg)
-        
-        await loading_msg.edit_text(answer, parse_mode="HTML")
-        await message.answer("Выберите действие:", reply_markup=get_dialog_kb())
-        
-        try:
-            # Логируем каждый вопрос в диалоге
-            await db.log_chat_interaction(
-                user_id=message.from_user.id,
-                user_name=message.from_user.full_name or f"ID{message.from_user.id}",
-                question=question,  # Вопрос пользователя
-                bot_response=answer,  # Ответ LLM (уже очищенный)
-                request_type='dialog',  # Новый тип - вопрос в диалоге
-                search_success=True,
-                found_test_code=test_data.get('test_code') if test_data else None
-            )
-            logger.info(f"[LOGGING] Dialog interaction logged for user {message.from_user.id}")
-        except Exception as e:
-            logger.error(f"[LOGGING] Failed to log dialog interaction: {e}")
-
-    except Exception as e:
-        logger.error(f"[CONTEXTUAL] Failed: {e}", exc_info=True)
-        
-        await safe_cancel_animation(animation_task)
-        await safe_delete_message(loading_msg)
-        await safe_delete_message(gif_msg)
-
-        await message.answer(
-            "⚠️ Ошибка обработки вопроса. Попробуйте переформулировать.",
-            reply_markup=get_dialog_kb()
-        )
 
 # ============================================================================
 # ОБРАБОТКА ОБЩИХ ВОПРОСОВ
@@ -2537,12 +2241,27 @@ async def handle_general_question(
     """
     user = await db.get_user(message.from_user.id)
     
-    loading_msg = await message.answer("🤔 Анализирую вопрос...")
+
+    if LOADING_GIF_ID:
+        try:
+            gif_msg = await message.answer_animation(LOADING_GIF_ID, caption="")
+        except Exception:
+            gif_msg = None
+        
+        loading_msg = await message.answer(
+            f"🤔 Анализирую вопрос..."
+        )
+        animation_task = asyncio.create_task(animate_loading(loading_msg))
+    else:
+        loading_msg = await message.answer("🤔 Анализирую вопрос...")
 
     try:
         # 1. Проверка на нерелевантность
         if await _is_off_topic_question(question_text):
-            await loading_msg.delete()
+
+            await safe_cancel_animation(animation_task)
+            await safe_delete_message(loading_msg)
+            await safe_delete_message(gif_msg)
             
             await message.answer(
                 f"🔍 <b>Этот вопрос не относится к лабораторной диагностике</b>\n\n"
@@ -2568,7 +2287,9 @@ async def handle_general_question(
         # 3. Если нет результатов и вопрос сложный
         question_words = len(question_text.split())
         if not relevant_tests and question_words > 3:
-            await loading_msg.delete()
+            await safe_cancel_animation(animation_task)
+            await safe_delete_message(loading_msg)
+            await safe_delete_message(gif_msg)
             
             await message.answer(
                 f"🔍 <b>Не нашлось релевантной информации в базе данных</b>\n\n"
@@ -2677,7 +2398,9 @@ async def handle_general_question(
                 timeout=LLM_TIMEOUT_SECONDS
             )
         except asyncio.TimeoutError:
-            await loading_msg.delete()
+            await safe_cancel_animation(animation_task)
+            await safe_delete_message(loading_msg)
+            await safe_delete_message(gif_msg)
             
             await message.answer(
                 "⏱ Превышено время ожидания ответа. Попробуйте упростить вопрос или обратитесь к специалисту:",
@@ -2689,7 +2412,9 @@ async def handle_general_question(
         
         # 7. Проверка качества ответа
         if await _is_unhelpful_answer(answer, question_text):
-            await loading_msg.delete()
+            await safe_cancel_animation(animation_task)
+            await safe_delete_message(loading_msg)
+            await safe_delete_message(gif_msg)
             
             await message.answer(
                 f"🔍 <b>Не удалось найти точный ответ в доступных источниках</b>\n\n"
@@ -2739,7 +2464,9 @@ async def handle_general_question(
             pattern = r'\b' + re.escape(escaped_code) + r'\b'
             processed_text = re.sub(pattern, code_to_link[code], processed_text)
         
-        await loading_msg.delete()
+        await safe_cancel_animation(animation_task)
+        await safe_delete_message(loading_msg)
+        await safe_delete_message(gif_msg)
         
         # 9. Отправка ответа (с разбивкой если длинный)
         if len(processed_text) > 4000:
@@ -2796,12 +2523,6 @@ async def handle_general_question(
                         text="📝 Найти по названию", 
                         callback_data="search_by_name"
                     ),
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="🔄 Новый вопрос",
-                        callback_data="new_search"
-                    )
                 ]
             ]
         )
@@ -2827,7 +2548,9 @@ async def handle_general_question(
     except Exception as e:
         logger.error(f"[GENERAL_Q] Failed: {e}", exc_info=True)
         
+        await safe_cancel_animation(animation_task)
         await safe_delete_message(loading_msg)
+        await safe_delete_message(gif_msg)
         
         await message.answer(
             "⚠️ <b>Произошла техническая ошибка при обработке запроса</b>\n\n"

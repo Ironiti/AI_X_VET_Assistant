@@ -158,14 +158,12 @@ def get_menu_by_role(role: str):
         return get_main_menu_kb()
     
 def get_dialog_kb():
-    """Клавиатура для режима диалога с ботом."""
+    """Простая клавиатура для вопросов"""
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="🔄 Новый вопрос")],
             [KeyboardButton(text="❌ Завершить диалог")]
         ],
-        resize_keyboard=True,
-        one_time_keyboard=False
+        resize_keyboard=True
     )
 
 def get_excel_export_kb():

@@ -179,13 +179,11 @@ async def process_test_request(message: Message, state: FSMContext, test_code: s
             )
             
             # Устанавливаем контекст для диалога
-            await state.set_state(QuestionStates.in_dialog)
-            await state.update_data(current_test=test_data, last_viewed_test=test_data['test_code'])
-            
-            # Показываем клавиатуру диалога
+            user = await db.get_user(user_id)
+            menu_kb = get_admin_menu_kb() if user['role'] == 'admin' else get_main_menu_kb()
             await message.answer(
-                "Можете задать вопрос об этом тесте или выбрать действие:",
-                reply_markup=get_dialog_kb()
+                "Информация о тесте загружена! Выберите следующее действие:",
+                reply_markup=menu_kb
             )
             
             print(f"[INFO] Successfully processed deep link for test {test_code}")
