@@ -57,7 +57,7 @@ from bot.keyboards import (
     get_search_type_switch_kb
 )
 from bot.handlers.utils import normalize_container_name, deduplicate_container_names
-from bot.handlers.feedback import CallbackStates, get_phone_kb
+from bot.handlers.feedback import validate_phone_number, get_phone_kb, format_phone_number, send_callback_email
 
 # ============================================================================
 # КОНСТАНТЫ
@@ -139,6 +139,9 @@ class QuestionStates(StatesGroup):
     processing = State()
     clarifying_search = State()
     confirming_search_type = State()
+    waiting_for_phone = State()
+    waiting_for_message = State()
+
 
 # ============================================================================
 # CALLBACK HELPERS
@@ -1632,7 +1635,99 @@ async def handle_redirect_to_callback(callback: CallbackQuery, state: FSMContext
         reply_markup=cancel_keyboard
     )
     
-    await state.set_state(CallbackStates.waiting_for_phone)
+    await state.set_state(QuestionStates.waiting_for_phone)
+
+
+@questions_router.message(QuestionStates.waiting_for_phone)
+async def process_phone(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+
+    if message.text == "🔙 Вернуться в главное меню":
+        await state.clear()
+        user = await db.get_user(user_id)
+        user_role = user['role'] if user else 'user'
+        await message.answer("Операция отменена.", reply_markup=get_menu_by_role(user_role))
+        return
+
+    data = await state.get_data()
+    country = data.get('user_country', 'BY')
+    phone = ""
+
+    if message.contact:
+        phone = message.contact.phone_number
+        if not phone.startswith('+'):
+            phone = '+' + phone
+    else:
+        phone = message.text
+        if not validate_phone_number(phone, country):
+            phone_examples = {
+                'BY': "375291234567 или +375 29 123-45-67",
+                'RU': "79123456789 или +7 912 345-67-89",
+                'KZ': "77012345678 или +7 701 234-56-78",
+                'AM': "37477123456 или +374 77 123-456"
+            }
+            example = phone_examples.get(country, phone_examples['BY'])
+            
+            await message.answer(
+                f"❌ Неверный формат номера телефона.\n"
+                f"Пожалуйста, введите номер в формате:\n"
+                f"{example}",
+                reply_markup=get_phone_kb()
+            )
+            return
+        
+        phone = format_phone_number(phone, country)
+
+    await state.update_data(phone=phone)
+    await message.answer(
+        "Отлично! Теперь напишите ваше сообщение.\n"
+        "Опишите причину обращения, удобное время для звонка и любую другую важную информацию:",
+        reply_markup=get_back_to_menu_kb()
+    )
+    await state.set_state(QuestionStates.waiting_for_message)
+
+
+@questions_router.message(QuestionStates.waiting_for_message)
+async def process_callback_message(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+
+    if message.text == "🔙 Вернуться в главное меню":
+        await state.clear()
+        user = await db.get_user(user_id)
+        user_role = user['role'] if user else 'user'
+        await message.answer("Операция отменена.", reply_markup=get_dialog_kb())
+        print(f"[INFO] User {user_id} cancelled callback message")
+        return
+
+    data = await state.get_data()
+    phone = data.get('phone')
+    user = await db.get_user(user_id)
+    
+    # Преобразуем Row в словарь
+    user_dict = dict(user) if user else {}
+
+    print(f"[INFO] Sending callback email for user {user_id}")
+    email_sent = await send_callback_email(user_dict, phone, message.text)
+
+    if email_sent:
+        print(f"[INFO] Callback email sent for user {user_id}")
+    else:
+        print(f"[WARN] Callback email failed for user {user_id}, fallback to acceptance message")
+
+    await db.add_request_stat(user_id, "callback_request", f"Телефон: {phone}, Сообщение: {message.text[:100]}...")
+    print(f"[INFO] Callback stat saved for user {user_id}")
+
+    # Обычный flow - если не нужно возвращаться в диалог
+    user_role = user['role'] if user else 'user'
+    await message.answer(
+        "✅ Ваша заявка на обратный звонок успешно отправлена!\n\n"
+        f"📞 Телефон: {phone}\n💬 Сообщение: {message.text}\n\n"
+        "Наш специалист свяжется с вами в ближайшее время.",
+        reply_markup=get_dialog_kb()
+    )
+    await state.set_state(QuestionStates.waiting_for_search_type)
+    print(f"[INFO] State cleared for user {user_id}")
+
 
 # ============================================================================
 # ПОИСК ПО КОДУ
