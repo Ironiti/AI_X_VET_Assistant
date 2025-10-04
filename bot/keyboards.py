@@ -223,7 +223,6 @@ def get_search_type_clarification_kb():
     kb = [
         [KeyboardButton(text="🔢 Поиск по коду теста")],
         [KeyboardButton(text="📝 Поиск по названию")],
-        [KeyboardButton(text="🔬 Поиск профиля тестов")],
         [KeyboardButton(text="❓ Общий вопрос")],
         [KeyboardButton(text="❌ Завершить диалог")]
     ]

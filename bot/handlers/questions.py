@@ -574,12 +574,6 @@ def _get_callback_support_keyboard(question: str = "") -> InlineKeyboardMarkup:
                     text="📞 Позвонить специалисту",
                     callback_data="redirect_to_callback"
                 )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🔄 Задать другой вопрос",
-                    callback_data="new_search"
-                )
             ]
         ]
     )
@@ -846,8 +840,7 @@ async def handle_text_input_during_clarification(message: Message, state: FSMCon
 
     # Служебные кнопки игнорируем
     service_buttons = {
-        "🔢 Поиск по коду теста", "📝 Поиск по названию",
-        "🔬 Поиск профиля тестов", "❓ Общий вопрос", "❌ Завершить диалог"
+        "🔢 Поиск по коду теста", "📝 Поиск по названию", "❓ Общий вопрос", "❌ Завершить диалог"
     }
 
     if text and text not in service_buttons:
