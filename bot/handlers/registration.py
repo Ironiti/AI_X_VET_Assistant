@@ -154,13 +154,6 @@ async def process_test_request(message: Message, state: FSMContext, test_code: s
             # Формируем ответ
             response = format_test_info(test_data)
             
-            # # Находим похожие тесты
-            # similar_tests = await fuzzy_test_search(processor, test_data['test_code'], threshold=40)
-            # similar_tests = [(d, s) for d, s in similar_tests if d.metadata.get('test_code') != test_data['test_code']]
-            
-            # if similar_tests:
-            #     response += format_similar_tests_with_links(similar_tests[:5])
-            
             # Отправляем с фото
             await send_test_info_with_photo(message, test_data, response)
             
@@ -178,12 +171,13 @@ async def process_test_request(message: Message, state: FSMContext, test_code: s
                 test_name=test_data['test_name']
             )
             
-            # Устанавливаем контекст для диалога
-            user = await db.get_user(user_id)
-            menu_kb = get_admin_menu_kb() if user['role'] == 'admin' else get_main_menu_kb()
+            # ============================================
+            # FIX: Используем get_dialog_kb() для режима диалога
+            # ============================================
+            await state.set_state(QuestionStates.waiting_for_search_type)  # Устанавливаем состояние диалога
             await message.answer(
-                "Информация о тесте загружена! Выберите следующее действие:",
-                reply_markup=menu_kb
+                "Готов к новому запросу! Введите код теста или опишите, что ищете:",
+                reply_markup=get_dialog_kb()  # ← ИЗМЕНЕНО с get_main_menu_kb()
             )
             
             print(f"[INFO] Successfully processed deep link for test {test_code}")

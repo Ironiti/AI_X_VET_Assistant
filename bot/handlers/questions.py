@@ -1110,7 +1110,7 @@ async def handle_show_test_callback(callback: CallbackQuery, state: FSMContext):
         await state.set_state(QuestionStates.waiting_for_search_type)
         await callback.message.answer(
             "Готов к новому вопросу! Введите код теста или опишите, что ищете:",
-            reply_markup=get_back_to_menu_kb()
+            reply_markup=get_dialog_kb()
         )
 
     except Exception as e:
@@ -2116,7 +2116,7 @@ async def _handle_code_search_internal(
             await state.set_state(QuestionStates.waiting_for_search_type)
             await message.answer(
                 "Готов к новому запросу! Введите код теста или опишите, что ищете:",
-                reply_markup=get_back_to_menu_kb()
+                reply_markup=get_dialog_kb()
             )
 
         except asyncio.CancelledError:
@@ -2360,7 +2360,7 @@ async def _handle_name_search_internal(
             await state.set_state(QuestionStates.waiting_for_search_type)
             await message.answer(
                 "Готов к новому запросу! Введите код теста или опишите, что ищете:",
-                reply_markup=get_back_to_menu_kb()
+                reply_markup=get_dialog_kb()
             )
 
         except Exception as e:
