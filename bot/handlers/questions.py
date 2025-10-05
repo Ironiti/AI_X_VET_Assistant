@@ -1107,41 +1107,11 @@ async def handle_show_test_callback(callback: CallbackQuery, state: FSMContext):
         except Exception as e:
             logger.error(f"[LOGGING] Failed to log callback selection: {e}")
 
-        # Обновляем состояние
-        user = await db.get_user(callback.from_user.id)
-        user_role = user['role'] if user else 'user'
+        await state.set_state(QuestionStates.waiting_for_search_type)
         await callback.message.answer(
-            "Выберите следующее действие:",
-            reply_markup=get_menu_by_role(user_role)
+            "Готов к новому вопросу! Введите код теста или опишите, что ищете:",
+            reply_markup=get_back_to_menu_kb()
         )
-        
-        try:
-            # Формируем список найденных тестов
-            found_tests_list = ", ".join([
-                item['metadata']['test_code'] 
-                for item in simplified_results[:5]
-            ])
-            
-            if total_count > 5:
-                found_tests_list += f" и еще {total_count - 5}"
-            
-            log_response = (
-                f"🔍 Найдено тестов: {total_count}\n"
-                f"📋 Коды: {found_tests_list}"
-            )
-            
-            await db.log_chat_interaction(
-                user_id=user_id,
-                user_name=message.from_user.full_name or f"ID{user_id}",
-                question=original_query,
-                bot_response=log_response,
-                request_type='name_search',
-                search_success=True,
-                found_test_code=simplified_results[0]['metadata']['test_code'] if simplified_results else None
-            )
-            logger.info(f"[LOGGING] Name search logged for user {user_id}")
-        except Exception as e:
-            logger.error(f"[LOGGING] Failed to log name search: {e}")
 
     except Exception as e:
         logger.error(f"[CALLBACK] Failed to show test: {e}", exc_info=True)
@@ -1376,7 +1346,7 @@ async def handle_switch_view(callback: CallbackQuery, state: FSMContext):
 
 @questions_router.callback_query(F.data.startswith("show_container_photos:"))
 async def handle_show_container_photos_callback(callback: CallbackQuery):
-    """Показать фото контейнеров для теста"""
+    """Обработчик для показа фото контейнеров"""
     await callback.answer()
 
     test_code = callback.data.split(":", 1)[1]
@@ -1393,19 +1363,21 @@ async def handle_show_container_photos_callback(callback: CallbackQuery):
 
         doc = results[0][0] if isinstance(results[0], tuple) else results[0]
         raw_metadata = doc.metadata
+        test_data = format_test_data(doc.metadata)
 
-        # Собираем контейнеры
+        # Собираем все контейнеры
         all_containers = []
         
+        # Функция для разделения контейнеров по "или"
         def split_by_or(container_str: str) -> List[str]:
-            """Разделяет строку по 'или' только между отдельными контейнерами"""
+            """Разделяет строку контейнера по 'или' """
             if " или " in container_str.lower():
-                # Разделяем по "или" только если дальше идет заглавная буква (новый контейнер)
-                parts = re.split(r'\s+или\s+(?=[А-ЯA-Z])', container_str, flags=re.IGNORECASE)
+                # Разделяем по "или" (учитываем разный регистр)
+                parts = re.split(r'\s+или\s+', container_str, flags=re.IGNORECASE)
                 return [part.strip() for part in parts if part.strip()]
             return [container_str]
         
-        # primary_container_type
+        # Парсим primary_container_type
         primary_container = str(raw_metadata.get("primary_container_type", "")).strip()
         if primary_container and primary_container.lower() not in ["не указан", "нет", "-", "", "none", "null"]:
             primary_container = primary_container.replace('"', "").replace("\n", " ")
@@ -1416,10 +1388,11 @@ async def handle_show_container_photos_callback(callback: CallbackQuery):
             else:
                 parts = [primary_container]
             
+            # Обрабатываем "или" в каждой части
             for part in parts:
                 all_containers.extend(split_by_or(part))
         
-        # container_type
+        # Парсим container_type
         container_type_raw = str(raw_metadata.get("container_type", "")).strip()
         if container_type_raw and container_type_raw.lower() not in ["не указан", "нет", "-", "", "none", "null"]:
             container_type_raw = container_type_raw.replace('"', "").replace("\n", " ")
@@ -1430,75 +1403,137 @@ async def handle_show_container_photos_callback(callback: CallbackQuery):
             else:
                 parts = [container_type_raw]
             
+            # Обрабатываем "или" в каждой части
             for part in parts:
                 all_containers.extend(split_by_or(part))
         
-        # Дедупликация
-        unique_containers = deduplicate_container_names(all_containers)
+        # Функция для нормализации контейнера для сравнения дубликатов
+        def normalize_for_comparison(container: str) -> str:
+            """Нормализует контейнер для проверки дубликатов"""
+            norm = container.lower().strip()
+            # Убираем числа в начале (2 пробирки -> пробирки)
+            norm = re.sub(r'^\d+\s+', '', norm)
+            # Заменяем разные варианты написания на единый формат
+            norm = norm.replace(" / ", " ").replace(" + ", " ")
+            # Приводим к единственному числу
+            norm = norm.replace("пробирки", "пробирка")
+            # Убираем множественные пробелы
+            norm = " ".join(norm.split())
+            return norm
+        
+        # Дедупликация с учетом эквивалентности
+        unique_containers = []
+        seen_normalized = set()
+        
+        for container in all_containers:
+            if not container:
+                continue
+                
+            # Для дедупликации используем нормализованную версию
+            normalized = normalize_for_comparison(container)
+            
+            if normalized not in seen_normalized:
+                seen_normalized.add(normalized)
+                unique_containers.append(container)  # Сохраняем оригинальное написание
         
         if not unique_containers:
             await callback.message.answer("❌ Для этого теста не указаны типы контейнеров")
             return
         
-        # Ищем фото
+        # Ищем фото для каждого уникального контейнера
         found_photos = []
         already_shown_file_ids = set()
         not_found_containers = []
         
         for container in unique_containers:
-            photo_data = await db.get_container_photo(container)
+            # Варианты для поиска в БД
+            search_variants = [
+                container,  # Оригинал
+                container.replace(" / ", " + "),  # Меняем / на +
+                container.replace(" + ", " / "),  # Меняем + на /
+            ]
             
-            if not photo_data:
-                photo_data = await find_container_photo_smart(db, container)
+            # Добавляем варианты без чисел
+            container_no_number = re.sub(r'^\d+\s+', '', container)
+            if container_no_number != container:
+                search_variants.extend([
+                    container_no_number,
+                    container_no_number.replace(" / ", " + "),
+                    container_no_number.replace(" + ", " / "),
+                ])
+            
+            # Добавляем варианты с единственным числом
+            if "пробирки" in container.lower():
+                singular = container.replace("пробирки", "пробирка").replace("Пробирки", "Пробирка")
+                search_variants.append(singular)
+                search_variants.append(re.sub(r'^\d+\s+', '', singular))
+            
+            photo_data = None
+            for variant in search_variants:
+                # Сначала точный поиск
+                photo_data = await db.get_container_photo(variant)
+                if photo_data:
+                    break
+                    
+                # Если не нашли - умный поиск
+                if not photo_data:
+                    photo_data = await find_container_photo_smart(db, variant)
+                    if photo_data:
+                        break
             
             if photo_data:
                 file_id = photo_data.get("file_id")
                 
+                # Проверяем дубликаты по file_id
                 if file_id not in already_shown_file_ids:
                     already_shown_file_ids.add(file_id)
                     found_photos.append({
-                        "container_type": container,
+                        "container_type": container,  # Используем оригинальное название
                         "file_id": file_id,
                         "description": photo_data.get("description")
                     })
             else:
+                # Сохраняем контейнеры, для которых не нашли фото
                 not_found_containers.append(container)
         
-        # Отправляем фото
+        # Отправляем найденные фото
         if found_photos:
             if len(found_photos) == 1:
                 # Одно фото
                 photo_info = found_photos[0]
                 container_name = html.escape(photo_info['container_type'])
                 caption = f"📦 Контейнер: {container_name}"
-                
                 if photo_info.get('description'):
                     description = html.escape(photo_info['description'])
                     caption += f"\n📝 {description}"
                 
                 hide_keyboard = InlineKeyboardMarkup(
-                    inline_keyboard=[[
-                        InlineKeyboardButton(
-                            text="🙈 Скрыть фото",
-                            callback_data=f"hide_single:{test_code}",
-                        )
-                    ]]
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="🙈 Скрыть фото",
+                                callback_data=f"hide_single:{test_code}",
+                            )
+                        ]
+                    ]
                 )
                 
                 await callback.message.answer_photo(
                     photo=photo_info['file_id'],
                     caption=caption,
-                    parse_mode="HTML",
                     reply_markup=hide_keyboard
                 )
             else:
-                # Несколько фото
+                # Несколько фото - отправляем каждое отдельно
                 sent_messages = []
                 
                 for i, photo_info in enumerate(found_photos):
                     container_name = html.escape(photo_info['container_type'])
+                    
+                    # Только название контейнера как подпись
                     caption = f"📦 {container_name}"
                     
+                    # Отправляем каждое фото отдельно без кнопок
                     sent_msg = await callback.message.answer_photo(
                         photo=photo_info['file_id'],
                         caption=caption,
@@ -1506,19 +1541,23 @@ async def handle_show_container_photos_callback(callback: CallbackQuery):
                     )
                     sent_messages.append(sent_msg)
                     
+                    # Небольшая задержка между отправками для избежания спама
                     if i < len(found_photos) - 1:
                         await asyncio.sleep(0.3)
                 
-                # Кнопка "Скрыть все"
-                message_ids_str = ",".join(str(msg.message_id) for msg in sent_messages)
+                # Отправляем общую кнопку для скрытия всех фото
+                message_ids = [msg.message_id for msg in sent_messages]
+                message_ids_str = ",".join(map(str, message_ids))
                 
                 hide_keyboard = InlineKeyboardMarkup(
-                    inline_keyboard=[[
-                        InlineKeyboardButton(
-                            text="🙈 Скрыть все фото",
-                            callback_data=f"hide_multiple:{message_ids_str}",
-                        )
-                    ]]
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="🙈 Скрыть все фото",
+                                callback_data=f"hide_multiple:{message_ids_str}",
+                            )
+                        ]
+                    ]
                 )
                 
                 await callback.message.answer(
@@ -1526,7 +1565,7 @@ async def handle_show_container_photos_callback(callback: CallbackQuery):
                     reply_markup=hide_keyboard
                 )
             
-            # Если есть контейнеры без фото
+            # Если есть контейнеры без фото, сообщаем об этом
             if not_found_containers:
                 not_found_msg = "\n⚠️ Не найдены фото для:\n"
                 for ct in not_found_containers[:5]:
@@ -1535,9 +1574,11 @@ async def handle_show_container_photos_callback(callback: CallbackQuery):
                     not_found_msg += f"... и еще {len(not_found_containers) - 5}"
                 
                 await callback.message.answer(not_found_msg)
+                
         else:
-            # Все не найдены
-            not_found_msg = "❌ Фото контейнеров не найдены в базе\n\n🔍 Искали типы:\n"
+            # Все контейнеры не найдены
+            not_found_msg = "❌ Фото контейнеров не найдены в базе\n\n"
+            not_found_msg += "🔍 Искали типы:\n"
             for ct in unique_containers[:10]:
                 not_found_msg += f"• {ct}\n"
             if len(unique_containers) > 10:
@@ -1546,7 +1587,9 @@ async def handle_show_container_photos_callback(callback: CallbackQuery):
             await callback.message.answer(not_found_msg)
 
     except Exception as e:
-        logger.error(f"[CONTAINER_PHOTOS] Failed: {e}", exc_info=True)
+        print(f"[ERROR] Failed to show container photos: {e}")
+        import traceback
+        traceback.print_exc()
         await callback.message.answer("❌ Ошибка при загрузке фото")
 
 
