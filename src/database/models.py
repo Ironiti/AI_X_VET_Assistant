@@ -1069,6 +1069,147 @@ class Database:
                 ON chat_history(user_id, timestamp DESC)
             ''')
             # ============================================================
+            # МЕТРИКИ СИСТЕМЫ
+            # ============================================================
+            
+            # Таблица для метрик производительности бота
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS bot_metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    metric_date DATE NOT NULL,
+                    total_requests INTEGER DEFAULT 0,
+                    successful_requests INTEGER DEFAULT 0,
+                    failed_requests INTEGER DEFAULT 0,
+                    avg_response_time REAL DEFAULT 0,
+                    max_response_time REAL DEFAULT 0,
+                    min_response_time REAL DEFAULT 0,
+                    unique_users INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(metric_date)
+                )
+            ''')
+            
+            # Таблица для детальных метрик запросов
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS request_metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    request_type TEXT,
+                    query_text TEXT,
+                    response_time REAL,
+                    success BOOLEAN DEFAULT TRUE,
+                    relevance_score REAL,
+                    has_answer BOOLEAN DEFAULT TRUE,
+                    error_message TEXT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(telegram_id)
+                )
+            ''')
+            
+            # Индексы для ускорения запросов метрик
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_bot_metrics_date
+                ON bot_metrics(metric_date DESC)
+            ''')
+            
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_request_metrics_timestamp
+                ON request_metrics(timestamp DESC)
+            ''')
+            
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_request_metrics_user
+                ON request_metrics(user_id, timestamp DESC)
+            ''')
+            
+            # ============================================================
+            # РАСШИРЕННЫЕ МЕТРИКИ
+            # ============================================================
+            
+            # Таблица для отслеживания активных пользователей (DAU)
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS user_activity (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    activity_date DATE NOT NULL,
+                    request_count INTEGER DEFAULT 0,
+                    session_count INTEGER DEFAULT 0,
+                    total_time_spent REAL DEFAULT 0,
+                    last_activity TIMESTAMP,
+                    UNIQUE(user_id, activity_date),
+                    FOREIGN KEY (user_id) REFERENCES users(telegram_id)
+                )
+            ''')
+            
+            # Таблица для сессий пользователей
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS user_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    session_start TIMESTAMP NOT NULL,
+                    session_end TIMESTAMP,
+                    request_count INTEGER DEFAULT 0,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    FOREIGN KEY (user_id) REFERENCES users(telegram_id)
+                )
+            ''')
+            
+            # Таблица для системных метрик
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS system_metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    metric_date DATE NOT NULL,
+                    uptime_seconds INTEGER DEFAULT 0,
+                    cpu_usage REAL DEFAULT 0,
+                    memory_usage REAL DEFAULT 0,
+                    disk_usage REAL DEFAULT 0,
+                    active_sessions INTEGER DEFAULT 0,
+                    error_count INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(metric_date)
+                )
+            ''')
+            
+            # Таблица для метрик качества ответов
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS quality_metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    metric_date DATE NOT NULL,
+                    total_queries INTEGER DEFAULT 0,
+                    correct_answers INTEGER DEFAULT 0,
+                    incorrect_answers INTEGER DEFAULT 0,
+                    no_answer INTEGER DEFAULT 0,
+                    code_search_count INTEGER DEFAULT 0,
+                    name_search_count INTEGER DEFAULT 0,
+                    general_question_count INTEGER DEFAULT 0,
+                    avg_user_satisfaction REAL DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(metric_date)
+                )
+            ''')
+            
+            # Индексы для новых таблиц
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_user_activity_date
+                ON user_activity(activity_date DESC, user_id)
+            ''')
+            
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_user_sessions_user
+                ON user_sessions(user_id, session_start DESC)
+            ''')
+            
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_system_metrics_date
+                ON system_metrics(metric_date DESC)
+            ''')
+            
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_quality_metrics_date
+                ON quality_metrics(metric_date DESC)
+            ''')
+            
+            # ============================================================
             # КОНЕЦ ДОБАВЛЕНИЯ
             # ============================================================
             
@@ -1430,5 +1571,616 @@ class Database:
         except Exception as e:
             print(f"[ERROR] Failed to search test by code: {e}")
             return None
+    # ============================================================
+    # МЕТОДЫ ДЛЯ РАБОТЫ С МЕТРИКАМИ
+    # ============================================================
+    
+    async def log_request_metric(
+        self,
+        user_id: int,
+        request_type: str,
+        query_text: str,
+        response_time: float,
+        success: bool = True,
+        relevance_score: float = None,
+        has_answer: bool = True,
+        error_message: str = None
+    ):
+        """Логирует метрику запроса"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    INSERT INTO request_metrics 
+                    (user_id, request_type, query_text, response_time, success, 
+                     relevance_score, has_answer, error_message, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    user_id, request_type, query_text[:500], response_time, success,
+                    relevance_score, has_answer, error_message, datetime.now()
+                ))
+                await db.commit()
+        except Exception as e:
+            print(f"[ERROR] Failed to log request metric: {e}")
+    
+    async def update_daily_metrics(self):
+        """Обновляет ежедневные метрики"""
+        try:
+            today = datetime.now().date()
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                # Получаем статистику за сегодня
+                cursor = await db.execute('''
+                    SELECT 
+                        COUNT(*) as total,
+                        SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as successful,
+                        SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) as failed,
+                        AVG(response_time) as avg_time,
+                        MAX(response_time) as max_time,
+                        MIN(response_time) as min_time,
+                        COUNT(DISTINCT user_id) as unique_users
+                    FROM request_metrics
+                    WHERE DATE(timestamp) = ?
+                ''', (today,))
+                
+                stats = await cursor.fetchone()
+                
+                if stats and stats[0] > 0:
+                    await db.execute('''
+                        INSERT OR REPLACE INTO bot_metrics
+                        (metric_date, total_requests, successful_requests, failed_requests,
+                         avg_response_time, max_response_time, min_response_time, unique_users)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (today, stats[0], stats[1] or 0, stats[2] or 0, stats[3] or 0, 
+                          stats[4] or 0, stats[5] or 0, stats[6] or 0))
+                    
+                    await db.commit()
+        except Exception as e:
+            print(f"[ERROR] Failed to update daily metrics: {e}")
+    
+    async def get_metrics_summary(self, days: int = 7):
+        """Получает сводку метрик за период"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                start_date = datetime.now() - timedelta(days=days)
+                
+                # Общая статистика НАПРЯМУЮ из request_metrics
+                cursor = await db.execute('''
+                    SELECT
+                        COUNT(*) as total_requests,
+                        SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as successful_requests,
+                        SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) as failed_requests,
+                        COALESCE(AVG(response_time), 0) as avg_response_time,
+                        COALESCE(MAX(response_time), 0) as max_response_time,
+                        COUNT(DISTINCT user_id) as total_unique_users
+                    FROM request_metrics
+                    WHERE timestamp >= ?
+                ''', (start_date,))
+                
+                overall = await cursor.fetchone()
+                
+                # Средняя активность в день (уникальных пользователей)
+                cursor_daily = await db.execute('''
+                    SELECT COUNT(DISTINCT user_id) as daily_users, DATE(timestamp) as metric_date
+                    FROM request_metrics
+                    WHERE timestamp >= ?
+                    GROUP BY DATE(timestamp)
+                ''', (start_date,))
+                
+                daily_users = await cursor_daily.fetchall()
+                avg_daily_users = sum(row[0] for row in daily_users) / len(daily_users) if daily_users else 0
+                
+                # Добавляем avg_daily_users к overall
+                overall_dict = dict(overall) if overall else {}
+                overall_dict['avg_daily_users'] = avg_daily_users
+                
+                # Статистика по типам запросов
+                cursor = await db.execute('''
+                    SELECT
+                        request_type,
+                        COUNT(*) as count,
+                        COALESCE(AVG(response_time), 0) as avg_time,
+                        SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as successful,
+                        SUM(CASE WHEN has_answer = 0 THEN 1 ELSE 0 END) as no_answer,
+                        COALESCE(AVG(CASE WHEN relevance_score IS NOT NULL THEN relevance_score ELSE 0 END), 0) as avg_relevance
+                    FROM request_metrics
+                    WHERE DATE(timestamp) >= ?
+                    GROUP BY request_type
+                ''', (start_date,))
+                
+                by_type = await cursor.fetchall()
+                
+                # Топ пользователей
+                cursor = await db.execute('''
+                    SELECT
+                        u.name,
+                        u.user_type,
+                        u.client_code,
+                        COUNT(rm.id) as request_count,
+                        COALESCE(AVG(rm.response_time), 0) as avg_time,
+                        SUM(CASE WHEN rm.success = 1 THEN 1 ELSE 0 END) as successful
+                    FROM request_metrics rm
+                    JOIN users u ON rm.user_id = u.telegram_id
+                    WHERE DATE(rm.timestamp) >= ? AND u.role != 'admin'
+                    GROUP BY rm.user_id
+                    ORDER BY request_count DESC
+                    LIMIT 10
+                ''', (start_date,))
+                
+                top_users = await cursor.fetchall()
+                
+                return {
+                    'overall': overall_dict,
+                    'by_type': [dict(row) for row in by_type],
+                    'top_users': [dict(row) for row in top_users],
+                    'period_days': days
+                }
+        except Exception as e:
+            print(f"[ERROR] Failed to get metrics summary: {e}")
+            return None
+    
+    async def get_detailed_metrics(self, start_date: datetime = None, end_date: datetime = None):
+        """Получает детальные метрики для экспорта"""
+        try:
+            if not start_date:
+                start_date = datetime.now() - timedelta(days=30)
+            if not end_date:
+                end_date = datetime.now()
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                # Детальная информация по запросам
+                cursor = await db.execute('''
+                    SELECT 
+                        rm.*,
+                        u.name as user_name,
+                        u.user_type,
+                        u.client_code
+                    FROM request_metrics rm
+                    LEFT JOIN users u ON rm.user_id = u.telegram_id
+                    WHERE rm.timestamp BETWEEN ? AND ?
+                      AND (u.role != 'admin' OR u.role IS NULL)
+                    ORDER BY rm.timestamp DESC
+                ''', (start_date, end_date))
+                
+                requests = await cursor.fetchall()
+                
+                # Дневная статистика
+                cursor = await db.execute('''
+                    SELECT * FROM bot_metrics
+                    WHERE metric_date BETWEEN DATE(?) AND DATE(?)
+                    ORDER BY metric_date DESC
+                ''', (start_date, end_date))
+                
+                daily_stats = await cursor.fetchall()
+                
+                return {
+                    'requests': [dict(row) for row in requests],
+                    'daily_stats': [dict(row) for row in daily_stats],
+                    'start_date': start_date,
+                    'end_date': end_date
+                }
+        except Exception as e:
+            print(f"[ERROR] Failed to get detailed metrics: {e}")
+            return None
+    
+    async def get_user_metrics(self, user_id: int, days: int = 30):
+        """Получает метрики конкретного пользователя"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                start_date = datetime.now() - timedelta(days=days)
+                
+                cursor = await db.execute('''
+                    SELECT 
+                        COUNT(*) as total_requests,
+                        SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as successful_requests,
+                        AVG(response_time) as avg_response_time,
+                        SUM(CASE WHEN has_answer = 0 THEN 1 ELSE 0 END) as no_answer_count,
+                        AVG(CASE WHEN relevance_score IS NOT NULL THEN relevance_score ELSE 0 END) as avg_relevance
+                    FROM request_metrics
+                    WHERE user_id = ? AND timestamp >= ?
+                ''', (user_id, start_date))
+                
+                stats = await cursor.fetchone()
+                
+                # Последние запросы
+                cursor = await db.execute('''
+                    SELECT 
+                        request_type,
+                        query_text,
+                        response_time,
+                        success,
+                        has_answer,
+                        timestamp
+                    FROM request_metrics
+                    WHERE user_id = ?
+                    ORDER BY timestamp DESC
+                    LIMIT 10
+                ''', (user_id,))
+                
+                recent = await cursor.fetchall()
+                
+                return {
+                    'stats': dict(stats) if stats else {},
+                    'recent_requests': [dict(row) for row in recent]
+                }
+        except Exception as e:
+            print(f"[ERROR] Failed to get user metrics: {e}")
+            return None
+
+    # ============================================================
+    # МЕТОДЫ ДЛЯ РАСШИРЕННЫХ МЕТРИК
+    # ============================================================
+    
+    async def track_user_activity(self, user_id: int):
+        """Отслеживает активность пользователя за день"""
+        try:
+            today = datetime.now().date()
+            current_time = datetime.now()
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                # Обновляем или создаем запись активности
+                await db.execute('''
+                    INSERT INTO user_activity 
+                    (user_id, activity_date, request_count, last_activity)
+                    VALUES (?, ?, 1, ?)
+                    ON CONFLICT(user_id, activity_date) DO UPDATE SET
+                        request_count = request_count + 1,
+                        last_activity = excluded.last_activity
+                ''', (user_id, today, current_time))
+                
+                await db.commit()
+        except Exception as e:
+            print(f"[ERROR] Failed to track user activity: {e}")
+    
+    async def start_user_session(self, user_id: int) -> int:
+        """Начинает новую сессию пользователя"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute('''
+                    INSERT INTO user_sessions 
+                    (user_id, session_start, is_active)
+                    VALUES (?, ?, TRUE)
+                ''', (user_id, datetime.now()))
+                
+                session_id = cursor.lastrowid
+                await db.commit()
+                return session_id
+        except Exception as e:
+            print(f"[ERROR] Failed to start session: {e}")
+            return None
+    
+    async def end_user_session(self, session_id: int):
+        """Завершает сессию пользователя"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    UPDATE user_sessions
+                    SET session_end = ?, is_active = FALSE
+                    WHERE id = ? AND is_active = TRUE
+                ''', (datetime.now(), session_id))
+                
+                await db.commit()
+        except Exception as e:
+            print(f"[ERROR] Failed to end session: {e}")
+    
+    async def update_session_activity(self, user_id: int):
+        """Обновляет активность в текущей сессии или создает новую"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # Ищем активную сессию (последняя активность < 3 часов назад)
+                three_hours_ago = datetime.now() - timedelta(hours=3)
+                
+                cursor = await db.execute('''
+                    SELECT id, session_start FROM user_sessions
+                    WHERE user_id = ? AND is_active = TRUE
+                    AND session_start > ?
+                    ORDER BY session_start DESC
+                    LIMIT 1
+                ''', (user_id, three_hours_ago))
+                
+                session = await cursor.fetchone()
+                
+                if session:
+                    # Обновляем существующую сессию
+                    await db.execute('''
+                        UPDATE user_sessions
+                        SET request_count = request_count + 1
+                        WHERE id = ?
+                    ''', (session[0],))
+                else:
+                    # Завершаем старые сессии и создаем новую
+                    await db.execute('''
+                        UPDATE user_sessions
+                        SET is_active = FALSE, session_end = ?
+                        WHERE user_id = ? AND is_active = TRUE
+                    ''', (datetime.now(), user_id))
+                    
+                    await db.execute('''
+                        INSERT INTO user_sessions 
+                        (user_id, session_start, request_count, is_active)
+                        VALUES (?, ?, 1, TRUE)
+                    ''', (user_id, datetime.now()))
+                
+                await db.commit()
+        except Exception as e:
+            print(f"[ERROR] Failed to update session: {e}")
+    
+    async def get_dau_metrics(self, days: int = 30):
+        """Получает метрики Daily Active Users"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                start_date = datetime.now() - timedelta(days=days)
+                
+                cursor = await db.execute('''
+                    SELECT 
+                        activity_date,
+                        COUNT(DISTINCT user_id) as dau,
+                        SUM(request_count) as total_requests,
+                        AVG(request_count) as avg_requests_per_user
+                    FROM user_activity
+                    WHERE activity_date >= DATE(?)
+                    GROUP BY activity_date
+                    ORDER BY activity_date DESC
+                ''', (start_date,))
+                
+                return [dict(row) for row in await cursor.fetchall()]
+        except Exception as e:
+            print(f"[ERROR] Failed to get DAU metrics: {e}")
+            return []
+    
+    async def get_retention_metrics(self):
+        """Получает метрики возвратности пользователей (1, 7, 30 дней)"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                today = datetime.now().date()
+                
+                # Пользователи активные сегодня
+                cursor = await db.execute('''
+                    SELECT COUNT(DISTINCT user_id) as today_users
+                    FROM user_activity
+                    WHERE activity_date = ?
+                ''', (today,))
+                today_users = (await cursor.fetchone())['today_users']
+                
+                # Возвратность за 1 день
+                yesterday = today - timedelta(days=1)
+                cursor = await db.execute('''
+                    SELECT COUNT(DISTINCT ua1.user_id) as returned
+                    FROM user_activity ua1
+                    WHERE ua1.activity_date = ?
+                    AND EXISTS (
+                        SELECT 1 FROM user_activity ua2
+                        WHERE ua2.user_id = ua1.user_id
+                        AND ua2.activity_date = ?
+                    )
+                ''', (today, yesterday))
+                returned_1d = (await cursor.fetchone())['returned']
+                
+                # Возвратность за 7 дней
+                week_ago = today - timedelta(days=7)
+                cursor = await db.execute('''
+                    SELECT COUNT(DISTINCT ua1.user_id) as returned
+                    FROM user_activity ua1
+                    WHERE ua1.activity_date = ?
+                    AND EXISTS (
+                        SELECT 1 FROM user_activity ua2
+                        WHERE ua2.user_id = ua1.user_id
+                        AND ua2.activity_date BETWEEN ? AND ?
+                    )
+                ''', (today, week_ago, yesterday))
+                returned_7d = (await cursor.fetchone())['returned']
+                
+                # Возвратность за 30 дней
+                month_ago = today - timedelta(days=30)
+                cursor = await db.execute('''
+                    SELECT COUNT(DISTINCT ua1.user_id) as returned
+                    FROM user_activity ua1
+                    WHERE ua1.activity_date = ?
+                    AND EXISTS (
+                        SELECT 1 FROM user_activity ua2
+                        WHERE ua2.user_id = ua1.user_id
+                        AND ua2.activity_date BETWEEN ? AND ?
+                    )
+                ''', (today, month_ago, yesterday))
+                returned_30d = (await cursor.fetchone())['returned']
+                
+                cursor = await db.execute('''
+                    SELECT COUNT(DISTINCT user_id) as yesterday_users
+                    FROM user_activity
+                    WHERE activity_date = ?
+                ''', (yesterday,))
+                yesterday_users = (await cursor.fetchone())['yesterday_users']
+                
+                return {
+                    'today_users': today_users,
+                    'retention_1d': (returned_1d / yesterday_users * 100) if yesterday_users > 0 else 0,
+                    'retention_7d': (returned_7d / today_users * 100) if today_users > 0 else 0,
+                    'retention_30d': (returned_30d / today_users * 100) if today_users > 0 else 0,
+                    'returned_1d': returned_1d,
+                    'returned_7d': returned_7d,
+                    'returned_30d': returned_30d
+                }
+        except Exception as e:
+            print(f"[ERROR] Failed to get retention metrics: {e}")
+            return None
+    
+    async def get_session_metrics(self, days: int = 7):
+        """Получает метрики по сессиям"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                start_date = datetime.now() - timedelta(days=days)
+                
+                cursor = await db.execute('''
+                    SELECT
+                        COUNT(*) as total_sessions,
+                        AVG(CAST((julianday(session_end) - julianday(session_start)) * 24 * 60 AS REAL)) as avg_duration_minutes,
+                        AVG(request_count) as avg_requests_per_session,
+                        COUNT(DISTINCT user_id) as unique_users
+                    FROM user_sessions
+                    WHERE session_start >= ?
+                    AND session_end IS NOT NULL
+                ''', (start_date,))
+                
+                return dict(await cursor.fetchone())
+        except Exception as e:
+            print(f"[ERROR] Failed to get session metrics: {e}")
+            return None
+    
+    async def update_system_metrics(self):
+        """Обновляет системные метрики"""
+        try:
+            import psutil
+            
+            today = datetime.now().date()
+            
+            # Получаем системные показатели
+            cpu = psutil.cpu_percent(interval=1)
+            memory = psutil.virtual_memory().percent
+            disk = psutil.disk_usage('/').percent
+            
+            # Подсчитываем активные сессии
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute('''
+                    SELECT COUNT(*) FROM user_sessions
+                    WHERE is_active = TRUE
+                ''')
+                active_sessions = (await cursor.fetchone())[0]
+                
+                # Подсчитываем ошибки за сегодня
+                cursor = await db.execute('''
+                    SELECT COUNT(*) FROM request_metrics
+                    WHERE DATE(timestamp) = ? AND success = FALSE
+                ''', (today,))
+                error_count = (await cursor.fetchone())[0]
+                
+                # Сохраняем метрики
+                await db.execute('''
+                    INSERT OR REPLACE INTO system_metrics
+                    (metric_date, cpu_usage, memory_usage, disk_usage,
+                     active_sessions, error_count, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (today, cpu, memory, disk, active_sessions, error_count, datetime.now()))
+                
+                await db.commit()
+        except Exception as e:
+            print(f"[ERROR] Failed to update system metrics: {e}")
+    
+    async def update_quality_metrics(self):
+        """Обновляет метрики качества работы бота"""
+        try:
+            today = datetime.now().date()
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                # Подсчитываем метрики за сегодня
+                cursor = await db.execute('''
+                    SELECT
+                        COUNT(*) as total,
+                        SUM(CASE WHEN success = TRUE AND has_answer = TRUE THEN 1 ELSE 0 END) as correct,
+                        SUM(CASE WHEN success = FALSE THEN 1 ELSE 0 END) as incorrect,
+                        SUM(CASE WHEN has_answer = FALSE THEN 1 ELSE 0 END) as no_answer,
+                        SUM(CASE WHEN request_type = 'code_search' THEN 1 ELSE 0 END) as code_search,
+                        SUM(CASE WHEN request_type = 'name_search' THEN 1 ELSE 0 END) as name_search,
+                        SUM(CASE WHEN request_type = 'general' THEN 1 ELSE 0 END) as general_question
+                    FROM request_metrics
+                    WHERE DATE(timestamp) = ?
+                ''', (today,))
+                
+                stats = await cursor.fetchone()
+                
+                if stats and stats[0] > 0:
+                    await db.execute('''
+                        INSERT OR REPLACE INTO quality_metrics
+                        (metric_date, total_queries, correct_answers, incorrect_answers,
+                         no_answer, code_search_count, name_search_count,
+                         general_question_count, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (today, stats[0], stats[1], stats[2], stats[3],
+                          stats[4], stats[5], stats[6], datetime.now()))
+                    
+                    await db.commit()
+        except Exception as e:
+            print(f"[ERROR] Failed to update quality metrics: {e}")
+    
+    async def get_quality_metrics_summary(self, days: int = 7):
+        """Получает сводку по метрикам качества"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                start_date = datetime.now().date() - timedelta(days=days)
+                
+                cursor = await db.execute('''
+                    SELECT
+                        SUM(total_queries) as total,
+                        SUM(correct_answers) as correct,
+                        SUM(incorrect_answers) as incorrect,
+                        SUM(no_answer) as no_answer,
+                        SUM(code_search_count) as code_searches,
+                        SUM(name_search_count) as name_searches,
+                        SUM(general_question_count) as general_questions
+                    FROM quality_metrics
+                    WHERE metric_date >= ?
+                ''', (start_date,))
+                
+                result = dict(await cursor.fetchone())
+                
+                # Вычисляем проценты
+                total = result['total'] or 1
+                result['correct_percentage'] = (result['correct'] / total * 100) if total > 0 else 0
+                result['incorrect_percentage'] = (result['incorrect'] / total * 100) if total > 0 else 0
+                result['no_answer_percentage'] = (result['no_answer'] / total * 100) if total > 0 else 0
+                
+                return result
+        except Exception as e:
+            print(f"[ERROR] Failed to get quality metrics summary: {e}")
+            return None
+    
+    async def get_comprehensive_metrics(self, days: int = 7):
+        """Получает полную сводку всех метрик для админа"""
+        try:
+            return {
+                'client_metrics': {
+                    'dau': await self.get_dau_metrics(days),
+                    'retention': await self.get_retention_metrics(),
+                    'sessions': await self.get_session_metrics(days)
+                },
+                'technical_metrics': {
+                    'response_time': await self.get_metrics_summary(days),
+                    'system': await self._get_latest_system_metrics()
+                },
+                'quality_metrics': await self.get_quality_metrics_summary(days),
+                'period_days': days
+            }
+        except Exception as e:
+            print(f"[ERROR] Failed to get comprehensive metrics: {e}")
+            return None
+    
+    async def _get_latest_system_metrics(self):
+        """Получает последние системные метрики"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                cursor = await db.execute('''
+                    SELECT * FROM system_metrics
+                    ORDER BY metric_date DESC
+                    LIMIT 7
+                ''')
+                
+                return [dict(row) for row in await cursor.fetchall()]
+        except Exception as e:
+            print(f"[ERROR] Failed to get latest system metrics: {e}")
+            return []
     
         

@@ -12,6 +12,8 @@ from bot.handlers.admin import admin_router
 from bot.handlers.help import help_router
 from bot.handlers.utils import gif_router, file_router
 from bot.handlers.faq_handler import faq_router
+from bot.handlers.metrics_handler import metrics_router
+from bot.middleware.metrics_middleware import MetricsMiddleware
 # from .questions import questions_router, questions_callbacks_router
 from config import BOT_API_KEY
 
@@ -19,10 +21,14 @@ if not BOT_API_KEY:
     raise RuntimeError('BOT_API_KEY not found.')
 
 bot = Bot(
-    token=BOT_API_KEY, 
+    token=BOT_API_KEY,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
 )
 dp = Dispatcher(storage=MemoryStorage())
+
+# Подключаем middleware для метрик
+dp.message.middleware(MetricsMiddleware())
+
 dp.include_router(registration_router)
 # dp.include_router(questions_callbacks_router)
 dp.include_router(feedback_router)
@@ -30,6 +36,7 @@ dp.include_router(poll_callback_router)
 dp.include_router(activation_router)
 dp.include_router(questions_router)
 dp.include_router(admin_router)
+dp.include_router(metrics_router)
 dp.include_router(help_router)
 dp.include_router(gif_router)
 dp.include_router(faq_router)

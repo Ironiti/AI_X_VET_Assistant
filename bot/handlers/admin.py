@@ -6,11 +6,12 @@ from aiogram.types import Message, BufferedInputFile, ReplyKeyboardMarkup, Keybo
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from bot.keyboards import (
-    get_cancel_kb, get_admin_menu_kb, get_main_menu_kb, 
+    get_cancel_kb, get_admin_menu_kb, get_main_menu_kb,
     get_excel_export_kb, get_broadcast_type_kb, get_system_management_kb, get_back_to_menu_kb
 )
 from utils.excel_exporter import ExcelExporter
 from utils.csv_exporter import CSVExporter
+from utils.metrics_exporter import MetricsExporter
 from datetime import datetime
 import asyncio
 
@@ -1729,4 +1730,51 @@ async def handle_system_management(message: Message, state: FSMContext):
         await message.answer(
             "Выберите действие из меню:",
             reply_markup=get_system_management_kb()
+        )
+
+@admin_router.message(F.text == "📈 Экспорт метрик")
+async def export_metrics(message: Message):
+    """Экспорт метрик в Excel"""
+    user_id = message.from_user.id
+    
+    user = await db.get_user(user_id)
+    if not user or user['role'] != 'admin':
+        await message.answer("У вас нет доступа к этой функции.")
+        return
+    
+    loading_msg = await message.answer("⏳ Формирую отчет по метрикам...")
+    
+    try:
+        # Обновляем все метрики перед экспортом
+        await db.update_daily_metrics()
+        await db.update_quality_metrics()
+        await db.update_system_metrics()
+        
+        exporter = MetricsExporter(db)
+        excel_data = await exporter.export_comprehensive_metrics(days=30)
+        
+        filename = f"metrics_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        
+        await loading_msg.delete()
+        await message.answer_document(
+            BufferedInputFile(excel_data, filename),
+            caption=(
+                "📊 <b>Полный отчет по метрикам системы</b>\n\n"
+                "Включает:\n"
+                "• Клиентские метрики (DAU, retention, сессии)\n"
+                "• Технические метрики (производительность, ресурсы)\n"
+                "• Метрики качества (успешность, типы запросов)\n"
+                "• Детальные данные по запросам\n\n"
+                f"📅 Период: последние 30 дней\n"
+                f"🕐 Сформирован: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+            ),
+            parse_mode="HTML",
+            reply_markup=get_admin_menu_kb()
+        )
+        
+    except Exception as e:
+        await loading_msg.delete()
+        await message.answer(
+            f"❌ Ошибка при экспорте метрик: {str(e)}",
+            reply_markup=get_admin_menu_kb()
         )
