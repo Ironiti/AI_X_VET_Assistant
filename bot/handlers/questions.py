@@ -58,6 +58,10 @@ from bot.keyboards import (
 )
 from bot.handlers.utils import normalize_container_name, deduplicate_container_names
 from bot.handlers.feedback import validate_phone_number, get_phone_kb, format_phone_number, send_callback_email
+from bot.handlers.response_ratings import ResponseRatingManager
+
+
+rating_manager = ResponseRatingManager(db)
 
 # ============================================================================
 # КОНСТАНТЫ
@@ -2240,6 +2244,7 @@ async def _handle_name_search_internal(
                     reply_markup=get_back_to_menu_kb(),
                     parse_mode="HTML"
                 )
+
                 await state.set_state(QuestionStates.waiting_for_search_type)
                 return
 
@@ -2356,6 +2361,29 @@ async def _handle_name_search_internal(
                 reply_markup=keyboard
             )
             
+            should_ask, rating_id = await rating_manager.should_ask_for_rating(
+                user_id=message.from_user.id,
+                response_type="name_search"
+            )
+
+            if should_ask:
+                # Сохраняем информацию о запросе и результатах
+                await state.update_data({
+                    f"last_question_{rating_id}": text,
+                    f"last_response_{rating_id}": f"Найдено {total_count} результатов"
+                })
+                
+                # Запрашиваем оценку через 1 секунду
+                await asyncio.sleep(1)
+                rating_keyboard = rating_manager.create_rating_keyboard(rating_id)
+                
+                await message.answer(
+                    "📊 <b>Оцените, пожалуйста, результаты поиска:</b>",
+                    parse_mode="HTML",
+                    reply_markup=rating_keyboard
+                )
+
+
             # Сохраняем последний тест
             await state.set_state(QuestionStates.waiting_for_search_type)
             await message.answer(
@@ -2665,10 +2693,39 @@ async def handle_general_question(
                     parse_mode="HTML", 
                     disable_web_page_preview=True
                 )
+
+                logger.info(f"[RATING] Checking if should ask for rating for user {message.from_user.id}")
+
+                should_ask, rating_id = await rating_manager.should_ask_for_rating(
+                    user_id=message.from_user.id,
+                    response_type="general"
+                )
+
+                logger.info(f"[RATING] Should ask: {should_ask}, rating_id: {rating_id}")
+
+                if should_ask:
+                    # Сохраняем информацию о вопросе и ответе
+                    await state.update_data({
+                        f"last_question_{rating_id}": question_text,
+                        f"last_response_{rating_id}": answer[:1000]  # сохраняем часть ответа
+                    })
+                    
+                    # Запрашиваем оценку через 1 секунду (не сразу)
+                    await asyncio.sleep(1)
+                    rating_keyboard = rating_manager.create_rating_keyboard(rating_id)
+                    
+                    await message.answer(
+                        "📊 <b>Оцените, пожалуйста, насколько полезным был ответ:</b>",
+                        parse_mode="HTML",
+                        reply_markup=rating_keyboard
+                    )
+                    logger.info(f"[RATING] Rating requested for user {message.from_user.id}")
+
             except Exception as e:
                 logger.error(f"[GENERAL_Q] Failed to send HTML: {e}")
                 clean_text = re.sub(r'<[^>]+>', '', answer)
                 await message.answer(clean_text, disable_web_page_preview=True)
+
 
         # 10. Проверка на рекомендацию обратиться к специалисту
         if await _contains_specialist_recommendation(answer):
@@ -2990,6 +3047,103 @@ async def send_test_info_with_photo(
         reply_markup=keyboard,
     )
     return True
+
+@questions_router.callback_query(F.data.startswith("rating:"))
+async def handle_rating_callback(callback: CallbackQuery, state: FSMContext):
+    """Обработка оценки ответа с преобразованием сообщения"""
+    await callback.answer()
+    
+    try:
+        # Парсим callback data
+        parts = callback.data.split(":")
+        if len(parts) != 3:
+            return
+            
+        rating_id = parts[1]
+        rating = int(parts[2])
+        
+        # Получаем сохраненные данные вопроса и ответа
+        data = await state.get_data()
+        question = data.get(f"last_question_{rating_id}", "")
+        response = data.get(f"last_response_{rating_id}", "")
+        
+        # Сохраняем оценку в базу
+        await rating_manager.save_rating(
+            user_id=callback.from_user.id,
+            rating_id=rating_id,
+            rating=rating,
+            question=question,
+            response=response
+        )
+        
+        # Отправляем оценку в группу
+        rating_message = rating_manager.prepare_rating_message(
+            user_id=callback.from_user.id,
+            rating=rating,
+            question=question,
+            response=response,
+            user_name=callback.from_user.full_name
+        )
+        
+        try:
+            await callback.bot.send_message(
+                chat_id=rating_manager.group_id,
+                text=rating_message,
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(f"[RATING] Failed to send to group: {e}")
+        
+        # Преобразуем сообщение с оценками в зависимости от оценки
+        if rating <= 3:
+            # Для низких оценок - показываем предложение улучшений
+            feedback_keyboard = rating_manager.create_feedback_group_keyboard()
+            
+            try:
+                await callback.message.edit_text(
+                    f"❌ Спасибо за честную оценку {rating} ⭐\n\n"
+                    "💬 Мы хотим стать лучше! Присоединяйтесь к нашему чату "
+                    "и помогите нам улучшить бота:",
+                    parse_mode="HTML",
+                    reply_markup=feedback_keyboard
+                )
+            except Exception as e:
+                logger.warning(f"[RATING] Failed to edit message for low rating: {e}")
+                # Fallback - отправляем новое сообщение
+                await callback.message.answer(
+                    f"❌ Спасибо за честную оценку {rating} ⭐\n\n"
+                    "💬 Мы хотим стать лучше! Присоединяйтесь к нашему чату:",
+                    parse_mode="HTML",
+                    reply_markup=feedback_keyboard
+                )
+                
+        else:
+            # Для высоких оценок - просто благодарим
+            try:
+                await callback.message.edit_text(
+                    f"✅ Спасибо за высокую оценку {rating} ⭐!\n\n"
+                    "Мы рады, что смогли вам помочь! 🎉",
+                    parse_mode="HTML",
+                    reply_markup=None
+                )
+            except Exception as e:
+                logger.warning(f"[RATING] Failed to edit message for high rating: {e}")
+                # Fallback - отправляем новое сообщение
+                await callback.message.answer(
+                    f"✅ Спасибо за высокую оценку {rating} ⭐!\n\n"
+                    "Мы рады, что смогли вам помочь! 🎉",
+                    parse_mode="HTML"
+                )
+        
+        # Очищаем временные данные
+        await state.update_data({
+            f"last_question_{rating_id}": None,
+            f"last_response_{rating_id}": None
+        })
+        
+    except Exception as e:
+        logger.error(f"[RATING] Failed to process rating: {e}")
+        await callback.answer("⚠️ Ошибка при обработке оценки", show_alert=True)        
 
 # ============================================================================
 # ЭКСПОРТЫ

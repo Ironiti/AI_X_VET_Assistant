@@ -1208,6 +1208,25 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_quality_metrics_date
                 ON quality_metrics(metric_date DESC)
             ''')
+
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS response_ratings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    chat_history_id TEXT NOT NULL,
+                    rating INTEGER CHECK(rating >= 1 AND rating <= 5),
+                    question TEXT,
+                    response TEXT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(telegram_id)
+                )
+            ''')
+
+            # Индекс для быстрого поиска
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_response_ratings_user_time 
+                ON response_ratings(user_id, timestamp DESC)
+            ''')
             
             # ============================================================
             # КОНЕЦ ДОБАВЛЕНИЯ
@@ -2183,4 +2202,44 @@ class Database:
             print(f"[ERROR] Failed to get latest system metrics: {e}")
             return []
     
-        
+    async def save_response_rating(self, user_id: int, chat_history_id: str, rating: int, 
+                                question: str = "", response: str = "", timestamp = None):
+        """Сохраняет оценку ответа"""
+        try:
+            if timestamp is None:
+                timestamp = datetime.now()
+                
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    INSERT INTO response_ratings 
+                    (user_id, chat_history_id, rating, question, response, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (user_id, chat_history_id, rating, question[:500], response[:1000], timestamp))
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"[ERROR] Failed to save rating: {e}")
+            return False
+
+    async def get_rating_stats(self, days: int = 30):
+        """Получает статистику оценок"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                # Общая статистика
+                cursor = await db.execute('''
+                    SELECT 
+                        COUNT(*) as total_ratings,
+                        AVG(rating) as avg_rating,
+                        COUNT(CASE WHEN rating <= 3 THEN 1 END) as low_ratings,
+                        COUNT(CASE WHEN rating >= 4 THEN 1 END) as high_ratings
+                    FROM response_ratings 
+                    WHERE timestamp > datetime('now', ?)
+                ''', (f'-{days} days',))
+                
+                stats = await cursor.fetchone()
+                return dict(stats) if stats else None
+        except Exception as e:
+            print(f"[ERROR] Failed to get rating stats: {e}")
+            return None
