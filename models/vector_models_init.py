@@ -1,15 +1,23 @@
+# models/vector_models_init.py
+
 import torch
 import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModel
 from langchain_core.embeddings import Embeddings
 from openai import OpenAI
-from typing import List
+from typing import List, Optional
 from torch import Tensor
 from tqdm import tqdm
 import numpy as np
 import random
+import time
+import logging
+from functools import wraps
 
 from config import DEEPINFRA_API_KEY
+
+# Настройка логирования
+logger = logging.getLogger(__name__)
 
 # Device selection
 if torch.cuda.is_available():
@@ -20,6 +28,39 @@ elif torch.backends.mps.is_available():
     torch.mps.empty_cache()
 else:
     device = torch.device('cpu')
+
+
+def retry_with_fallback(max_retries: int = 2, delay: float = 1.0):
+    """Декоратор для повторных попыток с fallback"""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(self, *args, **kwargs):
+            last_exception = None
+            
+            # Сначала пробуем основную модель
+            for attempt in range(max_retries):
+                try:
+                    return func(self, *args, **kwargs)
+                except Exception as e:
+                    last_exception = e
+                    logger.warning(f"Primary model attempt {attempt + 1} failed: {str(e)}")
+                    if attempt < max_retries - 1:
+                        time.sleep(delay)
+                    continue
+            
+            # Если основная модель не сработала, пробуем fallback
+            if self.fallback_model and self.current_model != self.fallback_model:
+                logger.info(f"Switching to fallback model: {self.fallback_model.model_name}")
+                self.current_model = self.fallback_model
+                try:
+                    return func(self, *args, **kwargs)
+                except Exception as fallback_e:
+                    logger.error(f"Fallback model also failed: {str(fallback_e)}")
+                    raise fallback_e
+            else:
+                raise last_exception
+        return wrapper
+    return decorator
 
 
 def get_detailed_instruct(task_description: str, query: str) -> str:
@@ -40,12 +81,10 @@ def set_global_seed(seed: int = 42):
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
-        # Для детерминированных операций в CUDA
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
     
     if torch.backends.mps.is_available():
-        # Для MPS (Apple Silicon) - ограниченная поддержка детерминизма
         torch.mps.manual_seed(seed)
     
     print(f"[INFO] Global seed set to: {seed}")
@@ -59,11 +98,14 @@ class QwenEmbeddings(Embeddings):
         max_length: int = 8192,
         batch_size: int = 8,
         use_remote: bool = None,
+        fallback_model: Optional['QwenEmbeddings'] = None
     ):
         self.model_name = model_name
         self.task_prompt = task_prompt
         self.max_length = max_length
         self.batch_size = batch_size
+        self.fallback_model = fallback_model
+        self.current_model = self  # Текущая активная модель
 
         # Determine remote vs local
         if use_remote is None:
@@ -97,7 +139,6 @@ class QwenEmbeddings(Embeddings):
             self.model.eval()
 
     def last_token_pool(self, last_hidden_states: Tensor, attention_mask: Tensor) -> Tensor:
-        # same pooling logic
         left_padding = (attention_mask[:, -1].sum() == attention_mask.shape[0])
         if left_padding:
             return last_hidden_states[:, -1]
@@ -109,52 +150,107 @@ class QwenEmbeddings(Embeddings):
             ]
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        return self._encode(texts)
+        return self._encode_with_fallback(texts)
 
     def embed_query(self, text: str) -> List[float]:
         prompt = get_detailed_instruct(self.task_prompt, text)
-        return self._encode([prompt])[0]
+        return self._encode_with_fallback([prompt])[0]
 
-    def _encode(self, texts: List[str]) -> List[List[float]]:
+    def _encode_with_fallback(self, texts: List[str]) -> List[List[float]]:
+        """Основной метод с автоматическим fallback"""
+        last_exception = None
+        
+        # Сначала пробуем текущую модель (обычно основную 4B)
+        for attempt in range(2):
+            try:
+                return self._encode(self.current_model, texts)
+            except Exception as e:
+                last_exception = e
+                logger.warning(f"Model {self.current_model.model_name} attempt {attempt + 1} failed: {str(e)}")
+                if attempt == 0:
+                    time.sleep(1.0)
+                continue
+        
+        # Если текущая модель не сработала и есть fallback, переключаемся
+        if self.fallback_model and self.current_model != self.fallback_model:
+            logger.info(f"Switching to fallback model: {self.fallback_model.model_name}")
+            self.current_model = self.fallback_model
+            try:
+                return self._encode(self.current_model, texts)
+            except Exception as fallback_e:
+                logger.error(f"Fallback model also failed: {str(fallback_e)}")
+                # Возвращаемся к основной модели для следующих запросов
+                if self.current_model != self:
+                    self.current_model = self
+                raise fallback_e
+        else:
+            raise last_exception
+
+    def _encode(self, model: 'QwenEmbeddings', texts: List[str]) -> List[List[float]]:
+        """Кодирование с использованием конкретной модели"""
         results: List[List[float]] = []
-        if self.use_remote: # Remote embedding via DeepInfra/OpenAI client
+        if model.use_remote:
             batch_size = 200
-            for i in tqdm(range(0, len(texts), batch_size), desc='Remote embedding batches'):
+            for i in tqdm(range(0, len(texts), batch_size), desc=f'Remote embedding ({model.model_name})'):
                 batch_texts = texts[i:i + batch_size]
-                # print(f'[INFO] Sending remote batch of size {len(batch_texts)}')
-                response = self.client.embeddings.create(
-                    model=self.model_name,
+                response = model.client.embeddings.create(
+                    model=model.model_name,
                     input=batch_texts,
                     encoding_format='float'
                 )
-                # Collect embeddings
                 vecs = [d.embedding for d in response.data]
-                # Normalize
                 arr = np.array(vecs, dtype=float)
                 norms = np.linalg.norm(arr, axis=1, keepdims=True)
                 arr = arr / norms
                 results.extend(arr.tolist())
             return results
-        else: # Local embedding
-            batch_size = self.batch_size
-            for i in tqdm(range(0, len(texts), batch_size), desc='Local embedding batches'):
+        else:
+            batch_size = model.batch_size
+            for i in tqdm(range(0, len(texts), batch_size), desc=f'Local embedding ({model.model_name})'):
                 batch_texts = texts[i:i + batch_size]
-                batch = self.tokenizer(
+                batch = model.tokenizer(
                     batch_texts,
                     padding=True,
                     truncation=True,
-                    max_length=self.max_length,
+                    max_length=model.max_length,
                     return_tensors='pt'
-                ).to(self.model.device)
+                ).to(model.model.device)
 
                 with torch.no_grad():
-                    outputs = self.model(**batch)
-                    embeddings = self.last_token_pool(outputs.last_hidden_state, batch['attention_mask'])
+                    outputs = model.model(**batch)
+                    embeddings = model.last_token_pool(outputs.last_hidden_state, batch['attention_mask'])
                     embeddings = F.normalize(embeddings, p=2, dim=1)
 
                 results.extend(embeddings.cpu().tolist())
             return results
 
+    def reset_to_primary(self):
+        """Вернуться к основной модели (4B)"""
+        if self.current_model != self:
+            logger.info("Resetting back to primary model: Qwen/Qwen3-Embedding-4B")
+            self.current_model = self
 
-# Instantiate default embedding model (auto-detect)
-embedding_model = QwenEmbeddings(model_name='Qwen/Qwen3-Embedding-4B', task_prompt=task_prompt, use_remote=True)
+    def get_current_model_name(self) -> str:
+        """Получить имя текущей активной модели"""
+        return self.current_model.model_name
+
+
+# Создаем основную модель (4B) с fallback на 8B
+primary_model = QwenEmbeddings(
+    model_name='Qwen/Qwen3-Embedding-4B', 
+    task_prompt=task_prompt, 
+    use_remote=True
+)
+
+# Создаем fallback модель (8B)
+fallback_model = QwenEmbeddings(
+    model_name='Qwen/Qwen3-Embedding-8B',
+    task_prompt=task_prompt, 
+    use_remote=True
+)
+
+# Связываем основную модель с fallback
+primary_model.fallback_model = fallback_model
+
+# Для обратной совместимости используем основную модель
+embedding_model = primary_model

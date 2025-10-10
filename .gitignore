@@ -38,3 +38,8 @@ data/vet_clinic.db
 
 # DB 
 data/chroma_db/*
+data/test_chroma_db/*
+data/test_chroma_4b/*
+data/test_chroma_8b/*
+data/test_data.xlsx
+data/test_workflow.xlsx
