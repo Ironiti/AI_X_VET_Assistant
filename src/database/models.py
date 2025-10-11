@@ -2243,3 +2243,155 @@ class Database:
         except Exception as e:
             print(f"[ERROR] Failed to get rating stats: {e}")
             return None
+        
+     # ============================================================
+    # МЕТОДЫ ДЛЯ ГАЛЕРЕИ ПРОБИРОК И КОНТЕЙНЕРОВ
+    # ============================================================
+    
+    async def ensure_gallery_table(self):
+        """Создает таблицу галереи если её нет"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS gallery_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    file_id TEXT NOT NULL,
+                    description TEXT,
+                    added_by INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    FOREIGN KEY (added_by) REFERENCES users(telegram_id)
+                )
+            ''')
+            await db.commit()
+    
+    async def add_gallery_item(self, title: str, file_id: str, description: str = None, added_by: int = None):
+        """Добавляет элемент в галерею"""
+        try:
+            await self.ensure_gallery_table()
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute('''
+                    INSERT INTO gallery_items (title, file_id, description, added_by)
+                    VALUES (?, ?, ?, ?)
+                ''', (title, file_id, description, added_by))
+                await db.commit()
+                return cursor.lastrowid
+        except Exception as e:
+            print(f"[ERROR] Failed to add gallery item: {e}")
+            return None
+    
+    async def get_all_gallery_items(self):
+        """Получает все активные элементы галереи"""
+        try:
+            await self.ensure_gallery_table()
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute('''
+                    SELECT * FROM gallery_items 
+                    WHERE is_active = TRUE
+                    ORDER BY created_at DESC
+                ''')
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
+        except Exception as e:
+            print(f"[ERROR] Failed to get gallery items: {e}")
+            return []
+    
+    async def get_gallery_item(self, item_id: int):
+        """Получает конкретный элемент галереи"""
+        try:
+            await self.ensure_gallery_table()
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute(
+                    'SELECT * FROM gallery_items WHERE id = ? AND is_active = TRUE',
+                    (item_id,)
+                )
+                row = await cursor.fetchone()
+                return dict(row) if row else None
+        except Exception as e:
+            print(f"[ERROR] Failed to get gallery item: {e}")
+            return None
+    
+    async def delete_gallery_item(self, item_id: int):
+        """Деактивирует элемент галереи"""
+        try:
+            await self.ensure_gallery_table()
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute(
+                    'UPDATE gallery_items SET is_active = FALSE WHERE id = ?',
+                    (item_id,)
+                )
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"[ERROR] Failed to delete gallery item: {e}")
+            return False
+    
+    # ============================================================
+    # МЕТОДЫ ДЛЯ ССЫЛОК НА БЛАНКИ
+    # ============================================================
+    
+    async def ensure_blanks_table(self):
+        """Создает таблицу бланков если её нет"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS blank_links (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    description TEXT,
+                    added_by INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    FOREIGN KEY (added_by) REFERENCES users(telegram_id)
+                )
+            ''')
+            await db.commit()
+    
+    async def add_blank_link(self, title: str, url: str, description: str = None, added_by: int = None):
+        """Добавляет ссылку на бланк"""
+        try:
+            await self.ensure_blanks_table()
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute('''
+                    INSERT INTO blank_links (title, url, description, added_by)
+                    VALUES (?, ?, ?, ?)
+                ''', (title, url, description, added_by))
+                await db.commit()
+                return cursor.lastrowid
+        except Exception as e:
+            print(f"[ERROR] Failed to add blank link: {e}")
+            return None
+    
+    async def get_all_blank_links(self):
+        """Получает все активные ссылки на бланки"""
+        try:
+            await self.ensure_blanks_table()
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute('''
+                    SELECT * FROM blank_links 
+                    WHERE is_active = TRUE
+                    ORDER BY created_at DESC
+                ''')
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
+        except Exception as e:
+            print(f"[ERROR] Failed to get blank links: {e}")
+            return []
+    
+    async def delete_blank_link(self, blank_id: int):
+        """Деактивирует ссылку на бланк"""
+        try:
+            await self.ensure_blanks_table()
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute(
+                    'UPDATE blank_links SET is_active = FALSE WHERE id = ?',
+                    (blank_id,)
+                )
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"[ERROR] Failed to delete blank link: {e}")
+            return False

@@ -1,7 +1,10 @@
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
 def get_back_to_menu_kb():
+    """Клавиатура с кнопками контента и завершением диалога"""
     kb = [
+        [KeyboardButton(text="🖼️ Галерея пробирок и контейнеров")],
+        [KeyboardButton(text="📄 Ссылки на бланки")],
         [KeyboardButton(text="❌ Завершить диалог")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
@@ -124,15 +127,16 @@ def get_main_menu_kb():
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
 def get_admin_menu_kb():
-    """Меню для администраторов"""
+    """Меню для администраторов с логической группировкой"""
     kb = [
         [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="👥 Пользователи")],
-        [KeyboardButton(text="📋 Все обращения"), KeyboardButton(text="🔐 Создать код")],
-        [KeyboardButton(text="📥 Выгрузка в Excel"), KeyboardButton(text="📢 Рассылка")],
-        [KeyboardButton(text="📚 Часто задаваемые вопросы")],
-        [KeyboardButton(text="🔬 Задать вопрос ассистенту"), KeyboardButton(text="📞 Заказать звонок")],
-        [KeyboardButton(text="💡 Предложения и пожелания"), KeyboardButton(text="📋 Опросы")],
-        [KeyboardButton(text="🔧 Управление системой")]
+        [KeyboardButton(text="🔑 Активировать код"), KeyboardButton(text="🔐 Создать код")],
+        [KeyboardButton(text="📥 Выгрузка в Excel"), KeyboardButton(text="📈 Экспорт метрик")],
+        [KeyboardButton(text="📋 Все обращения"), KeyboardButton(text="📋 Опросы")],
+        [KeyboardButton(text="📢 Рассылка"), KeyboardButton(text="🎨 Управление контентом")],
+        [KeyboardButton(text="🔧 Управление системой"), KeyboardButton(text="📚 Часто задаваемые вопросы")],
+        [KeyboardButton(text="🔬 Задать вопрос ассистенту")],
+        [KeyboardButton(text="📞 Заказать звонок"), KeyboardButton(text="💡 Обратная связь")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
@@ -158,9 +162,11 @@ def get_menu_by_role(role: str):
         return get_main_menu_kb()
     
 def get_dialog_kb():
-    """Простая клавиатура для вопросов"""
+    """Клавиатура для диалога с ассистентом"""
     return ReplyKeyboardMarkup(
         keyboard=[
+            [KeyboardButton(text="🖼️ Галерея пробирок и контейнеров")],
+            [KeyboardButton(text="📄 Ссылки на бланки")],
             [KeyboardButton(text="❌ Завершить диалог")]
         ],
         resize_keyboard=True
@@ -195,6 +201,7 @@ def get_system_management_kb():
         [KeyboardButton(text="🔄 Обновить векторную БД")],
         [KeyboardButton(text="🗑️ Очистить старые логи")],
         [KeyboardButton(text="📊 Системная информация")],
+        [KeyboardButton(text="🧪 Управление фото контейнеров")],
         [KeyboardButton(text="🔙 Назад")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
@@ -228,7 +235,6 @@ def get_search_type_clarification_kb():
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
-
 def get_faq_search_kb():
     """Клавиатура для поиска в FAQ"""
     kb = [
@@ -246,8 +252,6 @@ def get_faq_back_kb():
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
-
-
 def get_search_type_switch_kb(search_id: str = "", tests_count: int = 0, profiles_count: int = 0, total_count: int = 0):
     """Клавиатура переключения между тестами и профилями"""
     return InlineKeyboardMarkup(
@@ -261,6 +265,7 @@ def get_search_type_switch_kb(search_id: str = "", tests_count: int = 0, profile
             ]
         ]
     )
+
 # Для совместимости
 get_client_menu_kb = get_main_menu_kb
 get_staff_menu_kb = get_main_menu_kb

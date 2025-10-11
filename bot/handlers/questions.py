@@ -19,6 +19,7 @@ from collections import defaultdict
 import logging
 
 from bot.handlers.ultimate_classifier import ultimate_classifier
+from bot.handlers.content import create_gallery_keyboard, create_blanks_keyboard
 from bot.handlers.query_processing.query_preprocessing import expand_query_with_abbreviations
 from bot.handlers.query_processing.animal_filter import animal_filter
 
@@ -758,6 +759,99 @@ async def handle_end_dialog(message: Message, state: FSMContext):
     farewell = get_time_based_farewell(user_name)
     await message.answer(farewell, reply_markup=get_menu_by_role(role))
 
+@questions_router.message(QuestionStates.waiting_for_search_type, F.text == "🖼️ Галерея пробирок и контейнеров")
+async def show_gallery_in_dialog(message: Message, state: FSMContext):
+    """Показывает галерею во время диалога"""
+    items = await db.get_all_gallery_items()
+    
+    if not items:
+        # Отправляем временное сообщение, которое само исчезнет
+        temp_msg = await message.answer(
+            "📭 Галерея пока пуста.\n"
+            "Администратор скоро добавит фотографии."
+        )
+        # Удаляем временное сообщение через 3 секунды
+        await asyncio.sleep(3)
+        try:
+            await temp_msg.delete()
+        except:
+            pass
+        return
+    
+    # Отправляем галерею как отдельное сообщение с inline клавиатурой
+    await message.answer(
+        "🖼️ <b>Галерея пробирок и контейнеров</b>\n\n"
+        "Выберите интересующий вас элемент:",
+        parse_mode="HTML",
+        reply_markup=create_gallery_keyboard(items)
+    )
+    # Не меняем состояние и не отправляем дополнительные сообщения
+
+@questions_router.message(QuestionStates.waiting_for_search_type, F.text == "📄 Ссылки на бланки")
+async def show_blanks_in_dialog(message: Message, state: FSMContext):
+    """Показывает ссылки на бланки во время диалога"""
+    items = await db.get_all_blank_links()
+    
+    if not items:
+        # Отправляем временное сообщение
+        temp_msg = await message.answer(
+            "📭 Список бланков пока пуст.\n"
+            "Администратор скоро добавит ссылки."
+        )
+        # Удаляем через 3 секунды
+        await asyncio.sleep(3)
+        try:
+            await temp_msg.delete()
+        except:
+            pass
+        return
+    
+    # Формируем текст с описаниями
+    text = "📄 <b>Ссылки на бланки и документы</b>\n\n"
+    
+    has_descriptions = any(item.get('description') for item in items)
+    
+    if has_descriptions:
+        for i, item in enumerate(items, 1):
+            text += f"<b>{html.escape(item['title'])}</b>"
+            if item.get('description'):
+                text += f"\n📝 {html.escape(item['description'])}"
+            text += "\n\n"
+    
+    text += "👆 <i>Нажмите на кнопку для перехода к документу</i>"
+    
+    # Отправляем список бланков
+    await message.answer(
+        text,
+        parse_mode="HTML",
+        reply_markup=create_blanks_keyboard(items),
+        disable_web_page_preview=True
+    )
+    # Не отправляем дополнительные сообщения
+
+# Аналогично обновите обработчики для других состояний:
+@questions_router.message(QuestionStates.waiting_for_code, F.text == "🖼️ Галерея пробирок и контейнеров")
+async def show_gallery_in_code_state(message: Message, state: FSMContext):
+    """Показывает галерею при поиске по коду"""
+    await show_gallery_in_dialog(message, state)
+    # НЕ меняем состояние автоматически
+
+@questions_router.message(QuestionStates.waiting_for_code, F.text == "📄 Ссылки на бланки")
+async def show_blanks_in_code_state(message: Message, state: FSMContext):
+    """Показывает бланки при поиске по коду"""
+    await show_blanks_in_dialog(message, state)
+    # НЕ меняем состояние автоматически
+
+@questions_router.message(QuestionStates.waiting_for_name, F.text == "🖼️ Галерея пробирок и контейнеров")
+async def show_gallery_in_name_state(message: Message, state: FSMContext):
+    """Показывает галерею при поиске по названию"""
+    await show_gallery_in_dialog(message, state)
+    # НЕ меняем состояние автоматически
+
+@questions_router.message(QuestionStates.waiting_for_name, F.text == "📄 Ссылки на бланки")
+async def show_blanks_in_name_state(message: Message, state: FSMContext):
+    """Показывает бланки при поиске по названию"""
+    await show_blanks_in_dialog(message, state)
 
 @questions_router.message(QuestionStates.waiting_for_search_type)
 async def handle_universal_search(message: Message, state: FSMContext):

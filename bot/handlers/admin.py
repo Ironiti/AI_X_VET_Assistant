@@ -60,6 +60,24 @@ class ContainerPhotoStates(StatesGroup):
     waiting_for_description = State()
     deleting_photo = State()
     
+class GalleryManagementStates(StatesGroup):
+    menu = State()
+    adding_item = State()
+    entering_title = State()
+    uploading_photo = State()
+    entering_description = State()
+    viewing_items = State()
+    deleting_item = State()
+
+class BlanksManagementStates(StatesGroup):
+    menu = State()
+    adding_blank = State()
+    entering_title = State()
+    entering_url = State()
+    entering_description = State()
+    viewing_blanks = State()
+    deleting_blank = State()
+    
 def get_container_photos_kb():
     keyboard = [
         [KeyboardButton(text="📷 Добавить фото контейнера")],
@@ -1731,6 +1749,422 @@ async def handle_system_management(message: Message, state: FSMContext):
             "Выберите действие из меню:",
             reply_markup=get_system_management_kb()
         )
+        
+def get_content_management_kb():
+    """Клавиатура управления контентом"""
+    keyboard = [
+        [KeyboardButton(text="🖼️ Галерея пробирок")],
+        [KeyboardButton(text="📄 Ссылки на бланки")],
+        [KeyboardButton(text="🔙 Назад")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+
+def get_gallery_management_kb():
+    """Клавиатура управления галереей"""
+    keyboard = [
+        [KeyboardButton(text="➕ Добавить в галерею")],
+        [KeyboardButton(text="📋 Просмотр галереи")],
+        [KeyboardButton(text="🗑️ Удалить из галереи")],
+        [KeyboardButton(text="🔙 Назад")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+
+def get_blanks_management_kb():
+    """Клавиатура управления бланками"""
+    keyboard = [
+        [KeyboardButton(text="➕ Добавить бланк")],
+        [KeyboardButton(text="📋 Просмотр бланков")],
+        [KeyboardButton(text="🗑️ Удалить бланк")],
+        [KeyboardButton(text="🔙 Назад")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+
+# Обработчики для управления контентом
+@admin_router.message(F.text == "🎨 Управление контентом")
+async def content_management(message: Message, state: FSMContext):
+    """Главное меню управления контентом"""
+    user_id = message.from_user.id
+    
+    user = await db.get_user(user_id)
+    if not user or user['role'] != 'admin':
+        await message.answer("У вас нет доступа к этой функции.")
+        return
+    
+    await message.answer(
+        "🎨 Управление контентом\n\n"
+        "Здесь вы можете управлять:\n"
+        "• Галереей пробирок и контейнеров\n"
+        "• Ссылками на бланки",
+        reply_markup=get_content_management_kb()
+    )
+
+# Обработчики для галереи
+@admin_router.message(F.text == "🖼️ Галерея пробирок")
+async def gallery_management(message: Message, state: FSMContext):
+    """Управление галереей пробирок"""
+    await message.answer(
+        "🖼️ Управление галереей пробирок\n\n"
+        "Добавляйте фотографии пробирок и контейнеров, "
+        "которые будут доступны пользователям.",
+        reply_markup=get_gallery_management_kb()
+    )
+    await state.set_state(GalleryManagementStates.menu)
+
+@admin_router.message(GalleryManagementStates.menu, F.text == "➕ Добавить в галерею")
+async def start_add_gallery_item(message: Message, state: FSMContext):
+    """Начало добавления элемента в галерею"""
+    await message.answer(
+        "📝 Введите название для элемента галереи:\n"
+        "(например: 'Пробирка с ЭДТА' или 'Контейнер для мочи')",
+        reply_markup=get_back_to_menu_kb()
+    )
+    await state.set_state(GalleryManagementStates.entering_title)
+
+@admin_router.message(GalleryManagementStates.entering_title)
+async def gallery_enter_title(message: Message, state: FSMContext):
+    """Ввод названия элемента галереи"""
+    if message.text == "🔙 Вернуться в главное меню":
+        await state.clear()
+        await message.answer("Операция отменена.", reply_markup=get_gallery_management_kb())
+        return
+    
+    await state.update_data(gallery_title=message.text)
+    await message.answer(
+        "📸 Теперь отправьте фотографию для этого элемента:",
+        reply_markup=get_back_to_menu_kb()
+    )
+    await state.set_state(GalleryManagementStates.uploading_photo)
+
+@admin_router.message(GalleryManagementStates.uploading_photo, F.photo)
+async def gallery_upload_photo(message: Message, state: FSMContext):
+    """Загрузка фото для галереи"""
+    photo = message.photo[-1]  # Берем лучшее качество
+    file_id = photo.file_id
+    
+    await state.update_data(gallery_photo_id=file_id)
+    await message.answer(
+        "📝 Введите описание для этого элемента:\n"
+        "(можно указать особенности, объем, цвет крышки и т.д.)\n\n"
+        "Или отправьте '-' чтобы пропустить:",
+        reply_markup=get_back_to_menu_kb()
+    )
+    await state.set_state(GalleryManagementStates.entering_description)
+
+@admin_router.message(GalleryManagementStates.uploading_photo)
+async def gallery_invalid_photo(message: Message, state: FSMContext):
+    """Обработка не-фото в состоянии загрузки"""
+    if message.text == "🔙 Вернуться в главное меню":
+        await state.clear()
+        await message.answer("Операция отменена.", reply_markup=get_gallery_management_kb())
+        return
+    await message.answer("❌ Пожалуйста, отправьте фотографию")
+
+@admin_router.message(GalleryManagementStates.entering_description)
+async def gallery_save_item(message: Message, state: FSMContext):
+    """Сохранение элемента галереи"""
+    if message.text == "🔙 Вернуться в главное меню":
+        await state.clear()
+        await message.answer("Операция отменена.", reply_markup=get_gallery_management_kb())
+        return
+    
+    data = await state.get_data()
+    title = data.get('gallery_title')
+    file_id = data.get('gallery_photo_id')
+    description = None if message.text == "-" else message.text
+    
+    # Сохраняем в БД
+    success = await db.add_gallery_item(
+        title=title,
+        file_id=file_id,
+        description=description,
+        added_by=message.from_user.id
+    )
+    
+    if success:
+        await message.answer(
+            f"✅ Элемент успешно добавлен в галерею!\n\n"
+            f"📌 Название: {html.escape(title)}\n"
+            f"📝 Описание: {html.escape(description) if description else 'Не указано'}",
+            parse_mode="HTML",
+            reply_markup=get_gallery_management_kb()
+        )
+    else:
+        await message.answer(
+            "❌ Ошибка при сохранении элемента",
+            reply_markup=get_gallery_management_kb()
+        )
+    
+    await state.set_state(GalleryManagementStates.menu)
+
+@admin_router.message(GalleryManagementStates.menu, F.text == "📋 Просмотр галереи")
+async def view_gallery_items(message: Message):
+    """Просмотр всех элементов галереи"""
+    items = await db.get_all_gallery_items()
+    
+    if not items:
+        await message.answer(
+            "Галерея пока пуста.",
+            reply_markup=get_gallery_management_kb()
+        )
+        return
+    
+    text = "📋 Элементы галереи:\n\n"
+    for i, item in enumerate(items, 1):
+        text += f"{i}. {item['title']}\n"
+        if item.get('description'):
+            text += f"   📝 {item['description'][:50]}{'...' if len(item['description']) > 50 else ''}\n"
+        text += f"   📅 Добавлено: {item['created_at']}\n\n"
+    
+    await message.answer(text, reply_markup=get_gallery_management_kb())
+
+@admin_router.message(GalleryManagementStates.menu, F.text == "🗑️ Удалить из галереи")
+async def start_delete_gallery_item(message: Message, state: FSMContext):
+    """Начало удаления элемента из галереи"""
+    items = await db.get_all_gallery_items()
+    
+    if not items:
+        await message.answer(
+            "Галерея пуста.",
+            reply_markup=get_gallery_management_kb()
+        )
+        return
+    
+    keyboard = []
+    for item in items[:20]:  # Максимум 20 элементов
+        keyboard.append([
+            KeyboardButton(text=f"❌ {item['title'][:40]}")
+        ])
+    keyboard.append([KeyboardButton(text="🔙 Отмена")])
+    
+    await message.answer(
+        "Выберите элемент для удаления:",
+        reply_markup=ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+    )
+    await state.set_state(GalleryManagementStates.deleting_item)
+
+@admin_router.message(GalleryManagementStates.deleting_item)
+async def delete_gallery_item(message: Message, state: FSMContext):
+    """Удаление элемента из галереи"""
+    if message.text == "🔙 Отмена":
+        await message.answer(
+            "Операция отменена.",
+            reply_markup=get_gallery_management_kb()
+        )
+        await state.set_state(GalleryManagementStates.menu)
+        return
+    
+    if message.text.startswith("❌ "):
+        title = message.text[2:]
+        items = await db.get_all_gallery_items()
+        
+        for item in items:
+            if item['title'].startswith(title):
+                success = await db.delete_gallery_item(item['id'])
+                if success:
+                    await message.answer(
+                        f"✅ Элемент '{item['title']}' удален из галереи",
+                        reply_markup=get_gallery_management_kb()
+                    )
+                else:
+                    await message.answer(
+                        "❌ Ошибка при удалении",
+                        reply_markup=get_gallery_management_kb()
+                    )
+                break
+    
+    await state.set_state(GalleryManagementStates.menu)
+
+# Обработчики для бланков
+@admin_router.message(F.text == "📄 Ссылки на бланки")
+async def blanks_management(message: Message, state: FSMContext):
+    """Управление ссылками на бланки"""
+    await message.answer(
+        "📄 Управление ссылками на бланки\n\n"
+        "Добавляйте ссылки на бланки и документы, "
+        "которые будут доступны пользователям.",
+        reply_markup=get_blanks_management_kb()
+    )
+    await state.set_state(BlanksManagementStates.menu)
+
+@admin_router.message(BlanksManagementStates.menu, F.text == "➕ Добавить бланк")
+async def start_add_blank(message: Message, state: FSMContext):
+    """Начало добавления бланка"""
+    await message.answer(
+        "📝 Введите название бланка:\n"
+        "(например: 'Направление на анализ крови' или 'Бланк результатов')",
+        reply_markup=get_back_to_menu_kb()
+    )
+    await state.set_state(BlanksManagementStates.entering_title)
+
+@admin_router.message(BlanksManagementStates.entering_title)
+async def blank_enter_title(message: Message, state: FSMContext):
+    """Ввод названия бланка"""
+    if message.text == "🔙 Вернуться в главное меню":
+        await state.clear()
+        await message.answer("Операция отменена.", reply_markup=get_blanks_management_kb())
+        return
+    
+    await state.update_data(blank_title=message.text)
+    await message.answer(
+        "🔗 Введите ссылку на бланк:\n"
+        "(URL должен начинаться с http:// или https://)",
+        reply_markup=get_back_to_menu_kb()
+    )
+    await state.set_state(BlanksManagementStates.entering_url)
+
+@admin_router.message(BlanksManagementStates.entering_url)
+async def blank_enter_url(message: Message, state: FSMContext):
+    """Ввод URL бланка"""
+    if message.text == "🔙 Вернуться в главное меню":
+        await state.clear()
+        await message.answer("Операция отменена.", reply_markup=get_blanks_management_kb())
+        return
+    
+    # Проверка URL
+    if not message.text.startswith(('http://', 'https://')):
+        await message.answer(
+            "❌ URL должен начинаться с http:// или https://\n"
+            "Попробуйте еще раз:",
+            reply_markup=get_back_to_menu_kb()
+        )
+        return
+    
+    await state.update_data(blank_url=message.text)
+    await message.answer(
+        "📝 Введите описание для бланка:\n"
+        "(краткое описание, для чего используется)\n\n"
+        "Или отправьте '-' чтобы пропустить:",
+        reply_markup=get_back_to_menu_kb()
+    )
+    await state.set_state(BlanksManagementStates.entering_description)
+
+@admin_router.message(BlanksManagementStates.entering_description)
+async def blank_save_item(message: Message, state: FSMContext):
+    """Сохранение бланка"""
+    if message.text == "🔙 Вернуться в главное меню":
+        await state.clear()
+        await message.answer("Операция отменена.", reply_markup=get_blanks_management_kb())
+        return
+    
+    data = await state.get_data()
+    title = data.get('blank_title')
+    url = data.get('blank_url')
+    description = None if message.text == "-" else message.text
+    
+    # Сохраняем в БД
+    success = await db.add_blank_link(
+        title=title,
+        url=url,
+        description=description,
+        added_by=message.from_user.id
+    )
+    
+    if success:
+        await message.answer(
+            f"✅ Бланк успешно добавлен!\n\n"
+            f"📌 Название: {html.escape(title)}\n"
+            f"🔗 Ссылка: {url}\n"
+            f"📝 Описание: {html.escape(description) if description else 'Не указано'}",
+            parse_mode="HTML",
+            reply_markup=get_blanks_management_kb()
+        )
+    else:
+        await message.answer(
+            "❌ Ошибка при сохранении бланка",
+            reply_markup=get_blanks_management_kb()
+        )
+    
+    await state.set_state(BlanksManagementStates.menu)
+
+@admin_router.message(BlanksManagementStates.menu, F.text == "📋 Просмотр бланков")
+async def view_blank_items(message: Message):
+    """Просмотр всех бланков"""
+    items = await db.get_all_blank_links()
+    
+    if not items:
+        await message.answer(
+            "Список бланков пока пуст.",
+            reply_markup=get_blanks_management_kb()
+        )
+        return
+    
+    text = "📋 Список бланков:\n\n"
+    for i, item in enumerate(items, 1):
+        text += f"{i}. {item['title']}\n"
+        text += f"   🔗 {item['url']}\n"
+        if item.get('description'):
+            text += f"   📝 {item['description'][:50]}{'...' if len(item['description']) > 50 else ''}\n"
+        text += f"   📅 Добавлено: {item['created_at']}\n\n"
+    
+    await message.answer(text, reply_markup=get_blanks_management_kb())
+
+@admin_router.message(BlanksManagementStates.menu, F.text == "🗑️ Удалить бланк")
+async def start_delete_blank(message: Message, state: FSMContext):
+    """Начало удаления бланка"""
+    items = await db.get_all_blank_links()
+    
+    if not items:
+        await message.answer(
+            "Список бланков пуст.",
+            reply_markup=get_blanks_management_kb()
+        )
+        return
+    
+    keyboard = []
+    for item in items[:20]:
+        keyboard.append([
+            KeyboardButton(text=f"❌ {item['title'][:40]}")
+        ])
+    keyboard.append([KeyboardButton(text="🔙 Отмена")])
+    
+    await message.answer(
+        "Выберите бланк для удаления:",
+        reply_markup=ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+    )
+    await state.set_state(BlanksManagementStates.deleting_blank)
+
+@admin_router.message(BlanksManagementStates.deleting_blank)
+async def delete_blank(message: Message, state: FSMContext):
+    """Удаление бланка"""
+    if message.text == "🔙 Отмена":
+        await message.answer(
+            "Операция отменена.",
+            reply_markup=get_blanks_management_kb()
+        )
+        await state.set_state(BlanksManagementStates.menu)
+        return
+    
+    if message.text.startswith("❌ "):
+        title = message.text[2:]
+        items = await db.get_all_blank_links()
+        
+        for item in items:
+            if item['title'].startswith(title):
+                success = await db.delete_blank_link(item['id'])
+                if success:
+                    await message.answer(
+                        f"✅ Бланк '{item['title']}' удален",
+                        reply_markup=get_blanks_management_kb()
+                    )
+                else:
+                    await message.answer(
+                        "❌ Ошибка при удалении",
+                        reply_markup=get_blanks_management_kb()
+                    )
+                break
+    
+    await state.set_state(BlanksManagementStates.menu)
+
+# Обработчики возврата в меню
+@admin_router.message(GalleryManagementStates.menu, F.text == "🔙 Назад")
+async def back_from_gallery(message: Message, state: FSMContext):
+    await state.clear()
+    await content_management(message, state)
+
+@admin_router.message(BlanksManagementStates.menu, F.text == "🔙 Назад")
+async def back_from_blanks(message: Message, state: FSMContext):
+    await state.clear()
+    await content_management(message, state)
 
 @admin_router.message(F.text == "📈 Экспорт метрик")
 async def export_metrics(message: Message):
