@@ -20,7 +20,9 @@ class DiseasesProcessor:
         """Разделяет строку на варианты по разделителю (запятая для болезней)"""
         if not text:
             return []
-        variants = [v.strip() for v in re.split(re.escape(delimiter), text) if v.strip()]
+        
+        # Убираем лишние пробелы вокруг разделителя
+        variants = [v.strip() for v in re.split(r'\s*' + re.escape(delimiter) + r'\s*', text) if v.strip()]
         return variants if variants else [text]
     
     def _generate_all_abbreviation_forms(self, abbr: str) -> List[str]:
@@ -196,12 +198,24 @@ class DiseasesProcessor:
                     self._is_part_of_existing_expansion(start, end, existing_expansions)):
                     continue
                 
-                if ngram in search_dict:
+                # 🔄 ИГНОРИРУЕМ РЕГИСТР ПРИ ПОИСКЕ
+                ngram_lower = ngram.lower()
+                found_in_dict = False
+                dict_data = None
+                
+                # Ищем в словаре без учета регистра
+                for key, value in search_dict.items():
+                    if key.lower() == ngram_lower:
+                        found_in_dict = True
+                        dict_data = value
+                        break
+                
+                if found_in_dict and dict_data:
                     matches.append({
                         'start': start, 
                         'end': end, 
                         'found_text': ngram,
-                        'data': search_dict[ngram],
+                        'data': dict_data,
                         'dict_type': dict_type,
                         'word_count': n
                     })
@@ -261,29 +275,29 @@ class DiseasesProcessor:
                 if not official:
                     continue
                 
-                # 🔄 РАЗДЕЛЯЕМ ВАРИАНТЫ ПО ЗАПЯТОЙ
+                # 🔄 РАЗДЕЛЯЕМ ВАРИАНТЫ ПО ЗАПЯТОЙ - ВАЖНО для разговорных названий
                 abbr_variants = self._split_variants(abbr, ',') if abbr else []
                 colloquial_variants = self._split_variants(colloquial, ',') if colloquial else []
                 
                 # Все варианты названий болезни (официальные + разговорные)
                 all_names = [official] + colloquial_variants
                 
-                # 1. Обрабатываем официальные и разговорные названия (с транслитерацией)
+                # 1. Обрабатываем ВСЕ названия (официальные + разговорные)
                 for name in all_names:
                     name_forms = self._generate_disease_forms(name)
                     for nf in name_forms:
-                        if nf not in disease_full:  # 🔄 ИСКЛЮЧАЕМ ПОВТОРНЫЕ ДОБАВЛЕНИЯ
+                        if nf not in disease_full:
                             disease_full[nf] = {
                                 'original_name': official,  # Всегда ссылаемся на официальное название
                                 'type': 'disease_official' if name == official else 'disease_colloquial',
                                 'found_variant': name
                             }
                 
-                # 2. Обрабатываем аббревиатуры болезней (с транслитерацией)
+                # 2. Обрабатываем аббревиатуры болезней
                 for a in abbr_variants:
                     abbr_forms = self._generate_all_abbreviation_forms(a)
                     for af in abbr_forms:
-                        if af not in disease_abbr:  # 🔄 ИСКЛЮЧАЕМ ПОВТОРНЫЕ ДОБАВЛЕНИЯ
+                        if af not in disease_abbr:
                             disease_abbr[af] = {
                                 'original_name': official,
                                 'original_abbr': a,
@@ -293,6 +307,12 @@ class DiseasesProcessor:
             except Exception as e:
                 logger.debug(f"Ошибка обработки строки в болезнях: {e}")
         
+        # Дополнительная отладка - посмотрим, что добавилось для ВИК
+        logger.debug("🔍 Поиск ВИК в disease_full:")
+        for key in disease_full:
+            if 'вик' in key.lower():
+                logger.debug(f"   Найдено: '{key}' -> {disease_full[key]}")
+        
         logger.info(f"✅ Болезни: {len(disease_abbr)} аббр, {len(disease_full)} полных названий")
         
         return {
@@ -300,6 +320,7 @@ class DiseasesProcessor:
             'disease_full': disease_full
         }
     
+
     def expand_query(self, query: str, disease_dicts: Dict) -> str:
         """Применяет расширения болезней к запросу"""
         if not query:
