@@ -682,6 +682,17 @@ async def _contains_other_test_code(text: str, current_test_code: str) -> bool:
 # ОСНОВНЫЕ ОБРАБОТЧИКИ СООБЩЕНИЙ
 # ============================================================================
 
+@questions_router.message(F.text == "🔙 Вернуться в главное меню")
+async def handle_back_to_menu(message: Message, state: FSMContext):
+    """Возврат в главное меню из диалога"""
+    await state.clear()
+    user = await db.get_user(message.from_user.id)
+    role = user.get("role", "user") if user else "user"
+    user_name = get_user_first_name(user)
+    
+    farewell = get_time_based_farewell(user_name)
+    await message.answer(farewell, reply_markup=get_menu_by_role(role))
+
 @questions_router.message(F.text == "🔬 Задать вопрос ассистенту")
 async def start_question(message: Message, state: FSMContext):
     """Начало диалога с ассистентом"""
@@ -720,7 +731,7 @@ async def start_question(message: Message, state: FSMContext):
 ✏️ Просто напишите ваш вопрос или код теста:"""
 
     await db.clear_buffer(user_id)
-    await message.answer(prompt, reply_markup=get_back_to_menu_kb(), parse_mode="HTML")
+    await message.answer(prompt, reply_markup=get_dialog_kb(), parse_mode="HTML")
     await state.set_state(QuestionStates.waiting_for_search_type)
 
 
@@ -762,72 +773,6 @@ async def show_gallery_in_dialog(message: Message, state: FSMContext):
         reply_markup=create_gallery_keyboard(items)
     )
     # Не меняем состояние и не отправляем дополнительные сообщения
-
-@questions_router.message(QuestionStates.waiting_for_search_type, F.text == "📄 Ссылки на бланки")
-async def show_blanks_in_dialog(message: Message, state: FSMContext):
-    """Показывает ссылки на бланки во время диалога"""
-    items = await db.get_all_blank_links()
-    
-    if not items:
-        # Отправляем временное сообщение
-        temp_msg = await message.answer(
-            "📭 Список бланков пока пуст.\n"
-            "Администратор скоро добавит ссылки."
-        )
-        # Удаляем через 3 секунды
-        await asyncio.sleep(3)
-        try:
-            await temp_msg.delete()
-        except:
-            pass
-        return
-    
-    # Формируем текст с описаниями
-    text = "📄 <b>Ссылки на бланки и документы</b>\n\n"
-    
-    has_descriptions = any(item.get('description') for item in items)
-    
-    if has_descriptions:
-        for i, item in enumerate(items, 1):
-            text += f"<b>{html.escape(item['title'])}</b>"
-            if item.get('description'):
-                text += f"\n📝 {html.escape(item['description'])}"
-            text += "\n\n"
-    
-    text += "👆 <i>Нажмите на кнопку для перехода к документу</i>"
-    
-    # Отправляем список бланков
-    await message.answer(
-        text,
-        parse_mode="HTML",
-        reply_markup=create_blanks_keyboard(items),
-        disable_web_page_preview=True
-    )
-    # Не отправляем дополнительные сообщения
-
-# Аналогично обновите обработчики для других состояний:
-@questions_router.message(QuestionStates.waiting_for_code, F.text == "🖼️ Галерея пробирок и контейнеров")
-async def show_gallery_in_code_state(message: Message, state: FSMContext):
-    """Показывает галерею при поиске по коду"""
-    await show_gallery_in_dialog(message, state)
-    # НЕ меняем состояние автоматически
-
-@questions_router.message(QuestionStates.waiting_for_code, F.text == "📄 Ссылки на бланки")
-async def show_blanks_in_code_state(message: Message, state: FSMContext):
-    """Показывает бланки при поиске по коду"""
-    await show_blanks_in_dialog(message, state)
-    # НЕ меняем состояние автоматически
-
-@questions_router.message(QuestionStates.waiting_for_name, F.text == "🖼️ Галерея пробирок и контейнеров")
-async def show_gallery_in_name_state(message: Message, state: FSMContext):
-    """Показывает галерею при поиске по названию"""
-    await show_gallery_in_dialog(message, state)
-    # НЕ меняем состояние автоматически
-
-@questions_router.message(QuestionStates.waiting_for_name, F.text == "📄 Ссылки на бланки")
-async def show_blanks_in_name_state(message: Message, state: FSMContext):
-    """Показывает бланки при поиске по названию"""
-    await show_blanks_in_dialog(message, state)
 
 @questions_router.message(QuestionStates.waiting_for_search_type)
 async def handle_universal_search(message: Message, state: FSMContext):
@@ -978,7 +923,7 @@ async def handle_new_search(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await callback.message.answer(
         "💡 Введите код теста или опишите, что вы ищете:",
-        reply_markup=get_back_to_menu_kb(),
+        reply_markup=get_dialog_kb(),
     )
     await state.set_state(QuestionStates.waiting_for_search_type)
 
@@ -988,7 +933,7 @@ async def handle_search_by_code_callback(callback: CallbackQuery, state: FSMCont
     await callback.answer()
     await callback.message.answer(
         "Введите код теста (например, AN5):", 
-        reply_markup=get_back_to_menu_kb()
+        reply_markup=get_dialog_kb()
     )
     await state.set_state(QuestionStates.waiting_for_code)
 
@@ -999,7 +944,7 @@ async def handle_search_by_name_callback(callback: CallbackQuery, state: FSMCont
     await callback.answer()
     await callback.message.answer(
         "Введите название или описание теста:", 
-        reply_markup=get_back_to_menu_kb()
+        reply_markup=get_dialog_kb()
     )
     await state.set_state(QuestionStates.waiting_for_name)
 
@@ -1847,7 +1792,7 @@ async def process_phone(message: Message, state: FSMContext):
     await message.answer(
         "Отлично! Теперь напишите ваше сообщение.\n"
         "Опишите причину обращения, удобное время для звонка и любую другую важную информацию:",
-        reply_markup=get_back_to_menu_kb()
+        reply_markup=get_dialog_kb()
     )
     await state.set_state(QuestionStates.waiting_for_message)
 
@@ -1927,7 +1872,7 @@ async def handle_cancel_callback(callback: CallbackQuery, state: FSMContext):
     else:
         await callback.message.answer(
             "💡 Что бы вы хотели сделать?",
-            reply_markup=get_back_to_menu_kb()
+            reply_markup=get_dialog_kb()
         )
 
 @questions_router.message(QuestionStates.waiting_for_code)
@@ -2003,7 +1948,7 @@ async def _handle_code_search_internal(
                 
                 await message.answer(
                     f"❌ Не удалось распознать код теста: {html.escape(original_input[:50])}",
-                    reply_markup=get_back_to_menu_kb(),
+                    reply_markup=get_dialog_kb(),
                     parse_mode="HTML"
                 )
                 return
@@ -2144,7 +2089,7 @@ async def _handle_code_search_internal(
                     
                     await message.answer(
                         error_msg, 
-                        reply_markup=get_back_to_menu_kb(), 
+                        reply_markup=get_dialog_kb(), 
                         parse_mode="HTML"
                     )
 
@@ -2218,7 +2163,7 @@ async def _handle_code_search_internal(
             await safe_cancel_animation(animation_task)
             await safe_delete_message(loading_msg)
             await safe_delete_message(gif_msg)
-            await message.answer("⏹ Поиск остановлен.", reply_markup=get_back_to_menu_kb())
+            await message.answer("⏹ Поиск остановлен.", reply_markup=get_dialog_kb())
 
         except Exception as e:
             logger.error(f"[CODE_SEARCH] Failed: {e}", exc_info=True)
@@ -2229,7 +2174,7 @@ async def _handle_code_search_internal(
 
             await message.answer(
                 "⚠️ Ошибка при поиске. Попробуйте позже",
-                reply_markup=get_back_to_menu_kb()
+                reply_markup=get_dialog_kb()
             )
             await state.set_state(QuestionStates.waiting_for_search_type)
 
@@ -2332,7 +2277,7 @@ async def _handle_name_search_internal(
 
                 await message.answer(
                     not_found_msg,
-                    reply_markup=get_back_to_menu_kb(),
+                    reply_markup=get_dialog_kb(),
                     parse_mode="HTML"
                 )
 
@@ -2496,7 +2441,7 @@ async def _handle_name_search_internal(
                 if str(e) == "Тесты не найдены"
                 else "⚠️ Ошибка поиска. Попробуйте позже."
             )
-            await message.answer(error_msg, reply_markup=get_back_to_menu_kb())
+            await message.answer(error_msg, reply_markup=get_dialog_kb())
             await state.set_state(QuestionStates.waiting_for_search_type)
 
 
@@ -3416,4 +3361,3 @@ __all__ = [
     "create_test_link",
     "normalize_test_code",
 ]
-

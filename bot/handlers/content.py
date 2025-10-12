@@ -4,13 +4,40 @@ from aiogram.fsm.context import FSMContext
 import html
 
 from src.database.db_init import db
-from bot.keyboards import get_dialog_kb
+from bot.keyboards import get_main_menu_kb, get_menu_by_role
 
 content_router = Router()
 
 # ============================================================
-# ГАЛЕРЕЯ ПРОБИРОК
+# ГАЛЕРЕЯ ПРОБИРОК - ПОКАЗ ПОЛЬЗОВАТЕЛЯМ
 # ============================================================
+
+@content_router.message(F.text == "🖼️ Галерея пробирок и контейнеров")
+async def show_gallery(message: Message):
+    """Показ галереи пользователю"""
+    user_id = message.from_user.id
+    user = await db.get_user(user_id)
+    
+    if not user:
+        await message.answer("Для использования этой функции необходимо пройти регистрацию.\nИспользуйте команду /start")
+        return
+    
+    items = await db.get_all_gallery_items()
+    
+    if not items:
+        await message.answer(
+            "🖼️ Галерея пока пуста.\n"
+            "Администратор еще не добавил фотографии.",
+            reply_markup=get_menu_by_role(user.get('role', 'user'))
+        )
+        return
+    
+    await message.answer(
+        "🖼️ <b>Галерея пробирок и контейнеров</b>\n\n"
+        "Выберите интересующий вас элемент:",
+        parse_mode="HTML",
+        reply_markup=create_gallery_keyboard(items)
+    )
 
 def create_gallery_keyboard(items):
     """Создает inline клавиатуру для галереи"""
@@ -75,15 +102,14 @@ async def show_gallery_item(callback: CallbackQuery):
 
 @content_router.callback_query(F.data == "back_to_gallery")
 async def back_to_gallery(callback: CallbackQuery):
-    """Возврат к списку галереи - редактируем сообщение вместо создания нового"""
+    """Возврат к списку галереи"""
     await callback.answer()
     
     items = await db.get_all_gallery_items()
     
     if items:
         try:
-            # Пытаемся отредактировать текущее сообщение с фото
-            # Telegram не позволяет редактировать фото в текст, поэтому удаляем и создаем новое
+            # Удаляем фото и показываем список
             await callback.message.delete()
             
             # Отправляем список галереи
@@ -115,90 +141,35 @@ async def close_gallery_and_photo(callback: CallbackQuery):
         pass
 
 # ============================================================
-# АЛЬТЕРНАТИВНОЕ РЕШЕНИЕ - Используем медиа группы
+# ССЫЛКИ НА БЛАНКИ - ПОКАЗ ПОЛЬЗОВАТЕЛЯМ
 # ============================================================
 
-async def show_gallery_with_preview(message: Message, items: list):
-    """Показывает галерею с превью изображений"""
-    if not items:
+@content_router.message(F.text == "📄 Ссылки на бланки")
+async def show_blanks(message: Message):
+    """Показ бланков пользователю"""
+    user_id = message.from_user.id
+    user = await db.get_user(user_id)
+    
+    if not user:
+        await message.answer("Для использования этой функции необходимо пройти регистрацию.\nИспользуйте команду /start")
         return
     
-    # Создаем текст с нумерованным списком
-    text = "🖼️ <b>Галерея пробирок и контейнеров</b>\n\n"
+    items = await db.get_all_blank_links()
     
-    keyboard = []
-    for i, item in enumerate(items, 1):
-        text += f"{i}. {html.escape(item['title'])}\n"
-        if item.get('description'):
-            text += f"   <i>{html.escape(item['description'][:50])}...</i>\n"
-        text += "\n"
-        
-        # Кнопка для просмотра
-        keyboard.append([
-            InlineKeyboardButton(
-                text=f"👁 Посмотреть: {item['title'][:30]}...",
-                callback_data=f"view_gallery_{item['id']}"
-            )
-        ])
-    
-    keyboard.append([
-        InlineKeyboardButton(text="🔙 Закрыть", callback_data="close_gallery")
-    ])
+    if not items:
+        await message.answer(
+            "📄 Список бланков пока пуст.\n"
+            "Администратор еще не добавил ссылки на бланки.",
+            reply_markup=get_menu_by_role(user.get('role', 'user'))
+        )
+        return
     
     await message.answer(
-        text,
+        "📄 <b>Ссылки на бланки</b>\n\n"
+        "Выберите нужный бланк для открытия:",
         parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+        reply_markup=create_blanks_keyboard(items)
     )
-
-@content_router.callback_query(F.data.startswith("view_gallery_"))
-async def view_gallery_item_inline(callback: CallbackQuery):
-    """Показывает элемент галереи через редактирование сообщения"""
-    await callback.answer()
-    
-    try:
-        item_id = int(callback.data.split("_")[-1])
-        item = await db.get_gallery_item(item_id)
-        
-        if not item:
-            await callback.answer("Элемент не найден", show_alert=True)
-            return
-        
-        # Отправляем фото отдельным сообщением с кнопкой удаления
-        close_keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[[
-                InlineKeyboardButton(text="❌ Закрыть фото", callback_data=f"close_photo_{item_id}")
-            ]]
-        )
-        
-        caption = f"📌 <b>{html.escape(item['title'])}</b>"
-        if item.get('description'):
-            caption += f"\n\n📝 {html.escape(item['description'])}"
-        
-        # Отправляем фото
-        await callback.message.answer_photo(
-            photo=item['file_id'],
-            caption=caption,
-            parse_mode="HTML",
-            reply_markup=close_keyboard
-        )
-        
-    except Exception as e:
-        print(f"[ERROR] Failed to view gallery item: {e}")
-        await callback.answer("Ошибка при загрузке", show_alert=True)
-
-@content_router.callback_query(F.data.startswith("close_photo_"))
-async def close_photo_only(callback: CallbackQuery):
-    """Закрывает только фото, оставляя список галереи"""
-    await callback.answer("Фото закрыто")
-    try:
-        await callback.message.delete()
-    except:
-        pass
-
-# ============================================================
-# ССЫЛКИ НА БЛАНКИ
-# ============================================================
 
 def create_blanks_keyboard(items):
     """Создает inline клавиатуру для бланков"""

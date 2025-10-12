@@ -1,11 +1,9 @@
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
 def get_back_to_menu_kb():
-    """Клавиатура с кнопками контента и завершением диалога"""
+    """Клавиатура с кнопкой возврата в меню"""
     kb = [
-        [KeyboardButton(text="🖼️ Галерея пробирок и контейнеров")],
-        [KeyboardButton(text="📄 Ссылки на бланки")],
-        [KeyboardButton(text="❌ Завершить диалог")]
+        [KeyboardButton(text="🔙 Вернуться в главное меню")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
@@ -120,29 +118,51 @@ def get_main_menu_kb():
     """Единое меню для всех пользователей (кроме админа)"""
     kb = [
         [KeyboardButton(text="🔬 Задать вопрос ассистенту")],
-        [KeyboardButton(text="📚 Часто задаваемые вопросы")],
-        [KeyboardButton(text="📞 Заказать звонок")],
-        [KeyboardButton(text="💡 Предложения и пожелания")]
+        # [KeyboardButton(text="📚 Часто задаваемые вопросы")],
+        [KeyboardButton(text="🖼️ Галерея пробирок и контейнеров")],
+        [KeyboardButton(text="📄 Ссылки на бланки")],
+        [KeyboardButton(text="📞 Связь с лабораторией")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
 def get_admin_menu_kb():
     """Меню для администраторов с логической группировкой"""
     kb = [
-        [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="👥 Пользователи")],
-        [KeyboardButton(text="🔑 Активировать код"), KeyboardButton(text="🔐 Создать код")],
-        [KeyboardButton(text="📥 Выгрузка в Excel"), KeyboardButton(text="📈 Экспорт метрик")],
+        # Аналитика
+        [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="📈 Экспорт метрик")],
+        [KeyboardButton(text="📥 Выгрузка в Excel")],
+        
+        # Пользователи и коды
+        [KeyboardButton(text="👥 Пользователи")],
+        [KeyboardButton(text="🔐 Создать код"), KeyboardButton(text="🔑 Активировать код")],
+        
+        # Обращения и коммуникации
         [KeyboardButton(text="📋 Все обращения"), KeyboardButton(text="📋 Опросы")],
-        [KeyboardButton(text="📢 Рассылка"), KeyboardButton(text="🎨 Управление контентом")],
-        [KeyboardButton(text="🔧 Управление системой"), KeyboardButton(text="📚 Часто задаваемые вопросы")],
+        [KeyboardButton(text="📢 Рассылка")],
+        
+        # Контент и система
+        [KeyboardButton(text="🎨 Управление контентом"), KeyboardButton(text="📚 Часто задаваемые вопросы")],
+        [KeyboardButton(text="🔧 Управление системой")],
+        
+        # Основные функции
         [KeyboardButton(text="🔬 Задать вопрос ассистенту")],
-        [KeyboardButton(text="📞 Заказать звонок"), KeyboardButton(text="💡 Обратная связь")]
+        [KeyboardButton(text="🖼️ Просмотр галереи"), KeyboardButton(text="📄 Просмотр бланков")],
+        [KeyboardButton(text="📞 Связь с лабораторией")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
 def get_phone_kb():
     kb = [
         [KeyboardButton(text="📱 Поделиться номером", request_contact=True)],
+        [KeyboardButton(text="🔙 Вернуться в главное меню")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
+def get_contact_type_kb():
+    """Клавиатура выбора типа обращения для связи с лабораторией"""
+    kb = [
+        [KeyboardButton(text="📞 Заказать звонок")],
+        [KeyboardButton(text="💡 Предложение/жалоба")],
         [KeyboardButton(text="🔙 Вернуться в главное меню")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
@@ -165,8 +185,6 @@ def get_dialog_kb():
     """Клавиатура для диалога с ассистентом"""
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="🖼️ Галерея пробирок и контейнеров")],
-            [KeyboardButton(text="📄 Ссылки на бланки")],
             [KeyboardButton(text="❌ Завершить диалог")]
         ],
         resize_keyboard=True

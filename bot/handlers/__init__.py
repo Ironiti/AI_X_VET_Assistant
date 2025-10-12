@@ -14,7 +14,7 @@ from bot.handlers.content import content_router
 from bot.handlers.utils import gif_router, file_router
 from bot.handlers.faq_handler import faq_router
 from bot.handlers.metrics_handler import metrics_router
-# from bot.middleware.metrics_middleware import MetricsMiddleware
+from bot.middleware.metrics_middleware import MetricsMiddleware
 # from .questions import questions_router, questions_callbacks_router
 from config import BOT_API_KEY
 
@@ -28,7 +28,7 @@ bot = Bot(
 dp = Dispatcher(storage=MemoryStorage())
 
 # Подключаем middleware для метрик
-# dp.message.middleware(MetricsMiddleware())
+dp.message.middleware(MetricsMiddleware())
 
 dp.include_router(registration_router)
 # dp.include_router(questions_callbacks_router)

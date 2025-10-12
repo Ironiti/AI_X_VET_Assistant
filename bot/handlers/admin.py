@@ -2212,3 +2212,48 @@ async def export_metrics(message: Message):
             f"❌ Ошибка при экспорте метрик: {str(e)}",
             reply_markup=get_admin_menu_kb()
         )
+
+# Обработчики для просмотра контента админом (как обычный пользователь)
+@admin_router.message(F.text == "🖼️ Просмотр галереи")
+async def admin_view_gallery(message: Message):
+    """Просмотр галереи админом как пользователем"""
+    items = await db.get_all_gallery_items()
+    
+    if not items:
+        await message.answer(
+            "🖼️ Галерея пока пуста.\n"
+            "Добавьте элементы через 'Управление контентом'.",
+            reply_markup=get_admin_menu_kb()
+        )
+        return
+    
+    from bot.handlers.content import create_gallery_keyboard
+    
+    await message.answer(
+        "🖼️ <b>Галерея пробирок и контейнеров</b>\n\n"
+        "Выберите интересующий вас элемент:",
+        parse_mode="HTML",
+        reply_markup=create_gallery_keyboard(items)
+    )
+
+@admin_router.message(F.text == "📄 Просмотр бланков")
+async def admin_view_blanks(message: Message):
+    """Просмотр бланков админом как пользователем"""
+    items = await db.get_all_blank_links()
+    
+    if not items:
+        await message.answer(
+            "📄 Список бланков пока пуст.\n"
+            "Добавьте бланки через 'Управление контентом'.",
+            reply_markup=get_admin_menu_kb()
+        )
+        return
+    
+    from bot.handlers.content import create_blanks_keyboard
+    
+    await message.answer(
+        "📄 <b>Ссылки на бланки</b>\n\n"
+        "Выберите нужный бланк для открытия:",
+        parse_mode="HTML",
+        reply_markup=create_blanks_keyboard(items)
+    )
