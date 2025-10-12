@@ -285,7 +285,7 @@ class DataProcessor:
             
             return matches[:top_k]
             
-        return self.vector_store.similarity_search_with_score(query, k=top_k)
+        return self.vector_store.similarity_search_with_score(query.lower(), k=top_k)
     
     def check_test_codes(self):
         if self.vector_store is None:

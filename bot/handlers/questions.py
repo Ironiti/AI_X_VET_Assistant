@@ -74,7 +74,6 @@ LOADING_GIF_ID = "CgACAgIAAxkBAAIBFGiBcXtGY7OZvr3-L1dZIBRNqSztAALueAACpqh5Scn4Vm
 FUZZY_SEARCH_THRESHOLD_MIN = 55  # Увеличен с 30 до 55
 FUZZY_SEARCH_THRESHOLD_EXACT = 90
 TEXT_SEARCH_TOP_K = 80
-SIMILAR_TESTS_TOP_K = 50
 
 # Параметры пагинации
 ITEMS_PER_PAGE = 6
@@ -146,6 +145,8 @@ class QuestionStates(StatesGroup):
     confirming_search_type = State()
     waiting_for_phone = State()
     waiting_for_message = State()
+    waiting_for_comment = State()
+
 
 
 # ============================================================================
@@ -221,33 +222,8 @@ def sanitize_test_code_for_display(test_code: str) -> str:
 
 def _rerank_hits_by_query(hits: List[Tuple[Document, float]], query: str) -> List[Tuple[Document, float]]:
     """Перераспределение результатов на основе соответствия запросу"""
-    if not hits:
-        return hits
-    
-    query = expand_query_with_abbreviations(query)
-    query_alpha = "".join(ch for ch in (query or "") if ch.isalpha()).upper()
-    
-    if len(query_alpha) < 2 or len(query_alpha) > 6:
-        return hits
-
-    rescored: List[Tuple[Document, float]] = []
-    for doc, base_score in hits:
-        code_upper = str(doc.metadata.get("test_code", "")).upper()
-        bonus = 0.0
-
-        if code_upper.startswith(query_alpha):
-            bonus += 0.5
-        elif query_alpha in code_upper:
-            bonus += 0.25
-        else:
-            if base_score < 0.6:
-                bonus -= 0.15
-
-        new_score = max(0.0, min(1.0, base_score + bonus))
-        rescored.append((doc, new_score))
-
-    rescored.sort(key=lambda x: x[1], reverse=True)
-    return rescored
+    hits.sort(key=lambda x: x[1], reverse=True)
+    return hits
 
 
 async def apply_animal_filter(
@@ -864,6 +840,14 @@ async def handle_universal_search(message: Message, state: FSMContext):
         return
 
     # ============================================================
+    # Сохраняем флаг того, что это запрос с классификацией
+    # ============================================================
+    await state.update_data(
+        is_classification_flow=True,  # Флаг что это запрос с определением типа
+        original_user_query=text      # Сохраняем оригинальный запрос
+    )
+
+    # ============================================================
     # ПРИОРИТЕТ 1: Проверка на явный общий вопрос
     # ============================================================
     
@@ -1031,6 +1015,12 @@ async def handle_confirm_search_callback(callback: CallbackQuery, state: FSMCont
     classification = data.get("query_classification", {})
     
     if action == "yes":
+        # Очищаем флаги классификации перед обработкой
+        await state.update_data(
+            requires_confirmation=False,
+            requires_clarification=False
+        )
+        
         query_type = classification.get("type", "general")
         original_query = classification.get("original_query", "")
         expanded_query = original_query
@@ -1087,6 +1077,12 @@ async def handle_clarify_search_callback(callback: CallbackQuery, state: FSMCont
     original_query = data.get("query_classification", {}).get("original_query", "")
     expanded_query = original_query
 
+    # Очищаем флаги классификации перед обработкой
+    await state.update_data(
+        requires_confirmation=False,
+        requires_clarification=False
+    )
+
     await callback.message.edit_reply_markup(reply_markup=None)
     await callback.message.answer(
         f"✅ Ищу как {search_type}...", 
@@ -1111,6 +1107,7 @@ async def handle_clarify_search_callback(callback: CallbackQuery, state: FSMCont
             request_text=original_query
         )
         await handle_general_question(mock_msg, state, expanded_query)
+
 
 
 @questions_router.callback_query(F.data.startswith("show_test:"))
@@ -2343,7 +2340,7 @@ async def _handle_name_search_internal(
                 return
 
             # Выбираем лучшие совпадения
-            selected_docs = await select_best_match(text, rag_hits[:SIMILAR_TESTS_TOP_K])
+            selected_docs = await select_best_match(text, rag_hits)
 
             # Записываем статистику
             for doc in selected_docs[:1]:
@@ -2462,9 +2459,11 @@ async def _handle_name_search_internal(
 
             if should_ask:
                 # Сохраняем информацию о запросе и результатах
+                rating_response = response
+            
                 await state.update_data({
                     f"last_question_{rating_id}": text,
-                    f"last_response_{rating_id}": f"Найдено {total_count} результатов"
+                    f"last_response_{rating_id}": rating_response
                 })
                 
                 # Запрашиваем оценку через 1 секунду
@@ -2894,6 +2893,11 @@ async def _process_confident_query(
     metadata: Dict
 ):
     """Обработка запроса с высокой уверенностью классификатора"""
+    await state.update_data(
+        requires_confirmation=False,
+        requires_clarification=False
+    )
+
     user_id = message.from_user.id
     expanded_query = expand_query_with_abbreviations(text)
     
@@ -2992,6 +2996,14 @@ async def _ask_confirmation(
     confidence: float
 ):
     """Запрос подтверждения типа поиска"""
+    
+    # Устанавливаем флаг что это запрос с подтверждением типа
+    await state.update_data(
+        requires_confirmation=True,  # Флаг что требуется подтверждение
+        requires_clarification=False,
+        confirmation_query_type=query_type
+    )
+    
     type_descriptions = {
         "code": "поиск по коду теста",
         "name": "поиск по названию теста", 
@@ -3037,6 +3049,13 @@ async def _clarify_with_llm(
     confidence: float
 ):
     """Уточнение типа поиска через inline кнопки"""
+    
+    # Устанавливаем флаг что это запрос с уточнением типа
+    await state.update_data(
+        requires_confirmation=False,
+        requires_clarification=True  # Флаг что требуется уточнение типа
+    )
+
     clarification_text = (
         f"🔍 Я не совсем уверен, что вы ищете.\n\n"
         f"Ваш запрос: <b>{html.escape(text)}</b>\n\n"
@@ -3142,26 +3161,25 @@ async def send_test_info_with_photo(
     )
     return True
 
+# ============================================================================
+# ОБРАБОТЧИКИ ОЦЕНОК И КОММЕНТАРИЕВ
+# ============================================================================
+
 @questions_router.callback_query(F.data.startswith("rating:"))
 async def handle_rating_callback(callback: CallbackQuery, state: FSMContext):
-    """Обработка оценки ответа с преобразованием сообщения"""
+    """Обработчик оценок ответов"""
     await callback.answer()
     
     try:
-        # Парсим callback data
         parts = callback.data.split(":")
-        if len(parts) != 3:
-            return
-            
         rating_id = parts[1]
         rating = int(parts[2])
         
-        # Получаем сохраненные данные вопроса и ответа
         data = await state.get_data()
         question = data.get(f"last_question_{rating_id}", "")
         response = data.get(f"last_response_{rating_id}", "")
         
-        # Сохраняем оценку в базу
+        # Сохраняем оценку
         await rating_manager.save_rating(
             user_id=callback.from_user.id,
             rating_id=rating_id,
@@ -3170,74 +3188,219 @@ async def handle_rating_callback(callback: CallbackQuery, state: FSMContext):
             response=response
         )
         
-        # Отправляем оценку в группу
-        rating_message = rating_manager.prepare_rating_message(
+        if rating <= 3:
+            # Для плохих оценок (1-3) - сохраняем данные и предлагаем комментарий
+            await state.update_data({
+                f"pending_rating_{rating_id}": {
+                    "rating": rating,
+                    "question": question,
+                    "response": response,
+                    "user_name": callback.from_user.full_name
+                }
+            })
+            
+            feedback_keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="💬 Написать комментарий", 
+                            callback_data=f"add_comment:{rating_id}"
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text="🚫 Пропустить комментарий", 
+                            callback_data=f"skip_comment:{rating_id}"
+                        )
+                    ]
+                ]
+            )
+            
+            await callback.message.edit_text(
+                f"❌ Спасибо за оценку {rating} ⭐\n\n"
+                "Мы сожалеем, что ответ не соответствовал ожиданиям. "
+                "Пожалуйста, помогите нам улучшить бота - напишите, что можно улучшить?",
+                parse_mode="HTML",
+                reply_markup=feedback_keyboard
+            )
+        else:
+            # Для хороших оценок (4-5) - благодарим и УБИРАЕМ кнопки оценки
+            await callback.message.edit_text(
+                f"✅ Спасибо за оценку {rating} ⭐!\n\n"
+                "Мы рады, что смогли помочь! 🎉",
+                parse_mode="HTML",
+                reply_markup=None  # Убираем кнопки оценки
+            )
+            
+            # Восстанавливаем обычное состояние
+            await state.set_state(QuestionStates.waiting_for_search_type)
+            
+    except Exception as e:
+        logger.error(f"[RATING] Error: {e}")
+        await callback.answer("Ошибка при обработке оценки", show_alert=True)
+
+
+
+@questions_router.callback_query(F.data.startswith("add_comment:"))
+async def handle_add_comment(callback: CallbackQuery, state: FSMContext):
+    """Обработчик для добавления комментария к плохой оценке"""
+    await callback.answer()
+    
+    rating_id = callback.data.split(":")[1]
+    
+    # Сохраняем текущие данные о состоянии перед переходом в режим комментария
+    current_data = await state.get_data()
+    await state.update_data({
+        "current_rating_id": rating_id,
+        "previous_state_data": current_data  # Сохраняем предыдущее состояние
+    })
+    
+    # Устанавливаем специальное состояние для комментария
+    await state.set_state(QuestionStates.waiting_for_comment)
+    
+    # УДАЛЯЕМ кнопки "Что бы вы хотели сделать дальше?" и показываем интерфейс комментария
+    await callback.message.edit_text(
+        "💬 <b>Пожалуйста, напишите ваш комментарий:</b>\n\n"
+        "Что именно не устроило в ответе? Что можно улучшить?\n"
+        "Ваши замечания помогут нам сделать бота лучше!\n\n"
+        "<i>Просто напишите ваш комментарий в этом чате...</i>",
+        parse_mode="HTML",
+        reply_markup=None  # Убираем все кнопки
+    )
+
+@questions_router.callback_query(F.data.startswith("skip_comment:"))
+async def handle_skip_comment(callback: CallbackQuery, state: FSMContext):
+    """Пропуск комментария для плохой оценки"""
+    await callback.answer()
+    
+    rating_id = callback.data.split(":")[1]
+    data = await state.get_data()
+    
+    rating_data = data.get(f"pending_rating_{rating_id}")
+    if rating_data:
+        # Отправляем плохую оценку БЕЗ комментария в группу
+        success = await rating_manager.send_rating_to_group(
+            bot=callback.bot,
             user_id=callback.from_user.id,
-            rating=rating,
-            question=question,
-            response=response,
-            user_name=callback.from_user.full_name
+            rating=rating_data["rating"],
+            question=rating_data["question"],
+            response=rating_data["response"],
+            user_name=rating_data["user_name"]
         )
         
-        try:
-            await callback.bot.send_message(
-                chat_id=rating_manager.group_id,
-                text=rating_message,
-                parse_mode="HTML"
-            )
-        except Exception as e:
-            logger.error(f"[RATING] Failed to send to group: {e}")
-        
-        # Преобразуем сообщение с оценками в зависимости от оценки
-        if rating <= 3:
-            # Для низких оценок - показываем предложение улучшений
-            feedback_keyboard = rating_manager.create_feedback_group_keyboard()
-            
-            try:
-                await callback.message.edit_text(
-                    f"❌ Спасибо за честную оценку {rating} ⭐\n\n"
-                    "💬 Мы хотим стать лучше! Присоединяйтесь к нашему чату "
-                    "и помогите нам улучшить бота:",
-                    parse_mode="HTML",
-                    reply_markup=feedback_keyboard
-                )
-            except Exception as e:
-                logger.warning(f"[RATING] Failed to edit message for low rating: {e}")
-                # Fallback - отправляем новое сообщение
-                await callback.message.answer(
-                    f"❌ Спасибо за честную оценку {rating} ⭐\n\n"
-                    "💬 Мы хотим стать лучше! Присоединяйтесь к нашему чату:",
-                    parse_mode="HTML",
-                    reply_markup=feedback_keyboard
-                )
-                
+        if success:
+            logger.info(f"[RATING] Successfully sent rating {rating_data['rating']} to group")
         else:
-            # Для высоких оценок - просто благодарим
-            try:
-                await callback.message.edit_text(
-                    f"✅ Спасибо за высокую оценку {rating} ⭐!\n\n"
-                    "Мы рады, что смогли вам помочь! 🎉",
-                    parse_mode="HTML",
-                    reply_markup=None
+            logger.error(f"[RATING] Failed to send rating to group")
+    
+    # УДАЛЯЕМ кнопки оценки и показываем финальное сообщение
+    await callback.message.edit_text(
+        "📢 Оценка отправлена разработчикам!\n\n"
+        "💡 <b>Присоединяйтесь к нашей группе</b> - там вы можете:\n"
+        "• 🗣️ Участвовать в обсуждении улучшений\n"
+        "• 💡 Предлагать новые идеи\n"
+        "• ❓ Задавать сложные вопросы\n\n"
+        "Ваше мнение важно для нас! 🙏",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="💬 Присоединиться к группе обсуждения", 
+                        url=rating_manager.feedback_group_link
+                    )
+                ]
+            ]
+        )
+    )
+    
+    # ВОССТАНАВЛИВАЕМ обычное состояние
+    await state.set_state(QuestionStates.waiting_for_search_type)
+    
+
+    
+    # Очищаем временные данные
+    await state.update_data({
+        f"pending_rating_{rating_id}": None,
+        "current_rating_id": None,
+        "previous_state_data": None
+    })
+
+
+
+@questions_router.message(QuestionStates.waiting_for_comment, F.text)
+async def handle_comment_text(message: Message, state: FSMContext):
+    """Обработчик текстовых комментариев к плохим оценкам (в специальном состоянии)"""
+    try:
+        data = await state.get_data()
+        rating_id = data.get("current_rating_id")
+        
+        if not rating_id:
+            await message.answer("❌ Ошибка: не найден ID оценки. Возвращаюсь в обычный режим.")
+            await state.set_state(QuestionStates.waiting_for_search_type)
+
+            return
+        
+        rating_data = data.get(f"pending_rating_{rating_id}")
+        
+        if rating_data and message.text:
+            # Отправляем плохую оценку С комментарием в группу
+            success = await rating_manager.send_rating_to_group(
+                bot=message.bot,
+                user_id=message.from_user.id,
+                rating=rating_data["rating"],
+                question=rating_data["question"],
+                response=rating_data["response"],
+                user_name=rating_data["user_name"],
+                comment=message.text
+            )
+            
+            if success:
+                logger.info(f"[RATING] Successfully sent rating with comment to group")
+            else:
+                logger.error(f"[RATING] Failed to send rating with comment to group")
+            
+            # Показываем сообщение о успешной отправке с кнопкой группы
+            await message.answer(
+                "📢 Ваш комментарий отправлен разработчикам!\n\n"
+                "💡 <b>Спасибо за обратную связь!</b>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="💬 Присоединиться к группе обсуждения", 
+                                url=rating_manager.feedback_group_link
+                            )
+                        ]
+                    ]
                 )
-            except Exception as e:
-                logger.warning(f"[RATING] Failed to edit message for high rating: {e}")
-                # Fallback - отправляем новое сообщение
-                await callback.message.answer(
-                    f"✅ Спасибо за высокую оценку {rating} ⭐!\n\n"
-                    "Мы рады, что смогли вам помочь! 🎉",
-                    parse_mode="HTML"
-                )
+            )
+            
+        else:
+            await message.answer("❌ Не удалось обработать комментарий.")
+        
+        # ВОССТАНАВЛИВАЕМ обычное состояние бота
+        await state.set_state(QuestionStates.waiting_for_search_type)
+        
+
         
         # Очищаем временные данные
         await state.update_data({
-            f"last_question_{rating_id}": None,
-            f"last_response_{rating_id}": None
+            "current_rating_id": None,
+            f"pending_rating_{rating_id}": None,
+            "previous_state_data": None
         })
         
     except Exception as e:
-        logger.error(f"[RATING] Failed to process rating: {e}")
-        await callback.answer("⚠️ Ошибка при обработке оценки", show_alert=True)        
+        logger.error(f"[COMMENT] Error processing comment: {e}")
+        await message.answer("❌ Ошибка при обработке комментария.")
+        # Все равно восстанавливаем состояние и ВОЗВРАЩАЕМ кнопки
+        await state.set_state(QuestionStates.waiting_for_search_type)
+        await message.answer(
+            reply_markup=get_dialog_kb()  # ВОЗВРАЩАЕМ кнопки
+        )
+
 
 # ============================================================================
 # ЭКСПОРТЫ
@@ -3253,3 +3416,4 @@ __all__ = [
     "create_test_link",
     "normalize_test_code",
 ]
+

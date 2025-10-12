@@ -181,7 +181,7 @@ def enhance_data_with_vet_abbreviations(df):
         
         # 1. Добавляем оригинальные данные (только непустые)
         base_fields = [
-            test_name, test_name, test_name,
+            test_name, test_name, test_name, test_name,
             department, department,
             specialization,
             safe_str(row.get('type', '')),
@@ -225,7 +225,7 @@ def enhance_data_with_vet_abbreviations(df):
         
         # Создаем улучшенную строку
         enhanced_row = row.copy()
-        enhanced_row['column_for_embeddings'] = cleaned_enhanced_text
+        enhanced_row['column_for_embeddings'] = cleaned_enhanced_text.lower()
         enhanced_row['column_for_embeddings_raw'] = enhanced_text  # сохраняем исходник для отладки
         
         enhanced_rows.append(enhanced_row)
