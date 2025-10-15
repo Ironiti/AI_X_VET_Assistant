@@ -2,27 +2,6 @@ import pandas as pd
 import re
 from bot.handlers.query_processing.vet_abbreviations_expander import vet_abbr_manager
 
-ADDITIONAL_FILES_ID = {
-    "БЕШЕНСТВО_Преаналитические_требования_к_тесту_AN239RAB_и_AN239RABCT": 
-    "BQACAgIAAxkBAAII72jQbFAOtMFdnBhD7VZFuUeLJ0HXAALBjwACmcaBSrzizdMGLOuKNgQ",
-}
-
-GENERAL_FILES_ID = {
-    "Генетика": "BQACAgIAAxkBAAII82jQbUoZIYPP3VQ8nQ1CPZYsrEXKAALHjwACmcaBSqn9S_LmpRcvNgQ",
-    "Дерматогистопатология": "BQACAgIAAxkBAAII9WjQbWAiy5aknLJcs75rew0S4QqvAALIjwACmcaBSusQGqVqkwLFNgQ",
-    "ИГХ": "BQACAgIAAxkBAAII92jQbXOaPqCPr3V27hRAd0n8v9IUAALJjwACmcaBSjdrVPg51hNtNgQ",
-    "Кошки ПЦР": "BQACAgIAAxkBAAII-WjQbYVetGAv-WqhWfRHtTHoCZdqAALKjwACmcaBSvaDUOqZvexnNgQ",
-    "КРС": "BQACAgIAAxkBAAII-2jQbZTXE-fCWLaMtEMkCMqasKoAA8uPAAKZxoFKAAGO24UFApqBNgQ",
-    "Курицы": "BQACAgIAAxkBAAII_WjQbZ_ETi0J5APGfNmeF8YNcLPOAALMjwACmcaBSsya_1-lQKMUNgQ",
-    "Лошади": "BQACAgIAAxkBAAII_2jQba5DDh66bacHOCirl-S2CHnJAALOjwACmcaBSpdf1cpcrIDXNgQ",
-    "Микробиология": "BQACAgIAAxkBAAIJAAFo0G2uEJsU7aLi0tb365Zim8DyCwACzY8AApnGgUodmoxym_SdUDYE",
-    "Морские млекопитающие": "BQACAgIAAxkBAAIJAWjQba6Oy1jZWN-y3cR-3J9xxuNoAALPjwACmcaBSskM-hFm2_y6NgQ",
-    "МРС": "BQACAgIAAxkBAAIJAmjQba4_-_aL-roU0Hj6dtEFZNywAALQjwACmcaBSiP-NhffKv7CNgQ",
-    "Общий": "BQACAgIAAxkBAAIJA2jQba67tA7Ep821cfFKOTJWrtMqAALSjwACmcaBSskWqVBUyuhWNgQ",
-    "Патоморфология": "BQACAgIAAxkBAAIJBGjQba50bmZnkcaual_HZ6i5xzjzAALRjwACmcaBSuSohFck834gNgQ",
-    "Свиньи": "BQACAgIAAxkBAAIJBWjQba60VwAB3hNtgXoy9_yvO1TU6gAC1I8AApnGgUr-3nki5PqljTYE",
-    "Собаки ПЦР": "BQACAgIAAxkBAAIJBmjQba5-qPCjySOWfqTKh-YGIcNaAALTjwACmcaBSmLVE-maQHEHNgQ"
-}
 
 ADDITIONAL_FILES_LINKS = {
     "БЕШЕНСТВО_Преаналитические_требования_к_тесту_AN239RAB_и_AN239RABCT": 

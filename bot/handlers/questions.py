@@ -42,6 +42,7 @@ from bot.handlers.sending_style import (
     format_test_info,
     get_user_first_name,
     get_time_based_farewell,
+    send_blank_files
 )
 from bot.handlers.score_test import (
     select_best_match,
@@ -3224,44 +3225,52 @@ async def _clarify_with_llm(
 # ОТПРАВКА ИНФОРМАЦИИ О ТЕСТЕ
 # ============================================================================
 
+# questions.py - отправка информации о тесте и ВСЕХ его бланков
+
+# questions.py - отправка файлов из обеих колонок
+
+# questions.py - ВОССТАНОВЛЕННАЯ функция с добавлением дополнительных бланков
+
 async def send_test_info_with_photo(
     message: Message, 
     test_data: Dict, 
     response_text: str
 ):
-    """Отправляет информацию о тесте с кнопкой для показа фото контейнеров"""
+    """Отправляет информацию о тесте и ВСЕ соответствующие бланки"""
     
-    # Собираем все типы контейнеров
+    # Собираем все типы контейнеров (оригинальный код)
     raw_container_types = []
     
-    primary_container = str(test_data.get("primary_container_type", "")).strip()
+    primary_container = str(test_data.get("primary_container_type_raw", "")).strip()
     if primary_container and primary_container.lower() not in ["не указан", "нет", "-", "", "none", "null"]:
         primary_container = primary_container.replace('"', "").replace("\n", " ")
         primary_container = " ".join(primary_container.split())
         
         if "*I*" in primary_container:
-            parts = [ct.strip() for ct in primary_container.split("*I*")]
-            raw_container_types.extend(parts)
+            raw_container_types.extend([ct.strip() for ct in primary_container.split("*I*")])
         else:
             raw_container_types.append(primary_container)
     
-    container_type_raw = str(test_data.get("container_type", "")).strip()
+    container_type_raw = str(test_data.get("container_type_raw", "")).strip()
     if container_type_raw and container_type_raw.lower() not in ["не указан", "нет", "-", "", "none", "null"]:
         container_type_raw = container_type_raw.replace('"', "").replace("\n", " ")
         container_type_raw = " ".join(container_type_raw.split())
         
         if "*I*" in container_type_raw:
-            parts = [ct.strip() for ct in container_type_raw.split("*I*")]
-            raw_container_types.extend(parts)
+            new_types = [ct.strip() for ct in container_type_raw.split("*I*")]
+            for ct in new_types:
+                if ct not in raw_container_types:
+                    raw_container_types.append(ct)
         else:
-            raw_container_types.append(container_type_raw)
+            if container_type_raw not in raw_container_types:
+                raw_container_types.append(container_type_raw)
     
     # Дедуплицируем
     unique_containers = deduplicate_container_names(raw_container_types)
     has_containers = len(unique_containers) > 0
     
+    # Клавиатура для фото контейнеров (если есть)
     keyboard = None
-    
     if has_containers:
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
@@ -3274,13 +3283,42 @@ async def send_test_info_with_photo(
             ]
         )
     
+    # 1. Сначала отправляем основную информацию о тесте (оригинальный код)
     await message.answer(
         response_text,
         parse_mode="HTML",
         disable_web_page_preview=True,
         reply_markup=keyboard,
     )
+    
+    # 2. Отправляем основные бланки из form_name (если есть)
+    if test_data.get("form_name"):
+        form_names = [name.strip() for name in test_data['form_name'].split('*I*') if name.strip()]
+        
+        if form_names:
+            logger.info(f"[BLANKS] Sending form blanks for test {test_data['test_code']}: {form_names}")
+            
+            # Отправляем основные бланки
+            blanks_sent = await send_blank_files(message, test_data['test_code'], form_names)
+            
+            if not blanks_sent:
+                logger.warning(f"[BLANKS] No form blanks sent for test {test_data['test_code']}")
+    
+    # 3. Отправляем дополнительные бланки из additional_information_name (если есть)
+    if test_data.get("additional_information_name"):
+        additional_names = [name.strip() for name in test_data['additional_information_name'].split('*I*') if name.strip()]
+        
+        if additional_names:
+            logger.info(f"[BLANKS] Sending additional blanks for test {test_data['test_code']}: {additional_names}")
+            
+            # Отправляем дополнительные бланки
+            additional_sent = await send_blank_files(message, test_data['test_code'], additional_names)
+            
+            if not additional_sent:
+                logger.warning(f"[BLANKS] No additional blanks sent for test {test_data['test_code']}")
+    
     return True
+
 
 # ============================================================================
 # ОБРАБОТЧИКИ ОЦЕНОК И КОММЕНТАРИЕВ

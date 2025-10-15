@@ -8,9 +8,46 @@ from typing import Dict, List, Tuple
 from datetime import datetime
 from src.database.db_init import db
 from bot.handlers.utils import create_test_link, is_profile_test, format_i_pattern_numbered
+import os
+from aiogram.types import FSInputFile
+from typing import List
+import logging
+
+
+logger = logging.getLogger(__name__)
+
 
 BOT_USERNAME = "AI_VET_Assistant_Bot"
 # BOT_USERNAME = "@idontknow12bot"
+BLANKS_PATH = "data/documents"
+
+async def send_blank_files(message, test_code: str, form_names: List[str]) -> bool:
+    """Отправляет файлы бланков для теста"""
+    try:
+        sent_files = 0
+        
+        for form_name in form_names:
+            # Берем точное имя файла из form_name и добавляем .pdf
+            file_name = f"{form_name.strip()}.pdf"
+            file_path = os.path.join(BLANKS_PATH, file_name)
+            
+            if os.path.exists(file_path):
+                document = FSInputFile(file_path)
+                await message.answer_document(document)
+                sent_files += 1
+                logger.info(f"[BLANKS] Sent blank: {file_name} for test {test_code}")
+                
+                # Небольшая задержка между отправкой файлов
+                await asyncio.sleep(0.3)
+            else:
+                logger.warning(f"[BLANKS] File not found: {file_path} for test {test_code}")
+        
+        return sent_files > 0
+        
+    except Exception as e:
+        logger.error(f"[BLANKS] Failed to send blanks for {test_code}: {e}")
+        return False
+
 
 async def get_test_container_photos(test_data: Dict) -> List[Dict]:
     """Получает все фото контейнеров для теста"""
@@ -254,10 +291,10 @@ def format_test_info(test_data: Dict) -> str:
             "⏱️poss_postorder_container",
             "Возможность дозаказа с момента взятия биоматериала",
         ),
-        "form_link": ("📃form_link", "Ссылка скачивания бланка"),
-        "additional_information_link": (
-            "📒additional_information_link",
-            "Ссылка для скачивания дополнительной информации",
+        "form_name": ("📃form_name", "Основной бланк"),
+        "additional_information_name": (
+            "📒additional_information_name",
+            "Файл дополнительной информации",
         ),
     }
 
@@ -270,33 +307,34 @@ def format_test_info(test_data: Dict) -> str:
     for field, (emoji, display_name) in field_templates.items():
        
         if field == "form_link" and (value := test_data.get(field)):
-            value = [part.strip() for part in value.split('*I*') if part.strip()]
+            pass
+        #     value = [part.strip() for part in value.split('*I*') if part.strip()]
 
-            if len(value) == 1:
-                # deep_link = f"https://t.me/{BOT_USERNAME}?start=download_{value[0]}"
+        #     if len(value) == 1:
+        #         # deep_link = f"https://t.me/{BOT_USERNAME}?start=download_{value[0]}"
 
-                message_parts.append(
-                    emoji_manager.format_message(
-                        f"{emoji} <b>{display_name}:</b> <a href='{value[0]}'> {test_data.get('form_name')} </a>\n"
-                    )
-                )
-            else:
-                # deep_link_f = f"https://t.me/{BOT_USERNAME}?start=download_{value[0]}"
-                # deep_link_s = f"https://t.me/{BOT_USERNAME}?start=download_{value[1]}"
+        #         message_parts.append(
+        #             emoji_manager.format_message(
+        #                 f"{emoji} <b>{display_name}:</b> <a href='{value[0]}'> {test_data.get('form_name')} </a>\n"
+        #             )
+        #         )
+        #     else:
+        #         # deep_link_f = f"https://t.me/{BOT_USERNAME}?start=download_{value[0]}"
+        #         # deep_link_s = f"https://t.me/{BOT_USERNAME}?start=download_{value[1]}"
                 
-                names = [part.strip() for part in test_data.get('form_name').split('*I*') if part.strip()]
-                message_parts.append(
-                    emoji_manager.format_message(
-                        f'''{emoji} <b>{display_name}:</b> <a href='{value[0]}'> {names[0]} </a> \t <a href='{value[1]}'> {names[1]} </a>\n'''
-                    )
-                )
-        elif field == "additional_information_link" and (value := test_data.get(field)):
-            # deep_link = f"https://t.me/{BOT_USERNAME}?start=download_{value}"
-            message_parts.append(
-                emoji_manager.format_message(
-                    f"{emoji} <b>{display_name}:</b> <a href='{value}'> {test_data.get('additional_information_name')} </a>\n"
-                )
-            )
+        #         names = [part.strip() for part in test_data.get('form_name').split('*I*') if part.strip()]
+        #         message_parts.append(
+        #             emoji_manager.format_message(
+        #                 f'''{emoji} <b>{display_name}:</b> <a href='{value[0]}'> {names[0]} </a> \t <a href='{value[1]}'> {names[1]} </a>\n'''
+        #             )
+        #         )
+        # elif field == "additional_information_link" and (value := test_data.get(field)):
+        #     # deep_link = f"https://t.me/{BOT_USERNAME}?start=download_{value}"
+        #     message_parts.append(
+        #         emoji_manager.format_message(
+        #             f"{emoji} <b>{display_name}:</b> <a href='{value}'> {test_data.get('additional_information_name')} </a>\n"
+        #         )
+        #     )
         else:
             if value := test_data.get(field):
                 escaped_value = html.escape(str(value))
@@ -343,6 +381,8 @@ class CustomEmojiManager:
             "poss_postorder_container": "5327925321737995698",
             "form_link": "5327966179761881250",
             "additional_information_link": "5328169834226158945",
+            "form_name": "5327966179761881250",
+            "additional_information_name": "5328169834226158945",
         }
 
     def format_message(self, text: str) -> str:

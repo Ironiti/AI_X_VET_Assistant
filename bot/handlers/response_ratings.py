@@ -140,7 +140,7 @@ class ResponseRatingManager:
         last_request_key = f"{user_id}_last_request"
         if last_request_key in self._last_rating_request:
             time_since_last = current_time - self._last_rating_request[last_request_key]
-            if time_since_last < timedelta(hours=2):
+            if time_since_last < timedelta(seconds=0):
                 logger.info(f"[RATING] User {user_id} was asked recently, skipping")
                 return False, ""
         
@@ -177,7 +177,7 @@ class ResponseRatingManager:
         if not should_ask:
             logger.info(f"[RATING] Skipping rating by probability/logic for user {user_id}")
             # Ставим кулдаун на 1 час для этого типа ответа
-            self._user_cooldown[cooldown_key] = current_time + timedelta(hours=1)
+            self._user_cooldown[cooldown_key] = current_time + timedelta(seconds=0)
             return False, ""
         
         # Генерируем уникальный ID для оценки
@@ -188,7 +188,7 @@ class ResponseRatingManager:
         # Обновляем время последнего запроса
         self._last_rating_request[last_request_key] = current_time
         # Ставим кулдаун на 4 часа для этого типа ответа
-        self._user_cooldown[cooldown_key] = current_time + timedelta(hours=4)
+        self._user_cooldown[cooldown_key] = current_time + timedelta(seconds=0)
             
         return True, rating_id
 
