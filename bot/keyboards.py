@@ -146,10 +146,19 @@ def get_admin_menu_kb():
         
         # Основные функции
         [KeyboardButton(text="🔬 Задать вопрос ассистенту")],
-        [KeyboardButton(text="🖼️ Просмотр галереи"), KeyboardButton(text="📄 Просмотр бланков")],
+        [KeyboardButton(text="🖼️ Галерея пробирок и контейнеров"), KeyboardButton(text="📄 Ссылки на бланки")], 
         [KeyboardButton(text="📞 Связь с лабораторией")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
+def get_content_management_kb():
+    """Клавиатура управления контентом"""
+    keyboard = [
+        [KeyboardButton(text="⚙️ Управление галереей")], 
+        [KeyboardButton(text="⚙️ Управление бланками")], 
+        [KeyboardButton(text="🔙 Назад")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 def get_phone_kb():
     kb = [

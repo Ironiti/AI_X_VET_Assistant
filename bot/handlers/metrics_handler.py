@@ -274,17 +274,19 @@ async def show_quality_metrics(message: Message, state: FSMContext):
 
 @metrics_router.message(MetricsStates.viewing_metrics, F.text == "📊 Полный отчет")
 async def show_comprehensive_metrics(message: Message, state: FSMContext):
-    """Показывает полный отчет по всем метрикам"""
+    """Показывает полный отчет по всем метрикам в новом формате"""
     loading_msg = await message.answer("⏳ Формирую полный отчет...")
     
     try:
+        days = 30  # По умолчанию 30 дней
+        
         # Обновляем все метрики
         await db.update_daily_metrics()
         await db.update_quality_metrics()
         await db.update_system_metrics()
         
         # Получаем полные метрики
-        metrics = await db.get_comprehensive_metrics(days=7)
+        metrics = await db.get_comprehensive_metrics(days=days)
         
         if not metrics:
             await loading_msg.delete()
@@ -294,117 +296,129 @@ async def show_comprehensive_metrics(message: Message, state: FSMContext):
             )
             return
         
-        # ==================== ЧАСТЬ 1: Клиентские метрики ====================
-        response1 = "📊 <b>ПОЛНЫЙ ОТЧЕТ СИСТЕМЫ МЕТРИК</b>\n"
-        response1 += f"📅 Период: последние 7 дней\n"
-        response1 += f"🕐 Сформирован: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
-        response1 += "═" * 35 + "\n\n"
+        # Получаем средний рейтинг
+        avg_rating = await db.get_average_user_rating(days=days)
         
-        response1 += "👥 <b>1. КЛИЕНТСКИЕ МЕТРИКИ</b>\n\n"
+        # ==================== СВОДКА МЕТРИК ====================
+        response = f"📊 <b>СВОДКА МЕТРИК ЗА {days} ДНЕЙ</b>\n"
+        response += f"📅 {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
         
-        # DAU
+        # ==================== КЛИЕНТСКИЕ МЕТРИКИ ====================
+        response += "👥 <b>КЛИЕНТСКИЕ МЕТРИКИ</b>\n\n"
+        
         client = metrics.get('client_metrics', {})
         dau_list = client.get('dau', [])
+        retention = client.get('retention', {})
+        sessions = client.get('sessions', {})
         
+        # Средний DAU
         if dau_list and len(dau_list) > 0:
-            today_dau = dau_list[0].get('dau', 0) if dau_list else 0
-            week_data = dau_list[:7]
-            avg_dau = sum(d.get('dau', 0) for d in week_data) / len(week_data) if week_data else 0
-            
-            response1 += "📈 <b>DAU (Daily Active Users)</b>\n"
-            response1 += f"• Сегодня: <b>{today_dau}</b> пользователей\n"
-            response1 += f"• Средний DAU (7 дней): <b>{avg_dau:.1f}</b>\n\n"
+            avg_dau = sum(d.get('dau', 0) for d in dau_list) / len(dau_list)
+            response += f"• Средний DAU: <b>{avg_dau:.1f}</b>\n"
         else:
-            response1 += "📈 <b>DAU</b>: Нет данных\n\n"
+            response += "• Средний DAU: <b>н/д</b>\n"
         
         # Retention
-        retention = client.get('retention', {})
         if retention and retention.get('today_users', 0) > 0:
-            response1 += "🔄 <b>Возвратность пользователей</b>\n"
-            response1 += f"• 1 день: <b>{retention.get('retention_1d', 0):.1f}%</b>\n"
-            response1 += f"• 7 дней: <b>{retention.get('retention_7d', 0):.1f}%</b>\n"
-            response1 += f"• 30 дней: <b>{retention.get('retention_30d', 0):.1f}%</b>\n\n"
+            response += f"• Retention 1 день: <b>{retention.get('retention_1d', 0):.1f}%</b>\n"
+            response += f"• Retention 7 дней: <b>{retention.get('retention_7d', 0):.1f}%</b>\n"
+            response += f"• Retention 30 дней: <b>{retention.get('retention_30d', 0):.1f}%</b>\n"
         else:
-            response1 += "🔄 <b>Retention</b>: Недостаточно данных\n\n"
+            response += "• Retention 1 день: <b>н/д</b>\n"
+            response += "• Retention 7 дней: <b>н/д</b>\n"
+            response += "• Retention 30 дней: <b>н/д</b>\n"
         
-        # Сессии
-        sessions = client.get('sessions', {})
+        # Средняя длительность сессии
         if sessions and sessions.get('total_sessions', 0) > 0:
-            avg_dur = sessions.get('avg_duration_minutes')
-            avg_req = sessions.get('avg_requests_per_session')
-            
-            response1 += "⏱ <b>Сессии</b>\n"
-            response1 += f"• Всего сессий: <b>{sessions.get('total_sessions', 0)}</b>\n"
-            response1 += f"• Средняя длительность: <b>{avg_dur if avg_dur else 0:.1f}</b> мин.\n"
-            response1 += f"• Запросов/сессию: <b>{avg_req if avg_req else 0:.1f}</b>\n"
+            avg_dur = sessions.get('avg_duration_minutes', 0)
+            response += f"• Средняя длительность сессии: <b>{avg_dur:.2f}</b> мин\n\n"
         else:
-            response1 += "⏱ <b>Сессии</b>: Нет завершенных сессий\n"
+            response += "• Средняя длительность сессии: <b>н/д</b>\n\n"
         
-        # ==================== ЧАСТЬ 2: Технические + Качество ====================
-        response2 = "\n═" * 35 + "\n\n"
-        response2 += "⚙️ <b>2. ТЕХНИЧЕСКИЕ МЕТРИКИ</b>\n\n"
-        
-        # Производительность
+        # Получаем данные по обращениям
         tech = metrics.get('technical_metrics', {})
         perf = tech.get('response_time', {})
+        overall = perf.get('overall', {}) if perf else {}
         
-        if perf and perf.get('overall'):
-            overall = perf['overall']
-            response2 += "🚀 <b>Производительность</b>\n"
-            response2 += f"• Запросов обработано: <b>{overall.get('total_requests', 0)}</b>\n"
-            response2 += f"• Успешных: <b>{overall.get('successful_requests', 0)}</b>\n"
-            response2 += f"• Неудачных: <b>{overall.get('failed_requests', 0)}</b>\n"
-            response2 += f"• Среднее время ответа: <b>{overall.get('avg_response_time', 0):.2f}</b> сек.\n"
-            response2 += f"• Макс. время ответа: <b>{overall.get('max_response_time', 0):.2f}</b> сек.\n\n"
+        total_requests = overall.get('total_requests', 0)
+        successful_requests = overall.get('successful_requests', 0)
         
-        # Системные ресурсы
-        sys_metrics = tech.get('system', [])
-        if sys_metrics:
-            latest = sys_metrics[0]
-            response2 += "💻 <b>Системные ресурсы (последние)</b>\n"
-            response2 += f"• CPU: <b>{latest.get('cpu_usage', 0):.1f}%</b>\n"
-            response2 += f"• Память: <b>{latest.get('memory_usage', 0):.1f}%</b>\n"
-            response2 += f"• Диск: <b>{latest.get('disk_usage', 0):.1f}%</b>\n"
-            response2 += f"• Активных сессий: <b>{latest.get('active_sessions', 0)}</b>\n"
-            response2 += f"• Ошибок: <b>{latest.get('error_count', 0)}</b>\n\n"
+        # Общее количество обращений и среднее
+        response += "<b>Общее количество обращений:</b>\n"
         
-        response2 += "═" * 35 + "\n\n"
-        response2 += "🎯 <b>3. МЕТРИКИ КАЧЕСТВА</b>\n\n"
+        # За разные периоды (получаем из метрик)
+        if dau_list:
+            # 1 день
+            today_req = dau_list[0].get('total_requests', 0) if dau_list else 0
+            response += f"  • 1 день: <b>{today_req}</b>\n"
+            
+            # 7 дней
+            week_req = sum(d.get('total_requests', 0) for d in dau_list[:7])
+            response += f"  • 7 дней: <b>{week_req}</b>\n"
+            
+            # 30 дней
+            month_req = sum(d.get('total_requests', 0) for d in dau_list)
+            response += f"  • {days} дней: <b>{month_req}</b>\n\n"
+        else:
+            response += f"  • Всего за период: <b>{total_requests}</b>\n\n"
         
-        # Качество ответов
+        response += "<b>Среднее количество обращений:</b>\n"
+        if dau_list:
+            today_dau = dau_list[0].get('dau', 1) if dau_list else 1
+            week_dau = sum(d.get('dau', 0) for d in dau_list[:7]) / min(7, len(dau_list[:7]))
+            month_dau = avg_dau if dau_list else 1
+            
+            response += f"  • 1 день: <b>{today_req / max(today_dau, 1):.1f}</b>\n"
+            response += f"  • 7 дней: <b>{week_req / max(week_dau, 1) / 7:.1f}</b>\n"
+            response += f"  • {days} дней: <b>{month_req / max(month_dau, 1) / days:.1f}</b>\n\n"
+        else:
+            response += "  • н/д\n\n"
+        
+        # Всего запросов и успешных
+        response += f"• Всего запросов: <b>{total_requests}</b>\n"
+        response += f"• Успешных запросов: <b>{successful_requests}</b>\n"
+        
+        # Коэффициент точности
+        accuracy = (successful_requests / total_requests * 100) if total_requests > 0 else 0
+        response += f"• Коэффициент точности: <b>{accuracy:.1f}%</b>\n"
+        
+        # Средний рейтинг
+        response += f"• Средний рейтинг: <b>{avg_rating:.2f}/5</b> ⭐\n\n"
+        
+        # ==================== ТЕХНИЧЕСКИЕ МЕТРИКИ ====================
+        response += "⚙️ <b>ТЕХНИЧЕСКИЕ МЕТРИКИ</b>\n\n"
+        
+        if overall:
+            response += f"• Среднее время ответа: <b>{overall.get('avg_response_time', 0):.2f}</b> сек\n"
+            response += f"• Макс. время ответа: <b>{overall.get('max_response_time', 0):.2f}</b> сек\n\n"
+        else:
+            response += "• Среднее время ответа: <b>н/д</b>\n"
+            response += "• Макс. время ответа: <b>н/д</b>\n\n"
+        
+        # ==================== МЕТРИКИ КАЧЕСТВА ====================
+        response += "🎯 <b>МЕТРИКИ КАЧЕСТВА</b>\n\n"
+        
         quality = metrics.get('quality_metrics', {})
         if quality:
             total = quality.get('total', 0)
-            correct_pct = quality.get('correct_percentage', 0)
+            correct = quality.get('correct', 0)
+            incorrect = quality.get('incorrect', 0)
+            no_answer = quality.get('no_answer', 0)
             
-            response2 += "✅ <b>Качество ответов</b>\n"
-            response2 += f"• Всего запросов: <b>{total}</b>\n"
-            response2 += f"• Корректных ответов: <b>{correct_pct:.1f}%</b>\n"
+            response += f"• Всего вопросов: <b>{total}</b>\n"
+            response += f"• Всего корректных ответов: <b>{correct}</b>\n"
+            response += f"• Ошибок: <b>{incorrect}</b>\n"
+            response += f"• Без ответа: <b>{no_answer}</b>\n\n"
             
-            # Оценка относительно цели
-            target = 70.0
-            if correct_pct >= target:
-                status_icon = "✅"
-                status_text = "Цель достигнута"
-            elif correct_pct >= target - 10:
-                status_icon = "⚠️"
-                status_text = "Близко к цели"
-            else:
-                status_icon = "🔴"
-                status_text = "Требуется улучшение"
-            
-            response2 += f"• Статус: {status_icon} <i>{status_text}</i>\n"
-            response2 += f"• Цель: {target}%\n\n"
-            
-            # Распределение по типам
-            response2 += "📋 <b>Типы запросов</b>\n"
-            response2 += f"• Поиск по коду: <b>{quality.get('code_searches', 0)}</b>\n"
-            response2 += f"• Поиск по названию: <b>{quality.get('name_searches', 0)}</b>\n"
-            response2 += f"• Общие вопросы: <b>{quality.get('general_questions', 0)}</b>\n"
+            response += f"• Всего запросов: <b>{total}</b>\n"
+            response += f"• Корректных ответов: <b>{quality.get('correct_percentage', 0):.1f}%</b>\n"
+            response += f"• Ошибок: <b>{quality.get('incorrect_percentage', 0):.1f}%</b>\n"
+            response += f"• Без ответа: <b>{quality.get('no_answer_percentage', 0):.1f}%</b>\n"
+        else:
+            response += "• Нет данных\n"
         
         await loading_msg.delete()
-        await message.answer(response1, parse_mode="HTML")
-        await message.answer(response2, parse_mode="HTML", reply_markup=get_metrics_main_kb())
+        await message.answer(response, parse_mode="HTML", reply_markup=get_metrics_main_kb())
         
     except Exception as e:
         await loading_msg.delete()

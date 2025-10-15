@@ -1060,6 +1060,10 @@ async def handle_show_test_callback(callback: CallbackQuery, state: FSMContext):
     """Показать информацию о выбранном тесте"""
     action, test_code = TestCallback.unpack(callback.data)
     await callback.answer()
+    
+    # Засекаем время начала для метрик
+    import time
+    start_time = time.time()
 
     try:
         processor = DataProcessor()
@@ -1130,8 +1134,35 @@ async def handle_show_test_callback(callback: CallbackQuery, state: FSMContext):
         # Отправляем информацию
         await send_test_info_with_photo(callback.message, test_data, response)
         
+        # Логируем метрику callback selection
+        response_time = time.time() - start_time
         try:
-            # Логируем выбор теста из списка
+            # Определяем тип запроса по контексту поиска
+            search_query = data.get("original_query", "")
+            if search_query:
+                # Если есть оригинальный запрос - определяем его тип
+                if is_test_code_pattern(search_query):
+                    req_type = "code_search"
+                else:
+                    req_type = "name_search"
+            else:
+                # Если нет контекста - это просто код
+                req_type = "code_search"
+            
+            await db.log_request_metric(
+                user_id=user_id,
+                request_type=req_type,
+                query_text=f"Выбор из списка: {test_code}"[:500],
+                response_time=response_time,
+                success=True,
+                has_answer=True
+            )
+            logger.info(f"[METRICS] Logged callback selection metric for user {user_id}")
+        except Exception as e:
+            logger.error(f"[METRICS] Failed to log callback metric: {e}")
+        
+        try:
+            # Логируем выбор теста из списка в chat_history
             log_response = f"✅ Выбран тест из списка: {test_data['test_code']} - {test_data['test_name']}"
             
             await db.log_chat_interaction(
@@ -1891,8 +1922,8 @@ async def handle_code_search_with_text(
 
 
 async def _handle_code_search_internal(
-    message: Message, 
-    state: FSMContext, 
+    message: Message,
+    state: FSMContext,
     search_text: Optional[str] = None
 ):
     """
@@ -1907,6 +1938,10 @@ async def _handle_code_search_internal(
     """
     user_id = message.from_user.id
     
+    # Засекаем время начала для метрик
+    import time
+    start_time = time.time()
+    
     # FIX #18: Атомарная блокировка
     async with user_processing_locks[user_id]:
         data = await state.get_data()
@@ -1914,8 +1949,8 @@ async def _handle_code_search_internal(
         original_query = data.get("original_query", original_input)
 
         await db.add_request_stat(
-            user_id=user_id, 
-            request_type="question", 
+            user_id=user_id,
+            request_type="question",
             request_text=original_query
         )
 
@@ -1945,6 +1980,21 @@ async def _handle_code_search_internal(
                 await safe_cancel_animation(animation_task)
                 await safe_delete_message(loading_msg)
                 await safe_delete_message(gif_msg)
+                
+                # Логируем неудачный запрос
+                response_time = time.time() - start_time
+                try:
+                    await db.log_request_metric(
+                        user_id=user_id,
+                        request_type="code_search",
+                        query_text=original_input[:500],
+                        response_time=response_time,
+                        success=False,
+                        has_answer=False,
+                        error_message="Не удалось распознать код теста"
+                    )
+                except Exception as e:
+                    logger.error(f"[METRICS] Failed to log error metric: {e}")
                 
                 await message.answer(
                     f"❌ Не удалось распознать код теста: {html.escape(original_input[:50])}",
@@ -1977,6 +2027,21 @@ async def _handle_code_search_internal(
                 await safe_cancel_animation(animation_task)
                 await safe_delete_message(loading_msg)
                 await safe_delete_message(gif_msg)
+
+                # Логируем неудачный поиск (точный результат НЕ найден)
+                # Даже если есть похожие тесты - это не точное совпадение
+                response_time = time.time() - start_time
+                try:
+                    await db.log_request_metric(
+                        user_id=user_id,
+                        request_type="code_search",
+                        query_text=original_query[:500],
+                        response_time=response_time,
+                        success=False,  # Точного совпадения нет
+                        has_answer=True if similar_tests else False  # Есть похожие варианты или нет
+                    )
+                except Exception as e:
+                    logger.error(f"[METRICS] Failed to log code_search metric: {e}")
 
                 await db.add_search_history(
                     user_id=user_id,
@@ -2128,8 +2193,23 @@ async def _handle_code_search_internal(
             # Отправляем информацию
             await send_test_info_with_photo(message, test_data, response)
             
+            # Логируем метрику запроса
+            response_time = time.time() - start_time
             try:
-                # Формируем текст ответа для логирования
+                await db.log_request_metric(
+                    user_id=user_id,
+                    request_type="code_search",
+                    query_text=original_query[:500],
+                    response_time=response_time,
+                    success=True,
+                    has_answer=True
+                )
+                logger.info(f"[METRICS] Logged code_search metric for user {user_id}")
+            except Exception as e:
+                logger.error(f"[METRICS] Failed to log code_search metric: {e}")
+            
+            try:
+                # Формируем текст ответа для логирования в chat_history
                 log_response = f"✅ Найден тест: {test_data['test_code']}\n\n{response}"
                 
                 await db.log_chat_interaction(
@@ -2198,8 +2278,8 @@ async def handle_name_search_with_text(
 
 
 async def _handle_name_search_internal(
-    message: Message, 
-    state: FSMContext, 
+    message: Message,
+    state: FSMContext,
     search_text: Optional[str] = None
 ):
     """
@@ -2212,6 +2292,10 @@ async def _handle_name_search_internal(
     - Корректная обработка animation_task
     """
     user_id = message.from_user.id
+    
+    # Засекаем время начала для метрик
+    import time
+    start_time = time.time()
 
     # FIX #18: Атомарная блокировка
     async with user_processing_locks[user_id]:
@@ -2220,8 +2304,8 @@ async def _handle_name_search_internal(
         text = search_text if search_text else message.text.strip()
 
         await db.add_request_stat(
-            user_id=user_id, 
-            request_type="question", 
+            user_id=user_id,
+            request_type="question",
             request_text=original_query
         )
 
@@ -2264,6 +2348,20 @@ async def _handle_name_search_internal(
                     search_type="text",
                     success=False
                 )
+                
+                # Логируем неудачный поиск
+                response_time = time.time() - start_time
+                try:
+                    await db.log_request_metric(
+                        user_id=user_id,
+                        request_type="name_search",
+                        query_text=original_query[:500],
+                        response_time=response_time,
+                        success=False,
+                        has_answer=False
+                    )
+                except Exception as e:
+                    logger.error(f"[METRICS] Failed to log name_search metric: {e}")
 
                 await safe_cancel_animation(animation_task)
                 await safe_delete_message(loading_msg)
@@ -2397,6 +2495,21 @@ async def _handle_name_search_internal(
                 reply_markup=keyboard
             )
             
+            # Логируем успешный поиск по названию
+            response_time = time.time() - start_time
+            try:
+                await db.log_request_metric(
+                    user_id=user_id,
+                    request_type="name_search",
+                    query_text=original_query[:500],
+                    response_time=response_time,
+                    success=True,
+                    has_answer=True
+                )
+                logger.info(f"[METRICS] Logged name_search metric for user {user_id}")
+            except Exception as e:
+                logger.error(f"[METRICS] Failed to log name_search metric: {e}")
+            
             should_ask, rating_id = await rating_manager.should_ask_for_rating(
                 user_id=message.from_user.id,
                 response_type="name_search"
@@ -2450,8 +2563,8 @@ async def _handle_name_search_internal(
 # ============================================================================
 
 async def handle_general_question(
-    message: Message, 
-    state: FSMContext, 
+    message: Message,
+    state: FSMContext,
     question_text: str
 ):
     """
@@ -2465,6 +2578,9 @@ async def handle_general_question(
     """
     user = await db.get_user(message.from_user.id)
     
+    # Засекаем время начала для метрик
+    import time
+    start_time = time.time()
 
     if LOADING_GIF_ID:
         try:
@@ -2487,12 +2603,27 @@ async def handle_general_question(
             await safe_delete_message(loading_msg)
             await safe_delete_message(gif_msg)
             
+            # Логируем off-topic вопрос
+            response_time = time.time() - start_time
+            try:
+                await db.log_request_metric(
+                    user_id=message.from_user.id,
+                    request_type="general",
+                    query_text=question_text[:500],
+                    response_time=response_time,
+                    success=False,
+                    has_answer=False,
+                    error_message="Off-topic question"
+                )
+            except Exception as e:
+                logger.error(f"[METRICS] Failed to log off-topic metric: {e}")
+            
             await message.answer(
                 f"🔍 <b>Этот вопрос не относится к лабораторной диагностике</b>\n\n"
                 f"❓ <i>Ваш вопрос:</i> \"{html.escape(question_text[:200])}{'...' if len(question_text) > 200 else ''}\"\n\n"
                 "🩺 <b>Я специализируюсь на:</b>\n"
                 "• Лабораторных тестах и анализах\n"
-                "• Преаналитических требованиях\n" 
+                "• Преаналитических требованиях\n"
                 "• Контейнерах для биоматериалов\n"
                 "• Подготовке пациентов к исследованиям\n\n"
                 "💡 <b>Для других вопросов обратитесь к специалисту:</b>",
@@ -2514,6 +2645,21 @@ async def handle_general_question(
             await safe_cancel_animation(animation_task)
             await safe_delete_message(loading_msg)
             await safe_delete_message(gif_msg)
+            
+            # Логируем неудачный поиск (нет релевантной информации)
+            response_time = time.time() - start_time
+            try:
+                await db.log_request_metric(
+                    user_id=message.from_user.id,
+                    request_type="general",
+                    query_text=question_text[:500],
+                    response_time=response_time,
+                    success=False,
+                    has_answer=False,
+                    error_message="No relevant information found"
+                )
+            except Exception as e:
+                logger.error(f"[METRICS] Failed to log no-info metric: {e}")
             
             await message.answer(
                 f"🔍 <b>Не нашлось релевантной информации в базе данных</b>\n\n"
@@ -2641,11 +2787,26 @@ async def handle_general_question(
             await safe_delete_message(loading_msg)
             await safe_delete_message(gif_msg)
             
+            # Логируем неполезный ответ
+            response_time = time.time() - start_time
+            try:
+                await db.log_request_metric(
+                    user_id=message.from_user.id,
+                    request_type="general",
+                    query_text=question_text[:500],
+                    response_time=response_time,
+                    success=True,
+                    has_answer=False,
+                    error_message="Unhelpful answer"
+                )
+            except Exception as e:
+                logger.error(f"[METRICS] Failed to log unhelpful metric: {e}")
+            
             await message.answer(
                 f"🔍 <b>Не удалось найти точный ответ в доступных источниках</b>\n\n"
                 f"❓ <i>Ваш вопрос:</i> \"{html.escape(question_text[:200])}{'...' if len(question_text) > 200 else ''}\"\n\n"
                 "💡 <b>Рекомендую:</b>\n"
-                "• Позвонить специалисту для детальной консультации\n" 
+                "• Позвонить специалисту для детальной консультации\n"
                 "• Уточнить формулировку вопроса\n"
                 "• Использовать коды тестов (например: <code>AN116</code>)\n\n"
                 "📞 <b>Для получения точного ответа обратитесь к специалисту:</b>",
@@ -2728,9 +2889,24 @@ async def handle_general_question(
             try:
                 await message.answer(
                     processed_text,
-                    parse_mode="HTML", 
+                    parse_mode="HTML",
                     disable_web_page_preview=True
                 )
+                
+                # Логируем успешный ответ на общий вопрос
+                response_time = time.time() - start_time
+                try:
+                    await db.log_request_metric(
+                        user_id=message.from_user.id,
+                        request_type="general",
+                        query_text=question_text[:500],
+                        response_time=response_time,
+                        success=True,
+                        has_answer=True
+                    )
+                    logger.info(f"[METRICS] Logged general question metric for user {message.from_user.id}")
+                except Exception as e:
+                    logger.error(f"[METRICS] Failed to log general metric: {e}")
 
                 logger.info(f"[RATING] Checking if should ask for rating for user {message.from_user.id}")
 

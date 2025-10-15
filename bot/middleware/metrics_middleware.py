@@ -25,7 +25,7 @@ class MetricsMiddleware(BaseMiddleware):
         data: Dict[str, Any]
     ) -> Any:
         """
-        Обрабатывает событие и собирает метрики
+        Обрабатывает событие и отслеживает активность пользователя
         """
         # Работаем только с сообщениями
         if not isinstance(event, Message):
@@ -43,59 +43,15 @@ class MetricsMiddleware(BaseMiddleware):
         except Exception as e:
             logger.error(f"[METRICS] Failed to check user role: {e}")
         
-        # Засекаем время начала
-        start_time = time.time()
-        
-        # Отслеживаем активность пользователя
+        # Отслеживаем активность пользователя (для DAU и сессий)
         try:
             await db.track_user_activity(user_id)
             await db.update_session_activity(user_id)
         except Exception as e:
             logger.error(f"[METRICS] Failed to track activity: {e}")
         
-        # Выполняем обработчик
-        try:
-            result = await handler(event, data)
-            
-            # Вычисляем время ответа
-            response_time = time.time() - start_time
-            
-            # Определяем тип запроса
-            request_type = self._determine_request_type(message.text)
-            
-            # Логируем метрику
-            try:
-                await db.log_request_metric(
-                    user_id=user_id,
-                    request_type=request_type,
-                    query_text=message.text[:500] if message.text else "",
-                    response_time=response_time,
-                    success=True,
-                    has_answer=True
-                )
-            except Exception as e:
-                logger.error(f"[METRICS] Failed to log request metric: {e}")
-            
-            return result
-            
-        except Exception as e:
-            # В случае ошибки тоже логируем
-            response_time = time.time() - start_time
-            
-            try:
-                await db.log_request_metric(
-                    user_id=user_id,
-                    request_type="error",
-                    query_text=message.text[:500] if message.text else "",
-                    response_time=response_time,
-                    success=False,
-                    has_answer=False,
-                    error_message=str(e)[:200]
-                )
-            except Exception as log_error:
-                logger.error(f"[METRICS] Failed to log error metric: {log_error}")
-            
-            raise
+        # Выполняем обработчик (метрики запросов логируются в самих обработчиках)
+        return await handler(event, data)
     
     def _determine_request_type(self, text: str) -> str:
         """Определяет тип запроса по тексту"""
@@ -103,25 +59,64 @@ class MetricsMiddleware(BaseMiddleware):
             return "unknown"
         
         text_lower = text.lower()
+        text_stripped = text.strip()
         
-        # Служебные команды
-        if text in ["🔬 Задать вопрос ассистенту", "❌ Завершить диалог", "🔄 Новый вопрос"]:
-            return "navigation"
-        
-        # Проверка на код теста
         import re
-        if re.match(r'^[AА][NН]?\d+', text, re.IGNORECASE):
+        
+        # 1. Команды (НЕ логируются в метрики)
+        if text_stripped.startswith('/'):
+            return "command"
+        
+        # 2. Кнопки навигации с эмодзи (логируются но как navigation)
+        emoji_buttons = [
+            "🔬 Задать вопрос ассистенту", "❌ Завершить диалог", "🔄 Новый вопрос",
+            "🖼 Галерея пробирок и контейнеров", "📄 Ссылки на бланки",
+            "🤝 Поддержка"
+        ]
+        
+        for btn in emoji_buttons:
+            if text == btn or text_stripped == btn:
+                return "navigation"
+        
+        # 3. Кнопки регистрации (с эмодзи стран/профессий)
+        registration_patterns = [
+            r'^🇷🇺\s*Россия$',
+            r'^🇧🇾\s*Беларусь$',
+            r'^🇰🇿\s*Казахстан$',
+            r'^🇦🇲\s*Армения$',
+            r'^📍\s*.+$',  # Город с эмодзи
+            r'^🏙\s*.+$',  # Регион с эмодзи
+            r'^🔬\s*Сотрудник VET UNION$',
+            r'^🏥\s*Клиент VET UNION$'
+        ]
+        
+        for pattern in registration_patterns:
+            if re.match(pattern, text, re.IGNORECASE):
+                return "navigation"
+        
+        # 4. Короткие имена при регистрации (одно слово, заглавная буква)
+        if len(text_stripped.split()) == 1 and len(text_stripped) < 20:
+            # Проверка что это не код теста
+            if not re.match(r'^[AА][NН]?\d+', text, re.IGNORECASE) and not re.match(r'^\d+', text):
+                # Если первая буква заглавная и не все заглавные - вероятно имя
+                if text_stripped[0].isupper() and not text_stripped.isupper():
+                    return "navigation"
+        
+        # 5. Поиск по коду теста (ВАЛИДНЫЙ запрос)
+        if re.match(r'^[AА][NН]?\d+[A-ZА-Я]*$', text, re.IGNORECASE):
             return "code_search"
         
-        if re.match(r'^\d{2,4}[A-ZА-Я]*', text, re.IGNORECASE):
+        if re.match(r'^\d{2,4}[A-ZА-Я]*$', text, re.IGNORECASE):
             return "code_search"
         
-        # Вопросы
-        question_starters = ['как', 'что', 'где', 'когда', 'почему', 'зачем', 'какой', 'можно ли']
+        # 6. Общие вопросы (ВАЛИДНЫЙ запрос)
+        question_starters = ['как', 'что', 'где', 'когда', 'почему', 'зачем', 'какой', 'можно ли', 'подскажите', 'скажите']
         if any(text_lower.startswith(q) for q in question_starters) or text.endswith('?'):
             return "general"
         
-        # По умолчанию - поиск по названию
+        # 7. Поиск по названию (ВАЛИДНЫЙ запрос)
+        # Все что не команда, не навигация, не вопрос и не код - это поиск по названию
+        # Примеры: "Цитология", "фруктозамин", "анализ крови"
         return "name_search"
 
 

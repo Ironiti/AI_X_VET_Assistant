@@ -74,7 +74,6 @@ async def show_gallery_item(callback: CallbackQuery):
         if item.get('description'):
             caption += f"\n\n📝 {html.escape(item['description'])}"
         
-        # Клавиатура для возврата к списку
         back_keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text="◀️ Назад к галерее", callback_data="back_to_gallery")],
@@ -82,13 +81,11 @@ async def show_gallery_item(callback: CallbackQuery):
             ]
         )
         
-        # ВАЖНО: Удаляем старое сообщение со списком галереи
         try:
             await callback.message.delete()
         except:
             pass
         
-        # Отправляем фото как новое сообщение
         await callback.message.answer_photo(
             photo=item['file_id'],
             caption=caption,
@@ -109,10 +106,8 @@ async def back_to_gallery(callback: CallbackQuery):
     
     if items:
         try:
-            # Удаляем фото и показываем список
             await callback.message.delete()
             
-            # Отправляем список галереи
             await callback.message.answer(
                 "🖼️ <b>Галерея пробирок и контейнеров</b>\n\n"
                 "Выберите интересующий вас элемент:",
@@ -176,7 +171,6 @@ def create_blanks_keyboard(items):
     keyboard = []
     
     for item in items:
-        # Кнопки с URL открывают ссылку напрямую
         keyboard.append([
             InlineKeyboardButton(
                 text=item['title'],

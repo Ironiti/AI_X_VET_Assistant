@@ -1836,15 +1836,16 @@ class Database:
     # ============================================================
     
     async def track_user_activity(self, user_id: int):
-        """Отслеживает активность пользователя за день"""
+        """Отслеживает активность пользователя за день - считает ВСЕ запросы"""
         try:
             today = datetime.now().date()
             current_time = datetime.now()
             
             async with aiosqlite.connect(self.db_path) as db:
                 # Обновляем или создаем запись активности
+                # Считаем ВСЕ взаимодействия (включая навигацию, команды и т.д.)
                 await db.execute('''
-                    INSERT INTO user_activity 
+                    INSERT INTO user_activity
                     (user_id, activity_date, request_count, last_activity)
                     VALUES (?, ?, 1, ?)
                     ON CONFLICT(user_id, activity_date) DO UPDATE SET
@@ -1887,20 +1888,70 @@ class Database:
         except Exception as e:
             print(f"[ERROR] Failed to end session: {e}")
     
+    async def close_inactive_sessions(self, inactivity_minutes: int = 3):
+        """Закрывает сессии с неактивностью более указанного времени"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                cutoff_time = datetime.now() - timedelta(minutes=inactivity_minutes)
+                
+                # Находим активные сессии, у которых последняя активность была более N минут назад
+                # Для этого берем последний запрос из request_metrics для каждой сессии
+                cursor = await db.execute('''
+                    UPDATE user_sessions
+                    SET is_active = FALSE, session_end = (
+                        SELECT MAX(timestamp)
+                        FROM request_metrics
+                        WHERE user_id = user_sessions.user_id
+                        AND timestamp >= user_sessions.session_start
+                        AND timestamp < ?
+                    )
+                    WHERE is_active = TRUE
+                    AND id IN (
+                        SELECT us.id
+                        FROM user_sessions us
+                        WHERE us.is_active = TRUE
+                        AND (
+                            SELECT MAX(rm.timestamp)
+                            FROM request_metrics rm
+                            WHERE rm.user_id = us.user_id
+                            AND rm.timestamp >= us.session_start
+                        ) < ?
+                    )
+                ''', (cutoff_time, cutoff_time))
+                
+                closed_count = cursor.rowcount
+                await db.commit()
+                
+                if closed_count > 0:
+                    print(f"[SESSIONS] Closed {closed_count} inactive sessions")
+                
+                return closed_count
+        except Exception as e:
+            print(f"[ERROR] Failed to close inactive sessions: {e}")
+            return 0
+    
     async def update_session_activity(self, user_id: int):
         """Обновляет активность в текущей сессии или создает новую"""
         try:
+            # Сначала закрываем все неактивные сессии
+            await self.close_inactive_sessions(inactivity_minutes=3)
+            
             async with aiosqlite.connect(self.db_path) as db:
-                # Ищем активную сессию (последняя активность < 3 часов назад)
-                three_hours_ago = datetime.now() - timedelta(hours=3)
+                current_time = datetime.now()
+                three_minutes_ago = current_time - timedelta(minutes=3)
                 
+                # Проверяем, есть ли активная сессия с последней активностью менее 3 минут назад
                 cursor = await db.execute('''
-                    SELECT id, session_start FROM user_sessions
-                    WHERE user_id = ? AND is_active = TRUE
-                    AND session_start > ?
-                    ORDER BY session_start DESC
+                    SELECT us.id, us.session_start, MAX(rm.timestamp) as last_activity
+                    FROM user_sessions us
+                    LEFT JOIN request_metrics rm ON rm.user_id = us.user_id
+                        AND rm.timestamp >= us.session_start
+                    WHERE us.user_id = ? AND us.is_active = TRUE
+                    GROUP BY us.id
+                    HAVING last_activity >= ? OR last_activity IS NULL
+                    ORDER BY us.session_start DESC
                     LIMIT 1
-                ''', (user_id, three_hours_ago))
+                ''', (user_id, three_minutes_ago))
                 
                 session = await cursor.fetchone()
                 
@@ -1912,40 +1963,36 @@ class Database:
                         WHERE id = ?
                     ''', (session[0],))
                 else:
-                    # Завершаем старые сессии и создаем новую
+                    # Создаем новую сессию (старые уже закрыты выше)
                     await db.execute('''
-                        UPDATE user_sessions
-                        SET is_active = FALSE, session_end = ?
-                        WHERE user_id = ? AND is_active = TRUE
-                    ''', (datetime.now(), user_id))
-                    
-                    await db.execute('''
-                        INSERT INTO user_sessions 
+                        INSERT INTO user_sessions
                         (user_id, session_start, request_count, is_active)
                         VALUES (?, ?, 1, TRUE)
-                    ''', (user_id, datetime.now()))
+                    ''', (user_id, current_time))
                 
                 await db.commit()
         except Exception as e:
             print(f"[ERROR] Failed to update session: {e}")
     
     async def get_dau_metrics(self, days: int = 30):
-        """Получает метрики Daily Active Users"""
+        """Получает метрики Daily Active Users - считает ВСЕ запросы для активности"""
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
                 
                 start_date = datetime.now() - timedelta(days=days)
                 
+                # Считаем ВСЕ запросы из request_metrics для каждого дня
+                # (включая navigation, command и т.д. - для активности)
                 cursor = await db.execute('''
-                    SELECT 
-                        activity_date,
+                    SELECT
+                        DATE(timestamp) as activity_date,
                         COUNT(DISTINCT user_id) as dau,
-                        SUM(request_count) as total_requests,
-                        AVG(request_count) as avg_requests_per_user
-                    FROM user_activity
-                    WHERE activity_date >= DATE(?)
-                    GROUP BY activity_date
+                        COUNT(*) as total_requests,
+                        CAST(COUNT(*) AS REAL) / COUNT(DISTINCT user_id) as avg_requests_per_user
+                    FROM request_metrics
+                    WHERE timestamp >= ?
+                    GROUP BY DATE(timestamp)
                     ORDER BY activity_date DESC
                 ''', (start_date,))
                 
@@ -2101,7 +2148,7 @@ class Database:
             today = datetime.now().date()
             
             async with aiosqlite.connect(self.db_path) as db:
-                # Подсчитываем метрики за сегодня
+                # Подсчитываем метрики за сегодня ТОЛЬКО для валидных типов запросов
                 cursor = await db.execute('''
                     SELECT
                         COUNT(*) as total,
@@ -2113,6 +2160,7 @@ class Database:
                         SUM(CASE WHEN request_type = 'general' THEN 1 ELSE 0 END) as general_question
                     FROM request_metrics
                     WHERE DATE(timestamp) = ?
+                    AND request_type IN ('general', 'code_search', 'name_search')
                 ''', (today,))
                 
                 stats = await cursor.fetchone()
@@ -2132,24 +2180,26 @@ class Database:
             print(f"[ERROR] Failed to update quality metrics: {e}")
     
     async def get_quality_metrics_summary(self, days: int = 7):
-        """Получает сводку по метрикам качества"""
+        """Получает сводку по метрикам качества - ТОЛЬКО валидные типы запросов"""
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
                 
                 start_date = datetime.now().date() - timedelta(days=days)
                 
+                # Считаем напрямую из request_metrics с фильтрацией типов
                 cursor = await db.execute('''
                     SELECT
-                        SUM(total_queries) as total,
-                        SUM(correct_answers) as correct,
-                        SUM(incorrect_answers) as incorrect,
-                        SUM(no_answer) as no_answer,
-                        SUM(code_search_count) as code_searches,
-                        SUM(name_search_count) as name_searches,
-                        SUM(general_question_count) as general_questions
-                    FROM quality_metrics
-                    WHERE metric_date >= ?
+                        COUNT(*) as total,
+                        SUM(CASE WHEN success = TRUE AND has_answer = TRUE THEN 1 ELSE 0 END) as correct,
+                        SUM(CASE WHEN success = FALSE THEN 1 ELSE 0 END) as incorrect,
+                        SUM(CASE WHEN has_answer = FALSE THEN 1 ELSE 0 END) as no_answer,
+                        SUM(CASE WHEN request_type = 'code_search' THEN 1 ELSE 0 END) as code_searches,
+                        SUM(CASE WHEN request_type = 'name_search' THEN 1 ELSE 0 END) as name_searches,
+                        SUM(CASE WHEN request_type = 'general' THEN 1 ELSE 0 END) as general_questions
+                    FROM request_metrics
+                    WHERE DATE(timestamp) >= ?
+                    AND request_type IN ('general', 'code_search', 'name_search')
                 ''', (start_date,))
                 
                 result = dict(await cursor.fetchone())
@@ -2227,22 +2277,44 @@ class Database:
             async with aiosqlite.connect(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
                 
+                start_date = datetime.now() - timedelta(days=days)
+                
                 # Общая статистика
                 cursor = await db.execute('''
-                    SELECT 
+                    SELECT
                         COUNT(*) as total_ratings,
                         AVG(rating) as avg_rating,
                         COUNT(CASE WHEN rating <= 3 THEN 1 END) as low_ratings,
                         COUNT(CASE WHEN rating >= 4 THEN 1 END) as high_ratings
-                    FROM response_ratings 
-                    WHERE timestamp > datetime('now', ?)
-                ''', (f'-{days} days',))
+                    FROM response_ratings
+                    WHERE timestamp >= ?
+                ''', (start_date,))
                 
                 stats = await cursor.fetchone()
                 return dict(stats) if stats else None
         except Exception as e:
             print(f"[ERROR] Failed to get rating stats: {e}")
             return None
+    
+    async def get_average_user_rating(self, days: int = 30):
+        """Получает средний рейтинг от пользователей за период"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                start_date = datetime.now() - timedelta(days=days)
+                
+                cursor = await db.execute('''
+                    SELECT AVG(rating) as avg_rating, COUNT(*) as total_ratings
+                    FROM response_ratings
+                    WHERE timestamp >= ?
+                ''', (start_date,))
+                
+                result = await cursor.fetchone()
+                if result and result[1] > 0:  # Если есть оценки
+                    return round(result[0], 2)
+                return 0.0
+        except Exception as e:
+            print(f"[ERROR] Failed to get average rating: {e}")
+            return 0.0
         
      # ============================================================
     # МЕТОДЫ ДЛЯ ГАЛЕРЕИ ПРОБИРОК И КОНТЕЙНЕРОВ
