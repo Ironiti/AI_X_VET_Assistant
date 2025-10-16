@@ -2029,8 +2029,8 @@ async def _handle_code_search_internal(
                 await safe_delete_message(loading_msg)
                 await safe_delete_message(gif_msg)
 
-                # Логируем неудачный поиск (точный результат НЕ найден)
-                # Даже если есть похожие тесты - это не точное совпадение
+                # Логируем результат поиска
+                # Если найдены похожие тесты - это тоже успешная обработка запроса
                 response_time = time.time() - start_time
                 try:
                     await db.log_request_metric(
@@ -2038,7 +2038,7 @@ async def _handle_code_search_internal(
                         request_type="code_search",
                         query_text=original_query[:500],
                         response_time=response_time,
-                        success=False,  # Точного совпадения нет
+                        success=True if similar_tests else False,  # Успех если нашли похожие варианты
                         has_answer=True if similar_tests else False  # Есть похожие варианты или нет
                     )
                 except Exception as e:

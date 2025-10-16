@@ -2408,10 +2408,10 @@ class Database:
         """Создает таблицу бланков если её нет"""
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute('''
-                CREATE TABLE IF NOT EXISTS blank_links (
+                CREATE TABLE IF NOT EXISTS blank_documents (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     title TEXT NOT NULL,
-                    url TEXT NOT NULL,
+                    file_id TEXT NOT NULL,
                     description TEXT,
                     added_by INTEGER,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -2421,49 +2421,65 @@ class Database:
             ''')
             await db.commit()
     
-    async def add_blank_link(self, title: str, url: str, description: str = None, added_by: int = None):
-        """Добавляет ссылку на бланк"""
+    async def add_blank_document(self, title: str, file_id: str, description: str = None, added_by: int = None):
+        """Добавляет документ бланка"""
         try:
             await self.ensure_blanks_table()
             async with aiosqlite.connect(self.db_path) as db:
                 cursor = await db.execute('''
-                    INSERT INTO blank_links (title, url, description, added_by)
+                    INSERT INTO blank_documents (title, file_id, description, added_by)
                     VALUES (?, ?, ?, ?)
-                ''', (title, url, description, added_by))
+                ''', (title, file_id, description, added_by))
                 await db.commit()
                 return cursor.lastrowid
         except Exception as e:
-            print(f"[ERROR] Failed to add blank link: {e}")
+            print(f"[ERROR] Failed to add blank document: {e}")
             return None
     
-    async def get_all_blank_links(self):
-        """Получает все активные ссылки на бланки"""
+    async def get_all_blank_documents(self):
+        """Получает все активные документы бланков"""
         try:
             await self.ensure_blanks_table()
             async with aiosqlite.connect(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
                 cursor = await db.execute('''
-                    SELECT * FROM blank_links 
+                    SELECT * FROM blank_documents
                     WHERE is_active = TRUE
                     ORDER BY created_at DESC
                 ''')
                 rows = await cursor.fetchall()
                 return [dict(row) for row in rows]
         except Exception as e:
-            print(f"[ERROR] Failed to get blank links: {e}")
+            print(f"[ERROR] Failed to get blank documents: {e}")
             return []
     
-    async def delete_blank_link(self, blank_id: int):
-        """Деактивирует ссылку на бланк"""
+    async def delete_blank_document(self, blank_id: int):
+        """Деактивирует документ бланка"""
         try:
             await self.ensure_blanks_table()
             async with aiosqlite.connect(self.db_path) as db:
                 await db.execute(
-                    'UPDATE blank_links SET is_active = FALSE WHERE id = ?',
+                    'UPDATE blank_documents SET is_active = FALSE WHERE id = ?',
                     (blank_id,)
                 )
                 await db.commit()
                 return True
         except Exception as e:
-            print(f"[ERROR] Failed to delete blank link: {e}")
+            print(f"[ERROR] Failed to delete blank document: {e}")
             return False
+    
+    async def get_blank_document(self, blank_id: int):
+        """Получает конкретный документ бланка"""
+        try:
+            await self.ensure_blanks_table()
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute(
+                    'SELECT * FROM blank_documents WHERE id = ? AND is_active = TRUE',
+                    (blank_id,)
+                )
+                row = await cursor.fetchone()
+                return dict(row) if row else None
+        except Exception as e:
+            print(f"[ERROR] Failed to get blank document: {e}")
+            return None

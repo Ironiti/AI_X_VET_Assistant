@@ -73,7 +73,7 @@ class BlanksManagementStates(StatesGroup):
     menu = State()
     adding_blank = State()
     entering_title = State()
-    entering_url = State()
+    waiting_for_document = State()
     entering_description = State()
     viewing_blanks = State()
     deleting_blank = State()
@@ -1975,13 +1975,13 @@ async def delete_gallery_item(message: Message, state: FSMContext):
     await state.set_state(GalleryManagementStates.menu)
 
 # Обработчики для бланков
-@admin_router.message(F.text == "⚙️ Управление бланками")  # ← Изменено
+@admin_router.message(F.text == "⚙️ Управление бланками")
 async def blanks_management(message: Message, state: FSMContext):
-    """Управление ссылками на бланки"""
+    """Управление документами бланков"""
     await message.answer(
-        "📄 Управление ссылками на бланки\n\n"
-        "Добавляйте ссылки на бланки и документы, "
-        "которые будут доступны пользователям.",
+        "📄 Управление бланками\n\n"
+        "Добавляйте документы бланков, "
+        "которые будут доступны пользователям прямо в телеграм.",
         reply_markup=get_blanks_management_kb()
     )
     await state.set_state(BlanksManagementStates.menu)
@@ -2006,30 +2006,25 @@ async def blank_enter_title(message: Message, state: FSMContext):
     
     await state.update_data(blank_title=message.text)
     await message.answer(
-        "🔗 Введите ссылку на бланк:\n"
-        "(URL должен начинаться с http:// или https://)",
+        "📎 Теперь отправьте документ (PDF, DOC, DOCX, XLS, XLSX и др.):\n\n"
+        "Документ будет сохранен и доступен пользователям прямо в телеграм",
         reply_markup=get_back_to_menu_kb()
     )
-    await state.set_state(BlanksManagementStates.entering_url)
+    await state.set_state(BlanksManagementStates.waiting_for_document)
 
-@admin_router.message(BlanksManagementStates.entering_url)
-async def blank_enter_url(message: Message, state: FSMContext):
-    """Ввод URL бланка"""
-    if message.text == "🔙 Вернуться в главное меню":
-        await state.clear()
-        await message.answer("Операция отменена.", reply_markup=get_blanks_management_kb())
-        return
+@admin_router.message(BlanksManagementStates.waiting_for_document, F.document)
+async def blank_receive_document(message: Message, state: FSMContext):
+    """Получение документа бланка"""
+    document = message.document
+    file_id = document.file_id
     
-    # Проверка URL
-    if not message.text.startswith(('http://', 'https://')):
-        await message.answer(
-            "❌ URL должен начинаться с http:// или https://\n"
-            "Попробуйте еще раз:",
-            reply_markup=get_back_to_menu_kb()
-        )
-        return
+    # Сохраняем file_id и информацию о файле
+    await state.update_data(
+        blank_file_id=file_id,
+        blank_file_name=document.file_name,
+        blank_file_size=document.file_size
+    )
     
-    await state.update_data(blank_url=message.text)
     await message.answer(
         "📝 Введите описание для бланка:\n"
         "(краткое описание, для чего используется)\n\n"
@@ -2037,6 +2032,15 @@ async def blank_enter_url(message: Message, state: FSMContext):
         reply_markup=get_back_to_menu_kb()
     )
     await state.set_state(BlanksManagementStates.entering_description)
+
+@admin_router.message(BlanksManagementStates.waiting_for_document)
+async def blank_invalid_document(message: Message, state: FSMContext):
+    """Обработка не-документа в состоянии загрузки"""
+    if message.text == "🔙 Вернуться в главное меню":
+        await state.clear()
+        await message.answer("Операция отменена.", reply_markup=get_blanks_management_kb())
+        return
+    await message.answer("❌ Пожалуйста, отправьте документ (файл)")
 
 @admin_router.message(BlanksManagementStates.entering_description)
 async def blank_save_item(message: Message, state: FSMContext):
@@ -2048,13 +2052,22 @@ async def blank_save_item(message: Message, state: FSMContext):
     
     data = await state.get_data()
     title = data.get('blank_title')
-    url = data.get('blank_url')
+    file_id = data.get('blank_file_id')
+    file_name = data.get('blank_file_name', 'документ')
     description = None if message.text == "-" else message.text
     
+    if not title or not file_id:
+        await message.answer(
+            "❌ Ошибка: потеряны данные. Попробуйте заново.",
+            reply_markup=get_blanks_management_kb()
+        )
+        await state.set_state(BlanksManagementStates.menu)
+        return
+    
     # Сохраняем в БД
-    success = await db.add_blank_link(
+    success = await db.add_blank_document(
         title=title,
-        url=url,
+        file_id=file_id,
         description=description,
         added_by=message.from_user.id
     )
@@ -2063,7 +2076,7 @@ async def blank_save_item(message: Message, state: FSMContext):
         await message.answer(
             f"✅ Бланк успешно добавлен!\n\n"
             f"📌 Название: {html.escape(title)}\n"
-            f"🔗 Ссылка: {url}\n"
+            f"📎 Файл: {html.escape(file_name)}\n"
             f"📝 Описание: {html.escape(description) if description else 'Не указано'}",
             parse_mode="HTML",
             reply_markup=get_blanks_management_kb()
@@ -2079,7 +2092,7 @@ async def blank_save_item(message: Message, state: FSMContext):
 @admin_router.message(BlanksManagementStates.menu, F.text == "📋 Просмотр бланков")
 async def view_blank_items(message: Message):
     """Просмотр всех бланков"""
-    items = await db.get_all_blank_links()
+    items = await db.get_all_blank_documents()
     
     if not items:
         await message.answer(
@@ -2091,7 +2104,7 @@ async def view_blank_items(message: Message):
     text = "📋 Список бланков:\n\n"
     for i, item in enumerate(items, 1):
         text += f"{i}. {item['title']}\n"
-        text += f"   🔗 {item['url']}\n"
+        text += f"   📎 Документ загружен\n"
         if item.get('description'):
             text += f"   📝 {item['description'][:50]}{'...' if len(item['description']) > 50 else ''}\n"
         text += f"   📅 Добавлено: {item['created_at']}\n\n"
@@ -2101,7 +2114,7 @@ async def view_blank_items(message: Message):
 @admin_router.message(BlanksManagementStates.menu, F.text == "🗑️ Удалить бланк")
 async def start_delete_blank(message: Message, state: FSMContext):
     """Начало удаления бланка"""
-    items = await db.get_all_blank_links()
+    items = await db.get_all_blank_documents()
     
     if not items:
         await message.answer(
@@ -2136,11 +2149,11 @@ async def delete_blank(message: Message, state: FSMContext):
     
     if message.text.startswith("❌ "):
         title = message.text[2:]
-        items = await db.get_all_blank_links()
+        items = await db.get_all_blank_documents()
         
         for item in items:
             if item['title'].startswith(title):
-                success = await db.delete_blank_link(item['id'])
+                success = await db.delete_blank_document(item['id'])
                 if success:
                     await message.answer(
                         f"✅ Бланк '{item['title']}' удален",

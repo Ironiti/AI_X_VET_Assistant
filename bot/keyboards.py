@@ -120,7 +120,7 @@ def get_main_menu_kb():
         [KeyboardButton(text="🔬 Задать вопрос ассистенту")],
         # [KeyboardButton(text="📚 Часто задаваемые вопросы")],
         [KeyboardButton(text="🖼️ Галерея пробирок и контейнеров")],
-        [KeyboardButton(text="📄 Ссылки на бланки")],
+        [KeyboardButton(text="📄 Бланки и документы")],
         [KeyboardButton(text="📞 Связь с лабораторией")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
@@ -146,7 +146,7 @@ def get_admin_menu_kb():
         
         # Основные функции
         [KeyboardButton(text="🔬 Задать вопрос ассистенту")],
-        [KeyboardButton(text="🖼️ Галерея пробирок и контейнеров"), KeyboardButton(text="📄 Ссылки на бланки")], 
+        [KeyboardButton(text="🖼️ Галерея пробирок и контейнеров"), KeyboardButton(text="📄 Бланки и документы")],
         [KeyboardButton(text="📞 Связь с лабораторией")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
