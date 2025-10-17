@@ -27,8 +27,9 @@ bot = Bot(
 )
 dp = Dispatcher(storage=MemoryStorage())
 
-# Подключаем middleware для метрик
+
 dp.message.middleware(MetricsMiddleware())
+dp.callback_query.middleware(MetricsMiddleware())
 
 dp.include_router(registration_router)
 # dp.include_router(questions_callbacks_router)

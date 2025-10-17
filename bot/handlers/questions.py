@@ -1949,12 +1949,8 @@ async def _handle_code_search_internal(
         original_input = search_text if search_text else message.text.strip()
         original_query = data.get("original_query", original_input)
 
-        await db.add_request_stat(
-            user_id=user_id,
-            request_type="question",
-            request_text=original_query
-        )
-
+        # НЕ логируем здесь - логирование через log_request_metric происходит после обработки
+        
         gif_msg = None
         loading_msg = None
         animation_task = None
@@ -1982,7 +1978,7 @@ async def _handle_code_search_internal(
                 await safe_delete_message(loading_msg)
                 await safe_delete_message(gif_msg)
                 
-                # Логируем неудачный запрос
+                # Логируем некорректный формат кода (реальная ошибка)
                 response_time = time.time() - start_time
                 try:
                     await db.log_request_metric(
@@ -2030,7 +2026,6 @@ async def _handle_code_search_internal(
                 await safe_delete_message(gif_msg)
 
                 # Логируем результат поиска
-                # Если найдены похожие тесты - это тоже успешная обработка запроса
                 response_time = time.time() - start_time
                 try:
                     await db.log_request_metric(
@@ -2038,8 +2033,8 @@ async def _handle_code_search_internal(
                         request_type="code_search",
                         query_text=original_query[:500],
                         response_time=response_time,
-                        success=True if similar_tests else False,  # Успех если нашли похожие варианты
-                        has_answer=True if similar_tests else False  # Есть похожие варианты или нет
+                        success=True, 
+                        has_answer=True if similar_tests else False
                     )
                 except Exception as e:
                     logger.error(f"[METRICS] Failed to log code_search metric: {e}")
@@ -2304,12 +2299,6 @@ async def _handle_name_search_internal(
         original_query = data.get("original_query", message.text if not search_text else search_text)
         text = search_text if search_text else message.text.strip()
 
-        await db.add_request_stat(
-            user_id=user_id,
-            request_type="question",
-            request_text=original_query
-        )
-
         gif_msg = None
         loading_msg = None
         animation_task = None
@@ -2350,7 +2339,7 @@ async def _handle_name_search_internal(
                     success=False
                 )
                 
-                # Логируем неудачный поиск
+                # Логируем поиск без результатов (но бот корректно отработал)
                 response_time = time.time() - start_time
                 try:
                     await db.log_request_metric(
@@ -2358,8 +2347,8 @@ async def _handle_name_search_internal(
                         request_type="name_search",
                         query_text=original_query[:500],
                         response_time=response_time,
-                        success=False,
-                        has_answer=False
+                        success=True,  # Бот корректно отработал
+                        has_answer=False  # Но результатов не найдено
                     )
                 except Exception as e:
                     logger.error(f"[METRICS] Failed to log name_search metric: {e}")
@@ -2604,7 +2593,7 @@ async def handle_general_question(
             await safe_delete_message(loading_msg)
             await safe_delete_message(gif_msg)
             
-            # Логируем off-topic вопрос
+            # Логируем off-topic вопрос (бот корректно отработал)
             response_time = time.time() - start_time
             try:
                 await db.log_request_metric(
@@ -2612,8 +2601,8 @@ async def handle_general_question(
                     request_type="general",
                     query_text=question_text[:500],
                     response_time=response_time,
-                    success=False,
-                    has_answer=False,
+                    success=True,  # Бот корректно распознал off-topic
+                    has_answer=False,  # Но не дал ответ по теме
                     error_message="Off-topic question"
                 )
             except Exception as e:
@@ -2647,7 +2636,7 @@ async def handle_general_question(
             await safe_delete_message(loading_msg)
             await safe_delete_message(gif_msg)
             
-            # Логируем неудачный поиск (нет релевантной информации)
+            # Логируем поиск без релевантной информации (бот корректно отработал)
             response_time = time.time() - start_time
             try:
                 await db.log_request_metric(
@@ -2655,8 +2644,8 @@ async def handle_general_question(
                     request_type="general",
                     query_text=question_text[:500],
                     response_time=response_time,
-                    success=False,
-                    has_answer=False,
+                    success=True,  # Бот корректно отработал
+                    has_answer=False,  # Но нет релевантной информации
                     error_message="No relevant information found"
                 )
             except Exception as e:
@@ -2788,7 +2777,6 @@ async def handle_general_question(
             await safe_delete_message(loading_msg)
             await safe_delete_message(gif_msg)
             
-            # Логируем неполезный ответ
             response_time = time.time() - start_time
             try:
                 await db.log_request_metric(
@@ -2796,8 +2784,8 @@ async def handle_general_question(
                     request_type="general",
                     query_text=question_text[:500],
                     response_time=response_time,
-                    success=True,
-                    has_answer=False,
+                    success=True,  # Бот отработал корректно
+                    has_answer=False,  # Но ответ неполезный
                     error_message="Unhelpful answer"
                 )
             except Exception as e:

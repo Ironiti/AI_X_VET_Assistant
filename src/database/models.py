@@ -1402,8 +1402,14 @@ class Database:
             admin_count = await cursor.fetchone()
             stats['admins'] = admin_count[0] if admin_count else 0
 
-            # Статистика запросов
-            cursor = await db.execute("SELECT request_type, COUNT(*) FROM request_statistics GROUP BY request_type")
+            # Статистика запросов (ИСКЛЮЧАЯ запросы администраторов)
+            cursor = await db.execute("""
+                SELECT rs.request_type, COUNT(*)
+                FROM request_statistics rs
+                JOIN users u ON rs.user_id = u.telegram_id
+                WHERE u.role != 'admin'
+                GROUP BY rs.request_type
+            """)
             request_stats = await cursor.fetchall()
 
             stats['total_requests'] = 0
@@ -1416,8 +1422,14 @@ class Database:
                 elif req_type == 'callback_request':
                     stats['callbacks'] = count
 
-            # Статистика обратной связи
-            cursor = await db.execute("SELECT feedback_type, COUNT(*) FROM feedback GROUP BY feedback_type")
+            # Статистика обратной связи (ИСКЛЮЧАЯ обратную связь от администраторов)
+            cursor = await db.execute("""
+                SELECT f.feedback_type, COUNT(*)
+                FROM feedback f
+                JOIN users u ON f.user_id = u.telegram_id
+                WHERE u.role != 'admin'
+                GROUP BY f.feedback_type
+            """)
             feedback_stats = await cursor.fetchall()
 
             stats['suggestions'] = 0
@@ -1664,27 +1676,29 @@ class Database:
                 
                 start_date = datetime.now() - timedelta(days=days)
                 
-                # Общая статистика НАПРЯМУЮ из request_metrics
+                # Общая статистика НАПРЯМУЮ из request_metrics (ИСКЛЮЧАЯ админов)
                 cursor = await db.execute('''
                     SELECT
                         COUNT(*) as total_requests,
-                        SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as successful_requests,
-                        SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) as failed_requests,
-                        COALESCE(AVG(response_time), 0) as avg_response_time,
-                        COALESCE(MAX(response_time), 0) as max_response_time,
-                        COUNT(DISTINCT user_id) as total_unique_users
-                    FROM request_metrics
-                    WHERE timestamp >= ?
+                        SUM(CASE WHEN rm.success = 1 THEN 1 ELSE 0 END) as successful_requests,
+                        SUM(CASE WHEN rm.success = 0 THEN 1 ELSE 0 END) as failed_requests,
+                        COALESCE(AVG(rm.response_time), 0) as avg_response_time,
+                        COALESCE(MAX(rm.response_time), 0) as max_response_time,
+                        COUNT(DISTINCT rm.user_id) as total_unique_users
+                    FROM request_metrics rm
+                    JOIN users u ON rm.user_id = u.telegram_id
+                    WHERE rm.timestamp >= ? AND u.role != 'admin'
                 ''', (start_date,))
                 
                 overall = await cursor.fetchone()
                 
-                # Средняя активность в день (уникальных пользователей)
+                # Средняя активность в день (уникальных пользователей) - ИСКЛЮЧАЯ админов
                 cursor_daily = await db.execute('''
-                    SELECT COUNT(DISTINCT user_id) as daily_users, DATE(timestamp) as metric_date
-                    FROM request_metrics
-                    WHERE timestamp >= ?
-                    GROUP BY DATE(timestamp)
+                    SELECT COUNT(DISTINCT rm.user_id) as daily_users, DATE(rm.timestamp) as metric_date
+                    FROM request_metrics rm
+                    JOIN users u ON rm.user_id = u.telegram_id
+                    WHERE rm.timestamp >= ? AND u.role != 'admin'
+                    GROUP BY DATE(rm.timestamp)
                 ''', (start_date,))
                 
                 daily_users = await cursor_daily.fetchall()
@@ -1694,23 +1708,24 @@ class Database:
                 overall_dict = dict(overall) if overall else {}
                 overall_dict['avg_daily_users'] = avg_daily_users
                 
-                # Статистика по типам запросов
+                # Статистика по типам запросов (ИСКЛЮЧАЯ админов)
                 cursor = await db.execute('''
                     SELECT
-                        request_type,
+                        rm.request_type,
                         COUNT(*) as count,
-                        COALESCE(AVG(response_time), 0) as avg_time,
-                        SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as successful,
-                        SUM(CASE WHEN has_answer = 0 THEN 1 ELSE 0 END) as no_answer,
-                        COALESCE(AVG(CASE WHEN relevance_score IS NOT NULL THEN relevance_score ELSE 0 END), 0) as avg_relevance
-                    FROM request_metrics
-                    WHERE DATE(timestamp) >= ?
-                    GROUP BY request_type
+                        COALESCE(AVG(rm.response_time), 0) as avg_time,
+                        SUM(CASE WHEN rm.success = 1 THEN 1 ELSE 0 END) as successful,
+                        SUM(CASE WHEN rm.has_answer = 0 THEN 1 ELSE 0 END) as no_answer,
+                        COALESCE(AVG(CASE WHEN rm.relevance_score IS NOT NULL THEN rm.relevance_score ELSE 0 END), 0) as avg_relevance
+                    FROM request_metrics rm
+                    JOIN users u ON rm.user_id = u.telegram_id
+                    WHERE DATE(rm.timestamp) >= ? AND u.role != 'admin'
+                    GROUP BY rm.request_type
                 ''', (start_date,))
                 
                 by_type = await cursor.fetchall()
                 
-                # Топ пользователей
+                # Топ пользователей (ИСКЛЮЧАЯ администраторов)
                 cursor = await db.execute('''
                     SELECT
                         u.name,
@@ -1740,7 +1755,7 @@ class Database:
             return None
     
     async def get_detailed_metrics(self, start_date: datetime = None, end_date: datetime = None):
-        """Получает детальные метрики для экспорта"""
+        """Получает детальные метрики для экспорта (ИСКЛЮЧАЯ администраторов)"""
         try:
             if not start_date:
                 start_date = datetime.now() - timedelta(days=30)
@@ -1750,17 +1765,17 @@ class Database:
             async with aiosqlite.connect(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
                 
-                # Детальная информация по запросам
+                # Детальная информация по запросам (ИСКЛЮЧАЯ администраторов)
                 cursor = await db.execute('''
-                    SELECT 
+                    SELECT
                         rm.*,
                         u.name as user_name,
                         u.user_type,
                         u.client_code
                     FROM request_metrics rm
-                    LEFT JOIN users u ON rm.user_id = u.telegram_id
+                    JOIN users u ON rm.user_id = u.telegram_id
                     WHERE rm.timestamp BETWEEN ? AND ?
-                      AND (u.role != 'admin' OR u.role IS NULL)
+                      AND u.role != 'admin'
                     ORDER BY rm.timestamp DESC
                 ''', (start_date, end_date))
                 
@@ -1889,22 +1904,29 @@ class Database:
             print(f"[ERROR] Failed to end session: {e}")
     
     async def close_inactive_sessions(self, inactivity_minutes: int = 3):
-        """Закрывает сессии с неактивностью более указанного времени"""
+        """
+        Закрывает сессии с неактивностью более указанного времени.
+        
+        ВАЖНО: session_end устанавливается как (последний_запрос + inactivity_minutes),
+        чтобы учесть время изучения материала пользователем.
+        """
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 cutoff_time = datetime.now() - timedelta(minutes=inactivity_minutes)
                 
                 # Находим активные сессии, у которых последняя активность была более N минут назад
-                # Для этого берем последний запрос из request_metrics для каждой сессии
+                # session_end = последний запрос + N минут (время на изучение материала)
                 cursor = await db.execute('''
                     UPDATE user_sessions
-                    SET is_active = FALSE, session_end = (
-                        SELECT MAX(timestamp)
-                        FROM request_metrics
-                        WHERE user_id = user_sessions.user_id
-                        AND timestamp >= user_sessions.session_start
-                        AND timestamp < ?
-                    )
+                    SET is_active = FALSE,
+                        session_end = datetime(
+                            (SELECT MAX(timestamp)
+                             FROM request_metrics
+                             WHERE user_id = user_sessions.user_id
+                             AND timestamp >= user_sessions.session_start
+                             AND timestamp < ?),
+                            '+''' + str(inactivity_minutes) + ''' minutes'
+                        )
                     WHERE is_active = TRUE
                     AND id IN (
                         SELECT us.id
@@ -1923,7 +1945,7 @@ class Database:
                 await db.commit()
                 
                 if closed_count > 0:
-                    print(f"[SESSIONS] Closed {closed_count} inactive sessions")
+                    print(f"[SESSIONS] Closed {closed_count} inactive sessions (added {inactivity_minutes} min for reading)")
                 
                 return closed_count
         except Exception as e:
@@ -1975,24 +1997,24 @@ class Database:
             print(f"[ERROR] Failed to update session: {e}")
     
     async def get_dau_metrics(self, days: int = 30):
-        """Получает метрики Daily Active Users - считает ВСЕ запросы для активности"""
+        """Получает метрики Daily Active Users - ИСКЛЮЧАЯ администраторов"""
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
                 
                 start_date = datetime.now() - timedelta(days=days)
                 
-                # Считаем ВСЕ запросы из request_metrics для каждого дня
-                # (включая navigation, command и т.д. - для активности)
+                # Считаем запросы ТОЛЬКО от не-админов
                 cursor = await db.execute('''
                     SELECT
-                        DATE(timestamp) as activity_date,
-                        COUNT(DISTINCT user_id) as dau,
+                        DATE(rm.timestamp) as activity_date,
+                        COUNT(DISTINCT rm.user_id) as dau,
                         COUNT(*) as total_requests,
-                        CAST(COUNT(*) AS REAL) / COUNT(DISTINCT user_id) as avg_requests_per_user
-                    FROM request_metrics
-                    WHERE timestamp >= ?
-                    GROUP BY DATE(timestamp)
+                        CAST(COUNT(*) AS REAL) / COUNT(DISTINCT rm.user_id) as avg_requests_per_user
+                    FROM request_metrics rm
+                    JOIN users u ON rm.user_id = u.telegram_id
+                    WHERE rm.timestamp >= ? AND u.role != 'admin'
+                    GROUP BY DATE(rm.timestamp)
                     ORDER BY activity_date DESC
                 ''', (start_date,))
                 
@@ -2002,18 +2024,19 @@ class Database:
             return []
     
     async def get_retention_metrics(self):
-        """Получает метрики возвратности пользователей (1, 7, 30 дней)"""
+        """Получает метрики возвратности пользователей (ИСКЛЮЧАЯ администраторов)"""
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
                 
                 today = datetime.now().date()
                 
-                # Пользователи активные сегодня
+                # Пользователи активные сегодня (ИСКЛЮЧАЯ админов)
                 cursor = await db.execute('''
-                    SELECT COUNT(DISTINCT user_id) as today_users
-                    FROM user_activity
-                    WHERE activity_date = ?
+                    SELECT COUNT(DISTINCT ua.user_id) as today_users
+                    FROM user_activity ua
+                    JOIN users u ON ua.user_id = u.telegram_id
+                    WHERE ua.activity_date = ? AND u.role != 'admin'
                 ''', (today,))
                 today_users = (await cursor.fetchone())['today_users']
                 
@@ -2022,7 +2045,8 @@ class Database:
                 cursor = await db.execute('''
                     SELECT COUNT(DISTINCT ua1.user_id) as returned
                     FROM user_activity ua1
-                    WHERE ua1.activity_date = ?
+                    JOIN users u ON ua1.user_id = u.telegram_id
+                    WHERE ua1.activity_date = ? AND u.role != 'admin'
                     AND EXISTS (
                         SELECT 1 FROM user_activity ua2
                         WHERE ua2.user_id = ua1.user_id
@@ -2036,7 +2060,8 @@ class Database:
                 cursor = await db.execute('''
                     SELECT COUNT(DISTINCT ua1.user_id) as returned
                     FROM user_activity ua1
-                    WHERE ua1.activity_date = ?
+                    JOIN users u ON ua1.user_id = u.telegram_id
+                    WHERE ua1.activity_date = ? AND u.role != 'admin'
                     AND EXISTS (
                         SELECT 1 FROM user_activity ua2
                         WHERE ua2.user_id = ua1.user_id
@@ -2050,7 +2075,8 @@ class Database:
                 cursor = await db.execute('''
                     SELECT COUNT(DISTINCT ua1.user_id) as returned
                     FROM user_activity ua1
-                    WHERE ua1.activity_date = ?
+                    JOIN users u ON ua1.user_id = u.telegram_id
+                    WHERE ua1.activity_date = ? AND u.role != 'admin'
                     AND EXISTS (
                         SELECT 1 FROM user_activity ua2
                         WHERE ua2.user_id = ua1.user_id
@@ -2060,9 +2086,10 @@ class Database:
                 returned_30d = (await cursor.fetchone())['returned']
                 
                 cursor = await db.execute('''
-                    SELECT COUNT(DISTINCT user_id) as yesterday_users
-                    FROM user_activity
-                    WHERE activity_date = ?
+                    SELECT COUNT(DISTINCT ua.user_id) as yesterday_users
+                    FROM user_activity ua
+                    JOIN users u ON ua.user_id = u.telegram_id
+                    WHERE ua.activity_date = ? AND u.role != 'admin'
                 ''', (yesterday,))
                 yesterday_users = (await cursor.fetchone())['yesterday_users']
                 
@@ -2080,7 +2107,7 @@ class Database:
             return None
     
     async def get_session_metrics(self, days: int = 7):
-        """Получает метрики по сессиям"""
+        """Получает метрики по сессиям (ИСКЛЮЧАЯ администраторов)"""
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
@@ -2090,12 +2117,14 @@ class Database:
                 cursor = await db.execute('''
                     SELECT
                         COUNT(*) as total_sessions,
-                        AVG(CAST((julianday(session_end) - julianday(session_start)) * 24 * 60 AS REAL)) as avg_duration_minutes,
-                        AVG(request_count) as avg_requests_per_session,
-                        COUNT(DISTINCT user_id) as unique_users
-                    FROM user_sessions
-                    WHERE session_start >= ?
-                    AND session_end IS NOT NULL
+                        AVG(CAST((julianday(us.session_end) - julianday(us.session_start)) * 24 * 60 AS REAL)) as avg_duration_minutes,
+                        AVG(us.request_count) as avg_requests_per_session,
+                        COUNT(DISTINCT us.user_id) as unique_users
+                    FROM user_sessions us
+                    JOIN users u ON us.user_id = u.telegram_id
+                    WHERE us.session_start >= ?
+                    AND us.session_end IS NOT NULL
+                    AND u.role != 'admin'
                 ''', (start_date,))
                 
                 return dict(await cursor.fetchone())
@@ -2187,19 +2216,21 @@ class Database:
                 
                 start_date = datetime.now().date() - timedelta(days=days)
                 
-                # Считаем напрямую из request_metrics с фильтрацией типов
+                # Считаем напрямую из request_metrics с фильтрацией типов (ИСКЛЮЧАЯ админов)
                 cursor = await db.execute('''
                     SELECT
                         COUNT(*) as total,
-                        SUM(CASE WHEN success = TRUE AND has_answer = TRUE THEN 1 ELSE 0 END) as correct,
-                        SUM(CASE WHEN success = FALSE THEN 1 ELSE 0 END) as incorrect,
-                        SUM(CASE WHEN has_answer = FALSE THEN 1 ELSE 0 END) as no_answer,
-                        SUM(CASE WHEN request_type = 'code_search' THEN 1 ELSE 0 END) as code_searches,
-                        SUM(CASE WHEN request_type = 'name_search' THEN 1 ELSE 0 END) as name_searches,
-                        SUM(CASE WHEN request_type = 'general' THEN 1 ELSE 0 END) as general_questions
-                    FROM request_metrics
-                    WHERE DATE(timestamp) >= ?
-                    AND request_type IN ('general', 'code_search', 'name_search')
+                        SUM(CASE WHEN rm.success = TRUE AND rm.has_answer = TRUE THEN 1 ELSE 0 END) as correct,
+                        SUM(CASE WHEN rm.success = FALSE THEN 1 ELSE 0 END) as incorrect,
+                        SUM(CASE WHEN rm.has_answer = FALSE THEN 1 ELSE 0 END) as no_answer,
+                        SUM(CASE WHEN rm.request_type = 'code_search' THEN 1 ELSE 0 END) as code_searches,
+                        SUM(CASE WHEN rm.request_type = 'name_search' THEN 1 ELSE 0 END) as name_searches,
+                        SUM(CASE WHEN rm.request_type = 'general' THEN 1 ELSE 0 END) as general_questions
+                    FROM request_metrics rm
+                    JOIN users u ON rm.user_id = u.telegram_id
+                    WHERE DATE(rm.timestamp) >= ?
+                    AND rm.request_type IN ('general', 'code_search', 'name_search')
+                    AND u.role != 'admin'
                 ''', (start_date,))
                 
                 result = dict(await cursor.fetchone())

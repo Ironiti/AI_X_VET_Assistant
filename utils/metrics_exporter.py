@@ -727,7 +727,7 @@ class MetricsExporter:
                 worksheet.insert_chart(row + 2, 0, chart)
     
     async def _create_detailed_data_sheet(self, workbook, formats, days):
-        """Создает лист с детальными данными"""
+        """Создает лист с детальными данными - ТОЛЬКО валидные запросы (общие вопросы, поиск по коду/названию)"""
         worksheet = workbook.add_worksheet('📋 Детали')
         
         # Заголовок
@@ -737,22 +737,47 @@ class MetricsExporter:
         worksheet.set_row(0, 30)
         
         start_date = datetime.now() - timedelta(days=days)
-        detailed = await self.db.get_detailed_metrics(start_date=start_date)
         
-        if not detailed or not detailed.get('requests'):
+        # Получаем ТОЛЬКО валидные запросы (общие вопросы, поиск по коду, поиск по названию)
+        import aiosqlite
+        async with aiosqlite.connect(self.db.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute('''
+                SELECT
+                    rm.timestamp,
+                    u.name as user_name,
+                    u.user_type,
+                    u.client_code,
+                    rm.request_type,
+                    rm.query_text,
+                    rm.success,
+                    rm.has_answer,
+                    rm.response_time
+                FROM request_metrics rm
+                JOIN users u ON rm.user_id = u.telegram_id
+                WHERE rm.timestamp >= ?
+                  AND u.role != 'admin'
+                  AND rm.request_type IN ('general', 'code_search', 'name_search')
+                ORDER BY rm.timestamp DESC
+                LIMIT 1000
+            ''', (start_date,))
+            
+            interactions = await cursor.fetchall()
+        
+        if not interactions:
             worksheet.write(2, 0, 'Нет данных за указанный период', formats['metric_label'])
             return
         
         row = 2
         worksheet.merge_range(row, 0, row, 5,
-                            'История запросов пользователей',
+                            'История валидных запросов (общие вопросы, поиск по коду, поиск по названию)',
                             formats['section_header'])
         row += 1
         
         # Заголовки
         headers = [
-            'Дата/Время', 'Пользователь', 'Тип запроса', 'Запрос',
-            'Время ответа (сек)', 'Статус'
+            'Дата/Время', 'Пользователь', 'Тип взаимодействия',
+            'Текст/Сообщение', 'Время обработки (сек)', 'Статус'
         ]
         
         for col, header in enumerate(headers):
@@ -761,27 +786,52 @@ class MetricsExporter:
         # Настройка ширины колонок
         worksheet.set_column('A:A', 18)
         worksheet.set_column('B:B', 25)
-        worksheet.set_column('C:C', 18)
+        worksheet.set_column('C:C', 20)
         worksheet.set_column('D:D', 50)
-        worksheet.set_column('E:E', 18)
+        worksheet.set_column('E:E', 20)
         worksheet.set_column('F:F', 12)
         
         row += 1
         
-        # Данные - максимум 1000 записей
-        for req in detailed['requests'][:1000]:
-            worksheet.write(row, 0, str(req.get('timestamp', '')), formats['datetime'])
-            worksheet.write(row, 1, req.get('user_name', 'Неизвестный'), formats['cell_data'])
-            worksheet.write(row, 2, req.get('request_type', ''), formats['cell_data'])
+        # Данные - только валидные запросы
+        for interaction in interactions:
+            worksheet.write(row, 0, str(interaction['timestamp']), formats['datetime'])
+            worksheet.write(row, 1, interaction['user_name'] or 'Неизвестный', formats['cell_data'])
             
-            query = req.get('query_text', '')
+            # Тип взаимодействия с понятными названиями
+            request_type = interaction['request_type'] or 'unknown'
+            type_names = {
+                'navigation': '🔘 Навигация (кнопка)',
+                'command': '⌨️ Команда',
+                'general': '💬 Общий вопрос',
+                'code_search': '🔍 Поиск по коду',
+                'name_search': '📝 Поиск по названию',
+                'question': '❓ Вопрос'
+            }
+            type_display = type_names.get(request_type, request_type)
+            worksheet.write(row, 2, type_display, formats['cell_data'])
+            
+            # Текст взаимодействия
+            query = interaction['query_text'] or ''
             worksheet.write(row, 3, query[:100] if query else '', formats['cell_data'])
             
-            response_time = req.get('response_time') or 0
+            # Время обработки
+            response_time = interaction['response_time'] or 0
             worksheet.write(row, 4, response_time, formats['cell_decimal'])
             
-            success = req.get('success')
-            status_text = '✅ Успешно' if success else '❌ Ошибка'
+            # Статус (обновленная логика)
+            success = interaction['success']
+            has_answer = interaction['has_answer']
+            
+            if not success:
+                # Реальная ошибка (некорректный формат и т.д.)
+                status_text = '❌ Ошибка'
+            elif success and not has_answer:
+                # Корректно обработано, но результата нет (код не найден, нет информации)
+                status_text = '✅ Обработано (нет результата)'
+            else:
+                # Корректно обработано, результат есть
+                status_text = '✅ Успешно'
             worksheet.write(row, 5, status_text, formats['cell_data'])
             
             row += 1

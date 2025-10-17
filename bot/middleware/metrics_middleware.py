@@ -5,7 +5,7 @@ import time
 import logging
 from typing import Callable, Dict, Any, Awaitable
 from aiogram import BaseMiddleware
-from aiogram.types import Message, TelegramObject
+from aiogram.types import Message, CallbackQuery, TelegramObject
 from datetime import datetime
 
 from src.database.db_init import db
@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 class MetricsMiddleware(BaseMiddleware):
     """
     Middleware для отслеживания времени ответа и других метрик
+    Работает как с текстовыми сообщениями, так и с callback queries
     """
     
     async def __call__(
@@ -27,12 +28,16 @@ class MetricsMiddleware(BaseMiddleware):
         """
         Обрабатывает событие и отслеживает активность пользователя
         """
-        # Работаем только с сообщениями
-        if not isinstance(event, Message):
-            return await handler(event, data)
+        # Получаем user_id из события
+        user_id = None
+        if isinstance(event, Message):
+            user_id = event.from_user.id
+        elif isinstance(event, CallbackQuery):
+            user_id = event.from_user.id
         
-        message: Message = event
-        user_id = message.from_user.id
+        # Если не получили user_id - пропускаем
+        if not user_id:
+            return await handler(event, data)
         
         # Проверяем, что пользователь не админ
         try:
@@ -44,11 +49,24 @@ class MetricsMiddleware(BaseMiddleware):
             logger.error(f"[METRICS] Failed to check user role: {e}")
         
         # Отслеживаем активность пользователя (для DAU и сессий)
+        # ВАЖНО: Отслеживание активности НЕ РАВНО логированию в request_metrics!
+        # - track_user_activity: обновляет user_activity (для DAU)
+        # - update_session_activity: обновляет user_sessions (для времени сессий)
+        # - log_request_metric: логирует запросы (ТОЛЬКО для валидных запросов)
         try:
+            # Отслеживаем активность для ВСЕХ действий (включая навигацию)
             await db.track_user_activity(user_id)
             await db.update_session_activity(user_id)
+            
+            # Логируем тип события для отладки
+            event_type = "message" if isinstance(event, Message) else "callback"
+            logger.debug(f"[METRICS] Tracked {event_type} activity for user {user_id}")
         except Exception as e:
             logger.error(f"[METRICS] Failed to track activity: {e}")
+        
+        # ВАЖНО: Логирование в request_metrics происходит ТОЛЬКО в обработчиках
+        # для валидных типов запросов: code_search, name_search, general
+        # Навигационные действия НЕ логируются в request_metrics
         
         # Выполняем обработчик (метрики запросов логируются в самих обработчиках)
         return await handler(event, data)
