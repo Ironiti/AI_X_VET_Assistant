@@ -174,6 +174,7 @@ def enhance_data_with_vet_abbreviations(df):
             safe_str(row.get('encoded', '')),
             safe_str(row.get('biomaterial_type', '')),
             safe_str(row.get('biomaterial_type', '')),
+            safe_str(row.get('biomaterial_type', '')),
             safe_str(row.get('test_name_abbreviations', '')),
             safe_str(row.get('test_name_abbreviations', '')),
             safe_str(row.get('test_name_abbreviations', '')),
