@@ -42,7 +42,7 @@ from bot.handlers.sending_style import (
     format_test_info,
     get_user_first_name,
     get_time_based_farewell,
-    send_blank_files
+    send_blank_files_by_names
 )
 from bot.handlers.score_test import (
     select_best_match,
@@ -3226,7 +3226,7 @@ async def send_test_info_with_photo(
 ):
     """Отправляет информацию о тесте и ВСЕ соответствующие бланки"""
     
-    # Собираем все типы контейнеров (оригинальный код)
+    # Собираем все типы контейнеров
     raw_container_types = []
     
     primary_container = str(test_data.get("primary_container_type_raw", "")).strip()
@@ -3257,21 +3257,31 @@ async def send_test_info_with_photo(
     unique_containers = deduplicate_container_names(raw_container_types)
     has_containers = len(unique_containers) > 0
     
-    # Клавиатура для фото контейнеров (если есть)
-    keyboard = None
-    if has_containers:
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="📷 Показать фото контейнеров",
-                        callback_data=f"show_container_photos:{test_data['test_code']}",
-                    )
-                ]
-            ]
-        )
+    # Проверяем наличие бланков
+    has_forms = bool(test_data.get("form_name") or test_data.get("additional_information_name"))
     
-    # 1. Сначала отправляем основную информацию о тесте (оригинальный код)
+    # Создаем клавиатуру с кнопками
+    keyboard_buttons = []
+
+    if has_containers:
+        keyboard_buttons.append([
+            InlineKeyboardButton(
+                text="📷 Показать фото контейнеров",
+                callback_data=f"show_container_photos:{test_data['test_code']}",
+            )
+        ])
+
+    if has_forms:
+        keyboard_buttons.append([
+            InlineKeyboardButton(
+                text="📋 Показать все бланки",
+                callback_data=f"show_blanks:{test_data['test_code']}",
+            )
+        ])
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons) if keyboard_buttons else None
+    
+    # Отправляем основную информацию о тесте
     await message.answer(
         response_text,
         parse_mode="HTML",
@@ -3279,34 +3289,143 @@ async def send_test_info_with_photo(
         reply_markup=keyboard,
     )
     
-    # 2. Отправляем основные бланки из form_name (если есть)
-    if test_data.get("form_name"):
-        form_names = [name.strip() for name in test_data['form_name'].split('*I*') if name.strip()]
-        
-        if form_names:
-            logger.info(f"[BLANKS] Sending form blanks for test {test_data['test_code']}: {form_names}")
-            
-            # Отправляем основные бланки
-            blanks_sent = await send_blank_files(message, test_data['test_code'], form_names)
-            
-            if not blanks_sent:
-                logger.warning(f"[BLANKS] No form blanks sent for test {test_data['test_code']}")
-    
-    # 3. Отправляем дополнительные бланки из additional_information_name (если есть)
-    if test_data.get("additional_information_name"):
-        additional_names = [name.strip() for name in test_data['additional_information_name'].split('*I*') if name.strip()]
-        
-        if additional_names:
-            logger.info(f"[BLANKS] Sending additional blanks for test {test_data['test_code']}: {additional_names}")
-            
-            # Отправляем дополнительные бланки
-            additional_sent = await send_blank_files(message, test_data['test_code'], additional_names)
-            
-            if not additional_sent:
-                logger.warning(f"[BLANKS] No additional blanks sent for test {test_data['test_code']}")
-    
     return True
 
+@questions_router.callback_query(F.data.startswith("show_blanks:"))
+async def handle_show_blanks_callback(callback: CallbackQuery, state: FSMContext):
+    """Обработчик для показа бланков теста"""
+    await callback.answer("📋 Загружаю бланки...")
+    
+    test_code = callback.data.split(":", 1)[1]
+    
+    try:
+        processor = DataProcessor()
+        processor.load_vector_store()
+
+        results = processor.search_test(filter_dict={"test_code": test_code})
+
+        if not results:
+            await callback.message.answer("❌ Тест не найден")
+            return
+
+        doc = results[0][0] if isinstance(results[0], tuple) else results[0]
+        test_data = format_test_data(doc.metadata)
+
+        # Собираем все имена бланков
+        all_blank_names = []
+        
+        # Основные бланки
+        if test_data.get("form_name"):
+            form_names = [name.strip() for name in test_data['form_name'].split('*I*') if name.strip()]
+            all_blank_names.extend(form_names)
+        
+        # Дополнительные бланки
+        if test_data.get("additional_information_name"):
+            additional_names = [name.strip() for name in test_data['additional_information_name'].split('*I*') if name.strip()]
+            all_blank_names.extend(additional_names)
+        
+        if not all_blank_names:
+            await callback.message.answer("❌ Для этого теста нет бланков")
+            return
+
+        # Отправляем бланки и получаем message_ids
+        blanks_sent, message_ids = await send_blank_files_by_names(callback.message, all_blank_names)
+        
+        if blanks_sent and message_ids:
+            # Сохраняем информацию о отправленных бланках для возможности скрытия
+            blanks_data = {
+                "test_code": test_code,
+                "blank_names": all_blank_names,
+                "message_ids": message_ids,
+                "timestamp": datetime.now().timestamp()
+            }
+            
+            # Сохраняем в state для данного callback
+            await state.update_data({
+                f"blanks_{test_code}": blanks_data
+            })
+            
+            # Создаем кнопку для скрытия бланков
+            hide_keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="🙈 Скрыть все бланки",
+                            callback_data=f"hide_blanks:{test_code}",
+                        )
+                    ]
+                ]
+            )
+            
+            hide_msg = await callback.message.answer(
+                f"📋 Показано {len(message_ids)} бланков для теста {test_code}",
+                reply_markup=hide_keyboard
+            )
+            
+            # Сохраняем ID сообщения с кнопкой скрытия
+            await state.update_data({
+                f"hide_message_{test_code}": hide_msg.message_id
+            })
+            
+        else:
+            await callback.message.answer("❌ Не удалось загрузить бланки")
+
+    except Exception as e:
+        logger.error(f"[BLANKS] Failed to show blanks: {e}")
+        await callback.message.answer("❌ Ошибка при загрузке бланков")
+
+
+@questions_router.callback_query(F.data.startswith("hide_blanks:"))
+async def handle_hide_blanks_callback(callback: CallbackQuery, state: FSMContext):
+    """Обработчик для скрытия бланков"""
+    await callback.answer("Бланки скрыты")
+    
+    test_code = callback.data.split(":", 1)[1]
+    
+    try:
+        data = await state.get_data()
+        blanks_data = data.get(f"blanks_{test_code}")
+        hide_message_id = data.get(f"hide_message_{test_code}")
+        
+        if blanks_data and blanks_data.get("message_ids"):
+            # Удаляем все сообщения с бланками
+            for message_id in blanks_data["message_ids"]:
+                try:
+                    await callback.bot.delete_message(
+                        chat_id=callback.message.chat.id,
+                        message_id=message_id
+                    )
+                except Exception as e:
+                    logger.warning(f"[BLANKS] Failed to delete blank message {message_id}: {e}")
+            
+            # Удаляем сообщение с кнопкой скрытия
+            if hide_message_id:
+                try:
+                    await callback.bot.delete_message(
+                        chat_id=callback.message.chat.id,
+                        message_id=hide_message_id
+                    )
+                except Exception:
+                    pass
+            
+            # Удаляем сообщение с кнопкой "Скрыть все бланки"
+            try:
+                await callback.message.delete()
+            except Exception:
+                pass
+            
+            # Очищаем данные
+            await state.update_data({
+                f"blanks_{test_code}": None,
+                f"hide_message_{test_code}": None
+            })
+            
+        else:
+            await callback.answer("❌ Бланки не найдены или уже скрыты", show_alert=True)
+            
+    except Exception as e:
+        logger.error(f"[BLANKS] Failed to hide blanks: {e}")
+        await callback.answer("❌ Ошибка при скрытии бланков", show_alert=True)
 
 # ============================================================================
 # ОБРАБОТЧИКИ ОЦЕНОК И КОММЕНТАРИЕВ

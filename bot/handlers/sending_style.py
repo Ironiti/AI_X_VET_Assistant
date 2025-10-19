@@ -21,33 +21,65 @@ BOT_USERNAME = "AI_VET_Assistant_Bot"
 # BOT_USERNAME = "@idontknow12bot"
 BLANKS_PATH = "data/documents"
 
-async def send_blank_files(message, test_code: str, form_names: List[str]) -> bool:
-    """Отправляет файлы бланков для теста"""
+async def send_blank_files_by_names(message, form_names: List[str]) -> Tuple[bool, List[int]]:
+    """Отправляет файлы бланков используя file_id и возвращает message_ids"""
     try:
         sent_files = 0
+        message_ids = []
         
         for form_name in form_names:
-            # Берем точное имя файла из form_name и добавляем .pdf
             file_name = f"{form_name.strip()}.pdf"
-            file_path = os.path.join(BLANKS_PATH, file_name)
             
-            if os.path.exists(file_path):
-                document = FSInputFile(file_path)
-                await message.answer_document(document)
-                sent_files += 1
-                logger.info(f"[BLANKS] Sent blank: {file_name} for test {test_code}")
-                
-                # Небольшая задержка между отправкой файлов
-                await asyncio.sleep(0.3)
-            else:
-                logger.warning(f"[BLANKS] File not found: {file_path} for test {test_code}")
+            # Пытаемся найти file_id в базе данных
+            file_data = await db.get_blank_file_id(file_name)
+            
+            if file_data and file_data.get("file_id"):
+                # Используем существующий file_id для быстрой отправки
+                try:
+                    sent_msg = await message.answer_document(
+                        file_data["file_id"],
+                        caption=f"📄 {form_name}"
+                    )
+                    message_ids.append(sent_msg.message_id)
+                    sent_files += 1
+                    logger.info(f"[BLANKS] Sent blank via file_id: {file_name}")
+                except Exception as e:
+                    logger.warning(f"[BLANKS] File_id expired, sending file directly: {e}")
+                    # Если file_id устарел, отправляем файл напрямую
+                    file_data = None
+            
+            if not file_data or not file_data.get("file_id"):
+                # Загружаем новый файл
+                file_path = os.path.join(BLANKS_PATH, file_name)
+                if os.path.exists(file_path):
+                    try:
+                        sent_msg = await message.answer_document(
+                            FSInputFile(file_path),
+                            caption=f"📄 {form_name}"
+                        )
+                        message_ids.append(sent_msg.message_id)
+                        sent_files += 1
+                        
+                        # Сохраняем file_id для будущего использования
+                        if sent_msg.document:
+                            await db.save_blank_file_id(file_name, sent_msg.document.file_id)
+                            logger.info(f"[BLANKS] Saved new file_id for: {file_name}")
+                    except Exception as e:
+                        logger.error(f"[BLANKS] Failed to send file {file_path}: {e}")
+                        continue
+                else:
+                    logger.warning(f"[BLANKS] File not found: {file_path}")
+                    continue
+            
+            # Небольшая задержка между отправкой файлов
+            await asyncio.sleep(0.3)
         
-        return sent_files > 0
+        return sent_files > 0, message_ids
         
     except Exception as e:
-        logger.error(f"[BLANKS] Failed to send blanks for {test_code}: {e}")
-        return False
-
+        logger.error(f"[BLANKS] Failed to send blanks: {e}")
+        return False, []
+        
 
 async def get_test_container_photos(test_data: Dict) -> List[Dict]:
     """Получает все фото контейнеров для теста"""

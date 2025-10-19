@@ -159,6 +159,8 @@ class Database:
     async def create_poll(self, title, description, questions, created_by):
         """Создание нового опроса"""
         async with aiosqlite.connect(self.db_path) as db:
+
+            
             # Создаем таблицы для опросов если их нет
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS polls (
@@ -935,6 +937,13 @@ class Database:
     
     async def create_tables(self):
         async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS blank_files (
+                    file_name TEXT PRIMARY KEY,
+                    file_id TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
             # ПРАВИЛЬНАЯ версия таблицы container_photos
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS container_photos (
@@ -2514,3 +2523,33 @@ class Database:
         except Exception as e:
             print(f"[ERROR] Failed to get blank document: {e}")
             return None
+
+    # В класс Database добавим:
+
+    async def get_blank_file_id(self, file_name: str):
+        """Получает file_id бланка из базы данных"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute(
+                    "SELECT file_id FROM blank_files WHERE file_name = ?",
+                    (file_name,)
+                )
+                row = await cursor.fetchone()
+                return {"file_id": row[0]} if row else None
+        except Exception as e:
+            print(f"[ERROR] Failed to get blank file_id: {e}")
+            return None
+
+    async def save_blank_file_id(self, file_name: str, file_id: str):
+        """Сохраняет file_id бланка в базу данных"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    INSERT OR REPLACE INTO blank_files (file_name, file_id, created_at)
+                    VALUES (?, ?, ?)
+                ''', (file_name, file_id, datetime.now()))
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"[ERROR] Failed to save blank file_id: {e}")
+            return False
