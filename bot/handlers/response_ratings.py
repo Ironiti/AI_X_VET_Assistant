@@ -13,8 +13,8 @@ logger = logging.getLogger(__name__)
 class ResponseRatingManager:
     def __init__(self, db):
         # ЗАМЕНИТЕ НА РЕАЛЬНЫЕ ДАННЫЕ ВАШЕЙ ГРУППЫ
-        self.feedback_group_link = "https://t.me/+EsE7kilfJsk1ODZi" 
-        self.feedback_group_id = -1002889617610  
+        self.feedback_group_link = "https://t.me/+LRuRUfbRu0s2NmIy" 
+        self.feedback_group_id = -1002944068570
         self.db = db
         self._user_cooldown = {}
         self._last_rating_request = {}
