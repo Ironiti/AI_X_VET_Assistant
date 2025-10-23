@@ -104,8 +104,8 @@ class MetricsMiddleware(BaseMiddleware):
             r'^🇦🇲\s*Армения$',
             r'^📍\s*.+$',  # Город с эмодзи
             r'^🏙\s*.+$',  # Регион с эмодзи
-            r'^🔬\s*Сотрудник VET UNION$',
-            r'^🏥\s*Клиент VET UNION$'
+            r'^🔬\s*Сотрудник X-LAB VET$',
+            r'^🏥\s*Клиент X-LAB VET$'
         ]
         
         for pattern in registration_patterns:

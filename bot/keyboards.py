@@ -25,7 +25,7 @@ def get_user_type_kb():
     """Клавиатура выбора типа пользователя"""
     kb = [
         [KeyboardButton(text="👨‍⚕️ Ветеринарный врач клиники-партнера")],
-        [KeyboardButton(text="🔬 Сотрудник VET UNION")]
+        [KeyboardButton(text="🔬 Сотрудник X-LAB VET")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
