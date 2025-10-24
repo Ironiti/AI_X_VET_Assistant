@@ -69,7 +69,7 @@ rating_manager = ResponseRatingManager(db)
 # КОНСТАНТЫ
 # ============================================================================
 
-LOADING_GIF_ID = "CgACAgIAAxkBAAIBFGiBcXtGY7OZvr3-L1dZIBRNqSztAALueAACpqh5Scn4VmIRb4UjNgQ"
+LOADING_GIF_ID = "CgACAgIAAxkBAANyaPpHf3v-Ra2alXm1M4RH6uJWPhsAAm6BAAL5U9lLj5R8UCy_LOQ2BA"
 
 # Параметры поиска
 FUZZY_SEARCH_THRESHOLD_MIN = 55  # Увеличен с 30 до 55

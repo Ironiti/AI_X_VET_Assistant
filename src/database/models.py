@@ -982,6 +982,24 @@ class Database:
                 )
             ''')
             
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS user_frequent_tests (
+                    user_id INTEGER NOT NULL,
+                    test_code TEXT NOT NULL,
+                    test_name TEXT,
+                    frequency INTEGER DEFAULT 1,
+                    last_accessed TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (user_id, test_code),
+                    FOREIGN KEY (user_id) REFERENCES users(telegram_id)
+                )
+            ''')
+
+            # Индекс для ускорения запросов
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_user_frequent_tests
+                ON user_frequent_tests(user_id, frequency DESC, last_accessed DESC)
+            ''')
+            
             # Обновленная таблица пользователей
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS users (

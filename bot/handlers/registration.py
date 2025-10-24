@@ -122,7 +122,7 @@ async def cmd_start(message: Message, state: FSMContext):
     else:
         print(f"[INFO] User {user_id} starting new registration")
         await message.answer(
-            "Добро пожаловать в бот Лаборатории VET UNION! 🧪\n\n"
+            "Добро пожаловать в бот Лаборатории X-LAB VET! 🧪\n\n"
             "Для начала работы необходимо пройти регистрацию.\n"
             "Выберите, кто вы:",
             reply_markup=get_user_type_kb()
@@ -389,7 +389,7 @@ async def process_specialization(message: Message, state: FSMContext):
             "Теперь вы можете пользоваться всеми функциями бота!",
             reply_markup=get_main_menu_kb()
         )
-        await message.answer(await get_tech_support_message())
+        # await message.answer(await get_tech_support_message())
     else:
         await message.answer(
             "❌ Ошибка регистрации. Возможно, вы уже зарегистрированы.\nПопробуйте еще раз: /start",
@@ -428,7 +428,7 @@ async def process_custom_specialization(message: Message, state: FSMContext):
             "Теперь вы можете пользоваться всеми функциями бота!",
             reply_markup=get_main_menu_kb()
         )
-        await message.answer(await get_tech_support_message())
+        # await message.answer(await get_tech_support_message())
     else:
         await message.answer(
             "❌ Ошибка регистрации. Возможно, вы уже зарегистрированы.\nПопробуйте еще раз: /start",
@@ -574,7 +574,7 @@ async def process_department(message: Message, state: FSMContext):
             "Теперь вы можете пользоваться всеми функциями бота!",
             reply_markup=get_main_menu_kb()
         )
-        await message.answer(await get_tech_support_message())
+        # await message.answer(await get_tech_support_message())
         # Проверяем наличие отложенного теста
         if 'pending_test_code' in data:
             test_code = data['pending_test_code']
