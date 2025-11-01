@@ -77,24 +77,24 @@ class UltimateQuestionClassifier:
         
         # 1. Проверка высокоточных паттернов
         code_result = self._check_code_patterns(query)
-        if code_result["confidence"] >= 0.9:
+        if code_result["confidence"] >= 0.95:
             return 'code', code_result["confidence"], code_result
         
         name_result = self._check_name_patterns(query)
-        if name_result["confidence"] >= 0.9:
+        if name_result["confidence"] >= 0.95:
             return 'name', name_result["confidence"], name_result
         
         profile_result = self._check_profile_patterns(query)
-        if profile_result["confidence"] >= 0.9:
+        if profile_result["confidence"] >= 0.95:
             return 'profile', profile_result["confidence"], profile_result
         
         general_result = self._check_general_patterns(query)
-        if general_result["confidence"] >= 0.9:
+        if general_result["confidence"] >= 0.85:
             return 'general', general_result["confidence"], general_result
         
         # 2. Проверка эвристик
         heuristic_result = self._check_heuristics(query)
-        if heuristic_result["confidence"] >= 0.85:
+        if heuristic_result["confidence"] >= 0.80:
             return heuristic_result["type"], heuristic_result["confidence"], heuristic_result
         
         # 3. LLM классификация для неоднозначных случаев
@@ -295,6 +295,7 @@ class UltimateQuestionClassifier:
 4. GENERAL - если это общий вопрос о тесте, подготовке, условиях и т.д.
 
 если не уверен, выбирай GENERAL.
+если попался очень короткий вопрос с явной ветеринарной тематикой, то выбирай NAME
 
 Ответь строго в формате:
 TYPE: <code|name|profile|general>

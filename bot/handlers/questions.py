@@ -73,7 +73,7 @@ LOADING_GIF_ID = "CgACAgIAAxkBAANyaPpHf3v-Ra2alXm1M4RH6uJWPhsAAm6BAAL5U9lLj5R8UC
 
 # Параметры поиска
 FUZZY_SEARCH_THRESHOLD_MIN = 55  # Увеличен с 30 до 55
-FUZZY_SEARCH_THRESHOLD_EXACT = 90
+FUZZY_SEARCH_THRESHOLD_EXACT = 60
 TEXT_SEARCH_TOP_K = 80
 
 # Параметры пагинации
@@ -431,7 +431,7 @@ async def find_container_photo_smart(db, container_type: str):
 # ============================================================================
 
 def create_paginated_keyboard(
-    tests: List[Dict],  # Изменено: теперь список Dict, а не Document
+    tests: List[Dict],
     current_page: int = 0,
     items_per_page: int = ITEMS_PER_PAGE,
     search_id: str = "",
@@ -439,7 +439,7 @@ def create_paginated_keyboard(
     tests_count: int = 0,
     profiles_count: int = 0,
     total_count: int = 0,
-    current_view: str = "all"
+    current_view: str = "tests"  # По умолчанию показываем только тесты
 ) -> Tuple[InlineKeyboardMarkup, int, int]:
     """
     Создает клавиатуру с пагинацией для результатов поиска
@@ -456,9 +456,23 @@ def create_paginated_keyboard(
         current_view: Текущий вид (all/tests/profiles)
     
     Returns:
-        Tuple[клавиатура, количество_страниц, показано_элементов]
+        Tuple[клавиатуру, количество_страниц, показано_элементов]
     """
-    total_items = len(tests)
+    # ФИЛЬТРАЦИЯ: всегда показываем только тесты при current_view = "tests"
+    if current_view == "tests":
+        display_results = [
+            item for item in tests 
+            if not is_profile_test(item.get('metadata', {}).get("test_code", ""))
+        ]
+    elif current_view == "profiles":
+        display_results = [
+            item for item in tests 
+            if is_profile_test(item.get('metadata', {}).get("test_code", ""))
+        ]
+    else:  # "all"
+        display_results = tests
+    
+    total_items = len(display_results)
     total_pages = (total_items + items_per_page - 1) // items_per_page
     
     start_idx = current_page * items_per_page
@@ -466,29 +480,41 @@ def create_paginated_keyboard(
     
     keyboard = []
     
-    # Кнопки фильтрации
-    if include_filters and (tests_count + profiles_count + total_count) > 0:
-        filter_row = [
-            InlineKeyboardButton(
-                text=f"🧪 Тесты ({tests_count})",
-                callback_data=f"switch_view:tests:{search_id}"
-            ),
-            InlineKeyboardButton(
-                text=f"🔬 Профили ({profiles_count})",
-                callback_data=f"switch_view:profiles:{search_id}"
-            ),
-            InlineKeyboardButton(
-                text=f"📋 Все ({total_count})",
-                callback_data=f"switch_view:all:{search_id}"
+    # Кнопки фильтрации (если есть и тесты и профили)
+    if include_filters and (tests_count > 0 or profiles_count > 0):
+        filter_row = []
+        
+        if tests_count > 0:
+            filter_row.append(
+                InlineKeyboardButton(
+                    text=f"🧪 Тесты ({tests_count})",
+                    callback_data=f"switch_view:tests:{search_id}"
+                )
             )
-        ]
-        keyboard.append(filter_row)
+        
+        if profiles_count > 0:
+            filter_row.append(
+                InlineKeyboardButton(
+                    text=f"🔬 Профили ({profiles_count})",
+                    callback_data=f"switch_view:profiles:{search_id}"
+                )
+            )
+        
+        if total_count > 0 and (tests_count > 0 and profiles_count > 0):
+            filter_row.append(
+                InlineKeyboardButton(
+                    text=f"📋 Все ({total_count})",
+                    callback_data=f"switch_view:all:{search_id}"
+                )
+            )
+        
+        if filter_row:
+            keyboard.append(filter_row)
     
     # Кнопки тестов (по 3 в ряд)
     row = []
-    for item in tests[start_idx:end_idx]:
-        # Извлекаем test_code из metadata
-        metadata = item.get('metadata', item)  # На случай разных структур
+    for item in display_results[start_idx:end_idx]:
+        metadata = item.get('metadata', item)
         test_code = metadata.get('test_code', '')
         
         if not test_code:
@@ -538,14 +564,6 @@ def create_paginated_keyboard(
             )
         
         keyboard.append(nav_row)
-    
-    # # Кнопка закрытия
-    # keyboard.append([
-    #     InlineKeyboardButton(
-    #         text="❌ Закрыть",
-    #         callback_data="close_keyboard"
-    #     )
-    # ])
     
     return InlineKeyboardMarkup(inline_keyboard=keyboard), total_pages, end_idx - start_idx
 
@@ -713,18 +731,19 @@ async def start_question(message: Message, state: FSMContext):
 
 🔬 Я ассистент ветеринарной лаборатории X-LAB VET и помогу вам найти информацию о:
 
-📋 <b>Лабораторных тестах и анализах:</b>
-• По коду теста (например: AN116, ан116, АН116 или просто 116)
+📋 Лабораторных тестах и анализах:
+• По коду теста (например: AN5, ан5, АН5 или просто 5)
 • По названию или описанию (например: "общий анализ крови", "биохимия")
 
-🧪 <b>Преаналитических требованиях:</b>
+🧪 Преаналитических требованиях:
 • Подготовка пациента
 • Правила взятия биоматериала
 • Условия хранения и транспортировки
 • Типы контейнеров для проб
 
-💡 <b>Как мне задать вопрос:</b>
-• Введите код теста: <code>AN116</code> или <code>116</code>
+💡 Как мне задать вопрос:
+• Введите код теста: AN5 или 5 
+• Либо аббревиатуру: оак, ОАМ, Вик
 • Опишите, что ищете: "анализ на глюкозу"
 
 Я автоматически определю тип вашего запроса и найду нужную информацию.
@@ -775,6 +794,10 @@ async def show_gallery_in_dialog(message: Message, state: FSMContext):
     )
     # Не меняем состояние и не отправляем дополнительные сообщения
 
+# ============================================================================
+# ОСНОВНЫЕ ОБРАБОТЧИКИ СООБЩЕНИЙ
+# ============================================================================
+
 @questions_router.message(QuestionStates.waiting_for_search_type)
 async def handle_universal_search(message: Message, state: FSMContext):
     """Универсальный обработчик запросов - автоматически определяет тип поиска"""
@@ -789,8 +812,8 @@ async def handle_universal_search(message: Message, state: FSMContext):
     # Сохраняем флаг того, что это запрос с классификацией
     # ============================================================
     await state.update_data(
-        is_classification_flow=True,  # Флаг что это запрос с определением типа
-        original_user_query=text      # Сохраняем оригинальный запрос
+        is_classification_flow=True,
+        original_user_query=text
     )
 
     # ============================================================
@@ -809,11 +832,9 @@ async def handle_universal_search(message: Message, state: FSMContext):
         ])
     )
     
-    # Проверяем наличие вопросительных ключевых слов
     has_question_keywords = any(keyword in text_lower for keyword in GENERAL_QUESTION_KEYWORDS)
     
     # Если это явный вопрос ИЛИ содержит вопросительные слова
-    # то обрабатываем как общий вопрос, ДАЖЕ если там есть код теста
     if is_obvious_question or has_question_keywords:
         logger.info(f"[PRE-CHECK] General question with context detected: {text}")
         
@@ -821,7 +842,7 @@ async def handle_universal_search(message: Message, state: FSMContext):
         await db.add_request_stat(
             user_id=user_id, request_type="question", request_text=text
         )
-        await handle_general_question(message, state, expanded_query)
+        await handle_general_question(message, state, text)
         return
     
     # ============================================================
@@ -858,6 +879,22 @@ async def handle_universal_search(message: Message, state: FSMContext):
     # Классификация запроса
     query_type, confidence, metadata = await ultimate_classifier.classify_with_certainty(expanded_query)
 
+    # ============================================================
+    # FIX: Агрессивное исправление для коротких медицинских терминов
+    # ============================================================
+    
+    # Если запрос короткий (1-3 слова) и не содержит явных вопросительных слов,
+    # принудительно считаем его поиском по названию, независимо от того, что сказал классификатор
+    words = text.split()
+    is_short_query = len(words) <= 0
+    has_no_question_words = not any(word in text_lower for word in ['как', 'что', 'где', 'когда', 'почему', 'зачем', 'сколько', '?'])
+    
+    if is_short_query and has_no_question_words:
+        logger.info(f"[FORCE NAME] Short query without question words: '{text}' -> forcing name search")
+        query_type = "name"
+        confidence = 0.9
+        metadata = {"method": "forced_name_search", "reason": "short_query_without_questions"}
+
     # Сохраняем информацию о классификации
     await state.update_data(
         query_classification={
@@ -870,7 +907,7 @@ async def handle_universal_search(message: Message, state: FSMContext):
 
     logger.info(
         f"[CLASSIFIER] Query: '{text}' | Type: {query_type} | "
-        f"Confidence: {confidence:.2f}"
+        f"Confidence: {confidence:.2f} | Method: {metadata.get('method', 'unknown')}"
     )
 
     # Высокая уверенность - сразу обрабатываем
@@ -882,7 +919,6 @@ async def handle_universal_search(message: Message, state: FSMContext):
     # Низкая уверенность - нужно уточнение
     else:
         await _clarify_with_llm(message, state, expanded_query, query_type, confidence)
-
 
 
 @questions_router.message(QuestionStates.confirming_search_type)
@@ -994,7 +1030,7 @@ async def handle_confirm_search_callback(callback: CallbackQuery, state: FSMCont
                 request_type="question", 
                 request_text=original_query
             )
-            await handle_general_question(mock_msg, state, expanded_query)
+            await handle_general_question(mock_msg, state, original_query)
 
     elif action == "no":
         await callback.message.edit_reply_markup(reply_markup=None)
@@ -1030,8 +1066,9 @@ async def handle_clarify_search_callback(callback: CallbackQuery, state: FSMCont
     )
 
     await callback.message.edit_reply_markup(reply_markup=None)
+    search_mapping = {'name': 'название', 'code': 'код теста', 'general': 'общий вопрос'}
     await callback.message.answer(
-        f"✅ Ищу как {search_type}...", 
+        f"✅ Ищу как {search_mapping[search_type]}...", 
         reply_markup=get_dialog_kb()
     )
 
@@ -1052,7 +1089,7 @@ async def handle_clarify_search_callback(callback: CallbackQuery, state: FSMCont
             request_type="question", 
             request_text=original_query
         )
-        await handle_general_question(mock_msg, state, expanded_query)
+        await handle_general_question(mock_msg, state, original_query)
 
 
 
@@ -1061,6 +1098,8 @@ async def handle_show_test_callback(callback: CallbackQuery, state: FSMContext):
     """Показать информацию о выбранном тесте"""
     action, test_code = TestCallback.unpack(callback.data)
     await callback.answer()
+    
+    user_id = callback.from_user.id
     
     # Засекаем время начала для метрик
     import time
@@ -1265,7 +1304,7 @@ async def handle_pagination(callback: CallbackQuery, state: FSMContext):
     start_idx = page * ITEMS_PER_PAGE
     end_idx = start_idx + items_shown
     
-    response = f"🔍 <b>Найдено {len(display_results)} {view_name}</b>"
+    response = f"🔍 <b>Найдено тестов: {len(display_results)}</b>"
     
     if total_pages > 1:
         response += f" <b>(страница {page + 1} из {total_pages}):</b>\n\n"
@@ -1280,11 +1319,10 @@ async def handle_pagination(callback: CallbackQuery, state: FSMContext):
         test_name = html.escape(metadata.get("test_name", ""))
         department = html.escape(metadata.get("department", "Не указано"))
         
-        type_label = "🔬 Профиль" if is_profile_test(test_code) else "🧪 Тест"
         link = create_test_link(test_code)
         
         response += (
-            f"<b>{i}.</b> {type_label}: <a href='{link}'>{test_code}</a>\n"
+            f"<b>{i}.</b> <a href='{link}'>{test_code}</a>\n"
             f"📝 {test_name}\n"
             f"📋 {department}\n"
         )
@@ -2033,7 +2071,7 @@ async def _handle_code_search_internal(
                         request_type="code_search",
                         query_text=original_query[:500],
                         response_time=response_time,
-                        success=True, 
+                        success=True,
                         has_answer=True if similar_tests else False
                     )
                 except Exception as e:
@@ -2084,8 +2122,13 @@ async def _handle_code_search_internal(
                         if is_profile_test(item['metadata'].get('test_code', ''))
                     )
                     
+                    tests_only_results = [
+                        item for item in simplified_results 
+                        if not is_profile_test(item['metadata'].get('test_code', ''))
+                    ]
+
                     keyboard, total_pages, items_shown = create_paginated_keyboard(
-                        simplified_results,
+                        simplified_results,  # Передаем ВСЕ результаты
                         current_page=0,
                         items_per_page=ITEMS_PER_PAGE,
                         search_id=search_id,
@@ -2093,7 +2136,7 @@ async def _handle_code_search_internal(
                         tests_count=tests_count,
                         profiles_count=profiles_count,
                         total_count=len(simplified_results),
-                        current_view="all"
+                        current_view="tests"  # Явно указываем, что показываем только тесты
                     )
                     
                     response = (
@@ -2111,8 +2154,13 @@ async def _handle_code_search_internal(
                     else:
                         response += ":\n\n"
                     
+
+                    filtered_results = [
+                        item for item in simplified_results 
+                        if not is_profile_test(item['metadata'].get('test_code', ''))
+                    ]
                     # FIX #17: Правильное использование данных со score
-                    for i, item in enumerate(simplified_results[:items_shown], 1):
+                    for i, item in enumerate(filtered_results[:items_shown], 1):
                         metadata = item['metadata']
                         score = item['score']
                         
@@ -2299,6 +2347,13 @@ async def _handle_name_search_internal(
         original_query = data.get("original_query", message.text if not search_text else search_text)
         text = search_text if search_text else message.text.strip()
 
+        # Записываем статистику поиска по названию
+        await db.add_request_stat(
+            user_id=user_id,
+            request_type="question",  # Считаем name_search как question
+            request_text=original_query
+        )
+
         gif_msg = None
         loading_msg = None
         animation_task = None
@@ -2431,10 +2486,16 @@ async def _handle_name_search_internal(
                 1 for item in simplified_results 
                 if is_profile_test(item['metadata'].get('test_code', ''))
             )
-            total_count = len(simplified_results)
             
+            
+            tests_only_results = [
+                item for item in simplified_results 
+                if not is_profile_test(item['metadata'].get('test_code', ''))
+            ]
+            total_count = len(simplified_results)
+
             keyboard, total_pages, items_shown = create_paginated_keyboard(
-                simplified_results,
+                simplified_results,  # Передаем ВСЕ результаты
                 current_page=0,
                 items_per_page=ITEMS_PER_PAGE,
                 search_id=search_id,
@@ -2442,7 +2503,7 @@ async def _handle_name_search_internal(
                 tests_count=tests_count,
                 profiles_count=profiles_count,
                 total_count=total_count,
-                current_view="all"
+                current_view="tests"  # Явно указываем, что показываем только тесты
             )
             
             # Формируем ответ
@@ -2457,7 +2518,13 @@ async def _handle_name_search_internal(
             else:
                 response += ":\n\n"
             
-            for i, item in enumerate(simplified_results[:items_shown], 1):
+            filtered_results = [
+                item for item in simplified_results 
+                if not is_profile_test(item['metadata'].get('test_code', ''))
+            ]
+
+            for i, item in enumerate(filtered_results[:items_shown], 1):
+
                 metadata = item['metadata']
                 
                 test_code = sanitize_test_code_for_display(metadata['test_code'])
@@ -2567,6 +2634,7 @@ async def handle_general_question(
     - Корректная обработка длинных ответов
     """
     user = await db.get_user(message.from_user.id)
+    user_id = message.from_user.id
     
     # Засекаем время начала для метрик
     import time
@@ -2597,7 +2665,7 @@ async def handle_general_question(
             response_time = time.time() - start_time
             try:
                 await db.log_request_metric(
-                    user_id=message.from_user.id,
+                    user_id=user_id,
                     request_type="general",
                     query_text=question_text[:500],
                     response_time=response_time,
@@ -2626,7 +2694,7 @@ async def handle_general_question(
         processor.load_vector_store()
         
         # 2. Поиск релевантных тестов
-        relevant_docs = processor.search_test(query=question_text, top_k=70)
+        relevant_docs = processor.search_test(query=question_text, top_k=50)
         relevant_tests = [doc for doc, score in relevant_docs if score > 0.3]
         
         # 3. Если нет результатов и вопрос сложный
@@ -2640,7 +2708,7 @@ async def handle_general_question(
             response_time = time.time() - start_time
             try:
                 await db.log_request_metric(
-                    user_id=message.from_user.id,
+                    user_id=user_id,
                     request_type="general",
                     query_text=question_text[:500],
                     response_time=response_time,
@@ -2671,7 +2739,7 @@ async def handle_general_question(
         if relevant_tests:
             context_info = "\n\nРЕЛЕВАНТНАЯ ИНФОРМАЦИЯ ДЛЯ ВАШЕГО ВОПРОСА:\n"
             
-            for doc in relevant_tests[:10]:
+            for doc in relevant_tests[:50]:
                 test_data = doc.metadata
                 test_code = test_data.get('test_code', '')
                 
@@ -2743,6 +2811,7 @@ async def handle_general_question(
 - Если вопрос требует индивидуальной консультации, прямо укажи: "Рекомендую обратиться к специалисту нашей лаборатории"
 
 ## Важно!
+Давай ответ лаконично, кратко и обоснованно конкретно по запросу
 Если информации в контексте недостаточно для полноценного ответа, 
 честно скажи об этом и предложи обратиться к специалисту.
 """
@@ -2780,7 +2849,7 @@ async def handle_general_question(
             response_time = time.time() - start_time
             try:
                 await db.log_request_metric(
-                    user_id=message.from_user.id,
+                    user_id=user_id,
                     request_type="general",
                     query_text=question_text[:500],
                     response_time=response_time,
@@ -2886,14 +2955,14 @@ async def handle_general_question(
                 response_time = time.time() - start_time
                 try:
                     await db.log_request_metric(
-                        user_id=message.from_user.id,
+                        user_id=user_id,
                         request_type="general",
                         query_text=question_text[:500],
                         response_time=response_time,
                         success=True,
                         has_answer=True
                     )
-                    logger.info(f"[METRICS] Logged general question metric for user {message.from_user.id}")
+                    logger.info(f"[METRICS] Logged general question metric for user {user_id}")
                 except Exception as e:
                     logger.error(f"[METRICS] Failed to log general metric: {e}")
 
@@ -3071,7 +3140,7 @@ async def _process_confident_query(
         await db.add_request_stat(
             user_id=user_id, request_type="question", request_text=text
         )
-        await handle_general_question(message, state, expanded_query)
+        await handle_general_question(message, state, text)
         return
     
     # ============================================================
@@ -3095,7 +3164,7 @@ async def _process_confident_query(
         await db.add_request_stat(
             user_id=user_id, request_type="question", request_text=text
         )
-        await handle_general_question(message, state, expanded_query)
+        await handle_general_question(message, state, text)
 
 
 async def _ask_confirmation(
@@ -3274,7 +3343,7 @@ async def send_test_info_with_photo(
     if has_forms:
         keyboard_buttons.append([
             InlineKeyboardButton(
-                text="📋 Показать все бланки",
+                text="📋 Показать все бланки и файлы",
                 callback_data=f"show_blanks:{test_data['test_code']}",
             )
         ])
@@ -3294,7 +3363,7 @@ async def send_test_info_with_photo(
 @questions_router.callback_query(F.data.startswith("show_blanks:"))
 async def handle_show_blanks_callback(callback: CallbackQuery, state: FSMContext):
     """Обработчик для показа бланков теста"""
-    await callback.answer("📋 Загружаю бланки...")
+    await callback.answer("📋 Загружаю бланки и файлы...")
     
     test_code = callback.data.split(":", 1)[1]
     
@@ -3358,7 +3427,7 @@ async def handle_show_blanks_callback(callback: CallbackQuery, state: FSMContext
             )
             
             hide_msg = await callback.message.answer(
-                f"📋 Показано {len(message_ids)} бланков для теста {test_code}",
+                'Выведены все бланки и файлы',
                 reply_markup=hide_keyboard
             )
             
@@ -3561,23 +3630,9 @@ async def handle_skip_comment(callback: CallbackQuery, state: FSMContext):
     
     # УДАЛЯЕМ кнопки оценки и показываем финальное сообщение
     await callback.message.edit_text(
-        "📢 Оценка отправлена разработчикам!\n\n"
-        "💡 <b>Присоединяйтесь к нашей группе</b> - там вы можете:\n"
-        "• 🗣️ Участвовать в обсуждении улучшений\n"
-        "• 💡 Предлагать новые идеи\n"
-        "• ❓ Задавать сложные вопросы\n\n"
+        "📢 Оценка отправлена разработчикам!\n"
         "Ваше мнение важно для нас! 🙏",
         parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="💬 Присоединиться к группе обсуждения", 
-                        url=rating_manager.feedback_group_link
-                    )
-                ]
-            ]
-        )
     )
     
     # ВОССТАНАВЛИВАЕМ обычное состояние
@@ -3631,16 +3686,6 @@ async def handle_comment_text(message: Message, state: FSMContext):
                 "📢 Ваш комментарий отправлен разработчикам!\n\n"
                 "💡 <b>Спасибо за обратную связь!</b>",
                 parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [
-                            InlineKeyboardButton(
-                                text="💬 Присоединиться к группе обсуждения", 
-                                url=rating_manager.feedback_group_link
-                            )
-                        ]
-                    ]
-                )
             )
             
         else:

@@ -896,3 +896,516 @@ class MetricsExporter:
         workbook.close()
         output.seek(0)
         return output.read()
+    
+    async def export_session_activity_report(self, days: int = 30) -> bytes:
+        """
+        Создает детальный отчет по времени активности пользователей.
+        Анализирует причины запредельного времени сессий.
+        """
+        output = io.BytesIO()
+        workbook = xlsxwriter.Workbook(output, {'in_memory': True})
+        
+        formats = self._create_formats(workbook)
+        
+        # === ЛИСТ 1: СВОДКА ===
+        summary_sheet = workbook.add_worksheet('📊 Сводка')
+        await self._create_session_summary_sheet(summary_sheet, formats, days)
+        
+        # === ЛИСТ 2: ДЕТАЛЬНЫЕ СЕССИИ ===
+        detail_sheet = workbook.add_worksheet('🔍 Детали сессий')
+        await self._create_session_detail_sheet(detail_sheet, formats, days)
+        
+        # === ЛИСТ 3: АНАЛИЗ ПРОБЛЕМ ===
+        analysis_sheet = workbook.add_worksheet('⚠️ Анализ проблем')
+        await self._create_session_analysis_sheet(analysis_sheet, formats, days)
+        
+        # === ЛИСТ 4: РЕКОМЕНДАЦИИ ===
+        recommendations_sheet = workbook.add_worksheet('💡 Рекомендации')
+        await self._create_recommendations_sheet(recommendations_sheet, formats, days)
+        
+        workbook.close()
+        output.seek(0)
+        return output.read()
+    
+    async def _create_session_summary_sheet(self, worksheet, formats, days):
+        """Создает сводный лист с общей статистикой по сессиям"""
+        # Настройка колонок
+        worksheet.set_column('A:A', 40)
+        worksheet.set_column('B:B', 20)
+        worksheet.set_column('C:C', 30)
+        
+        row = 0
+        
+        # Заголовок
+        worksheet.merge_range(row, 0, row, 2,
+                            '📊 ОТЧЕТ ПО ВРЕМЕНИ АКТИВНОСТИ ПОЛЬЗОВАТЕЛЕЙ',
+                            formats['main_title'])
+        worksheet.set_row(row, 30)
+        row += 1
+        
+        # Подзаголовок
+        period_text = f'Период: последние {days} дней | Сформирован: {datetime.now().strftime("%d.%m.%Y %H:%M")}'
+        worksheet.merge_range(row, 0, row, 2, period_text, formats['subtitle'])
+        worksheet.set_row(row, 20)
+        row += 2
+        
+        # Получаем данные
+        sessions_data = await self.db.get_detailed_session_report(days)
+        session_metrics = await self.db.get_session_metrics(days)
+        
+        if not sessions_data:
+            worksheet.write(row, 0, 'Нет данных о сессиях за указанный период', formats['metric_label'])
+            return
+        
+        # === ОБЩАЯ СТАТИСТИКА ===
+        worksheet.merge_range(row, 0, row, 2,
+                            '📈 ОБЩАЯ СТАТИСТИКА',
+                            formats['section_header'])
+        worksheet.set_row(row, 25)
+        row += 1
+        
+        total_sessions = len(sessions_data)
+        avg_duration = sum(s['duration_minutes'] for s in sessions_data) / total_sessions if total_sessions > 0 else 0
+        max_duration = max(s['duration_minutes'] for s in sessions_data) if sessions_data else 0
+        min_duration = min(s['duration_minutes'] for s in sessions_data) if sessions_data else 0
+        
+        # Средние показатели валидных запросов
+        avg_valid_requests = sum(s.get('valid_requests', 0) for s in sessions_data) / total_sessions if total_sessions > 0 else 0
+        avg_total_actions = sum(s.get('total_actions', 0) for s in sessions_data) / total_sessions if total_sessions > 0 else 0
+        avg_active_time = sum(s.get('active_time_minutes', 0) for s in sessions_data) / total_sessions if total_sessions > 0 else 0
+        avg_reading_time = avg_duration - avg_active_time
+        
+        worksheet.write(row, 0, '📊 Всего сессий', formats['metric_label'])
+        worksheet.write(row, 1, total_sessions, formats['metric_value'])
+        row += 1
+        
+        worksheet.write(row, 0, '⏱️ Средняя ОБЩАЯ длительность', formats['metric_label'])
+        kpi_format = formats['kpi_high'] if avg_duration >= 5 else formats['kpi_medium'] if avg_duration >= 2 else formats['kpi_low']
+        worksheet.write(row, 1, avg_duration, kpi_format)
+        worksheet.write(row, 2, 'минут', formats['metric_value'])
+        row += 1
+        
+        worksheet.write(row, 0, '⚡ Среднее АКТИВНОЕ время', formats['metric_label'])
+        worksheet.write(row, 1, avg_active_time, formats['metric_decimal'])
+        worksheet.write(row, 2, 'минут (работа с запросами)', formats['cell_data'])
+        row += 1
+        
+        worksheet.write(row, 0, '📖 Среднее время на ЧТЕНИЕ', formats['metric_label'])
+        worksheet.write(row, 1, avg_reading_time, formats['metric_decimal'])
+        worksheet.write(row, 2, 'минут (изучение материала)', formats['cell_data'])
+        row += 1
+        
+        worksheet.write(row, 0, '📊 Среднее валидных запросов', formats['metric_label'])
+        worksheet.write(row, 1, avg_valid_requests, formats['metric_decimal'])
+        worksheet.write(row, 2, 'запросов/сессию', formats['metric_value'])
+        row += 1
+        
+        worksheet.write(row, 0, '🔘 Среднее всех действий', formats['metric_label'])
+        worksheet.write(row, 1, avg_total_actions, formats['metric_decimal'])
+        worksheet.write(row, 2, 'действий/сессию', formats['metric_value'])
+        row += 1
+        
+        worksheet.write(row, 0, '⏰ Максимальная длительность', formats['metric_label'])
+        worksheet.write(row, 1, max_duration, formats['metric_decimal'])
+        worksheet.write(row, 2, f'минут ({max_duration/60:.1f} ч)', formats['metric_value'])
+        row += 1
+        
+        worksheet.write(row, 0, '⚡ Минимальная длительность', formats['metric_label'])
+        worksheet.write(row, 1, min_duration, formats['metric_decimal'])
+        worksheet.write(row, 2, 'минут', formats['metric_value'])
+        row += 2
+        
+        # === РАСПРЕДЕЛЕНИЕ ПО ДЛИТЕЛЬНОСТИ ===
+        worksheet.merge_range(row, 0, row, 2,
+                            '⏱️ РАСПРЕДЕЛЕНИЕ ПО ДЛИТЕЛЬНОСТИ',
+                            formats['section_header'])
+        worksheet.set_row(row, 25)
+        row += 1
+        
+        # Категоризация сессий
+        quick_sessions = len([s for s in sessions_data if s['duration_minutes'] < 2])
+        normal_sessions = len([s for s in sessions_data if 2 <= s['duration_minutes'] < 10])
+        long_sessions = len([s for s in sessions_data if 10 <= s['duration_minutes'] < 30])
+        very_long_sessions = len([s for s in sessions_data if s['duration_minutes'] >= 30])
+        
+        categories = [
+            ('⚡ Быстрые сессии (< 2 мин)', quick_sessions),
+            ('✅ Обычные сессии (2-10 мин)', normal_sessions),
+            ('⏰ Длинные сессии (10-30 мин)', long_sessions),
+            ('🔴 Очень длинные сессии (> 30 мин)', very_long_sessions)
+        ]
+        
+        for cat_name, count in categories:
+            worksheet.write(row, 0, cat_name, formats['metric_label'])
+            worksheet.write(row, 1, count, formats['metric_value'])
+            percent = (count / total_sessions * 100) if total_sessions > 0 else 0
+            worksheet.write(row, 2, percent / 100, formats['metric_percent'])
+            row += 1
+        
+        row += 1
+        
+        # === ТОП ПРИЧИН ДЛИННЫХ СЕССИЙ ===
+        worksheet.merge_range(row, 0, row, 2,
+                            '🔍 ТОП ПРИЧИН ДЛИННЫХ СЕССИЙ',
+                            formats['section_header'])
+        worksheet.set_row(row, 25)
+        row += 1
+        
+        # Собираем все причины
+        all_reasons = []
+        for session in sessions_data:
+            if session['duration_minutes'] > 10:  # Только длинные сессии
+                all_reasons.extend(session.get('analysis_reasons', []))
+        
+        # Подсчитываем частоту каждой причины
+        from collections import Counter
+        reason_counts = Counter(all_reasons)
+        top_reasons = reason_counts.most_common(10)
+        
+        if top_reasons:
+            worksheet.write(row, 0, 'Причина', formats['table_header'])
+            worksheet.write(row, 1, 'Количество', formats['table_header'])
+            worksheet.write(row, 2, 'Процент от длинных', formats['table_header'])
+            row += 1
+            
+            long_count = len([s for s in sessions_data if s['duration_minutes'] > 10])
+            for reason, count in top_reasons:
+                worksheet.write(row, 0, reason, formats['cell_data'])
+                worksheet.write(row, 1, count, formats['cell_number'])
+                percent = (count / long_count * 100) if long_count > 0 else 0
+                worksheet.write(row, 2, percent / 100, formats['metric_percent'])
+                row += 1
+        else:
+            worksheet.write(row, 0, 'Нет длинных сессий для анализа', formats['metric_label'])
+    
+    async def _create_session_detail_sheet(self, worksheet, formats, days):
+        """Создает детальный лист с информацией по каждой сессии"""
+        # Настройка колонок
+        worksheet.set_column('A:A', 18)  # Дата/время
+        worksheet.set_column('B:B', 25)  # Пользователь
+        worksheet.set_column('C:C', 15)  # Общая длительность
+        worksheet.set_column('D:D', 15)  # Активное время
+        worksheet.set_column('E:E', 12)  # Валидных запросов
+        worksheet.set_column('F:F', 12)  # Всего действий
+        worksheet.set_column('G:G', 60)  # Причины длительности
+        worksheet.set_column('H:H', 15)  # Статус
+        
+        row = 0
+        
+        # Заголовок
+        worksheet.merge_range(row, 0, row, 7,
+                            '🔍 ДЕТАЛЬНАЯ ИНФОРМАЦИЯ О СЕССИЯХ',
+                            formats['main_title'])
+        worksheet.set_row(row, 30)
+        row += 1
+        
+        # Описание колонок
+        worksheet.merge_range(row, 0, row, 7,
+                            'Активное время = между первым и последним запросом | Общая длительность = включает время на изучение материала',
+                            formats['subtitle'])
+        row += 1
+        
+        # Получаем данные
+        sessions_data = await self.db.get_detailed_session_report(days)
+        
+        if not sessions_data:
+            worksheet.write(row, 0, 'Нет данных о сессиях', formats['metric_label'])
+            return
+        
+        # Заголовки таблицы
+        headers = [
+            'Начало сессии',
+            'Пользователь',
+            'Общая длительность (мин)',
+            'Активное время (мин)',
+            'Валидных запросов',
+            'Всего действий',
+            'Анализ и причины',
+            'Статус'
+        ]
+        for col, header in enumerate(headers):
+            worksheet.write(row, col, header, formats['table_header'])
+        row += 1
+        
+        # Данные по сессиям
+        for session in sessions_data[:500]:  # Ограничиваем до 500 сессий
+            # Дата начала
+            start_time = session.get('session_start', '')
+            if start_time:
+                dt = datetime.fromisoformat(start_time)
+                start_str = dt.strftime('%d.%m.%Y %H:%M')
+            else:
+                start_str = 'Неизвестно'
+            worksheet.write(row, 0, start_str, formats['cell_data'])
+            
+            # Пользователь
+            user_name = session.get('user_name', 'Неизвестный')
+            client_code = session.get('client_code', '')
+            user_info = f"{user_name}"
+            if client_code:
+                user_info += f" ({client_code})"
+            worksheet.write(row, 1, user_info, formats['cell_data'])
+            
+            # Общая длительность
+            duration = session.get('duration_minutes', 0)
+            worksheet.write(row, 2, duration, formats['cell_decimal'])
+            
+            # Активное время (между первым и последним запросом)
+            active_time = session.get('active_time_minutes', 0)
+            worksheet.write(row, 3, active_time, formats['cell_decimal'])
+            
+            # Валидных запросов (из request_metrics)
+            valid_requests = session.get('valid_requests', 0)
+            worksheet.write(row, 4, valid_requests, formats['cell_number'])
+            
+            # Всего действий (включая навигацию)
+            total_actions = session.get('total_actions', 0)
+            worksheet.write(row, 5, total_actions, formats['cell_number'])
+            
+            # Причины и анализ
+            reasons = session.get('analysis_reasons', [])
+            
+            # Добавляем информацию о разнице времени
+            reading_time = duration - active_time
+            analysis_text = f"Время на чтение: {reading_time:.1f} мин\n"
+            analysis_text += f"Навигация: {session.get('navigation_actions', 0)} действий\n\n"
+            analysis_text += '\n'.join(reasons[:4])  # Показываем до 4 причин
+            
+            worksheet.write(row, 6, analysis_text, formats['cell_data'])
+            
+            # Статус
+            if duration >= 30:
+                status = '🔴 Очень длинная'
+            elif duration >= 10:
+                status = '⏰ Длинная'
+            elif duration >= 2:
+                status = '✅ Нормальная'
+            else:
+                status = '⚡ Быстрая'
+            worksheet.write(row, 7, status, formats['cell_data'])
+            
+            row += 1
+    
+    async def _create_session_analysis_sheet(self, worksheet, formats, days):
+        """Создает лист с анализом проблемных сессий"""
+        # Настройка колонок
+        worksheet.set_column('A:A', 25)
+        worksheet.set_column('B:B', 20)
+        worksheet.set_column('C:C', 15)
+        worksheet.set_column('D:D', 15)
+        worksheet.set_column('E:E', 50)
+        worksheet.set_column('F:F', 50)
+        
+        row = 0
+        
+        # Заголовок
+        worksheet.merge_range(row, 0, row, 5,
+                            '⚠️ АНАЛИЗ ПРОБЛЕМНЫХ СЕССИЙ (> 30 минут)',
+                            formats['main_title'])
+        worksheet.set_row(row, 30)
+        row += 2
+        
+        # Получаем данные
+        sessions_data = await self.db.get_detailed_session_report(days)
+        
+        # Фильтруем только длинные сессии (> 30 минут)
+        long_sessions = [s for s in sessions_data if s.get('duration_minutes', 0) > 30]
+        
+        if not long_sessions:
+            worksheet.merge_range(row, 0, row, 5,
+                                '✅ Проблемных сессий не обнаружено!',
+                                formats['subsection_header'])
+            row += 2
+            worksheet.write(row, 0, 'Все сессии имеют нормальную длительность (< 30 минут)', formats['metric_label'])
+            return
+        
+        # === СВОДКА ПО ПРОБЛЕМАМ ===
+        worksheet.merge_range(row, 0, row, 5,
+                            '📊 СВОДКА ПО ПРОБЛЕМНЫМ СЕССИЯМ',
+                            formats['section_header'])
+        row += 1
+        
+        worksheet.write(row, 0, '🔴 Количество проблемных сессий', formats['metric_label'])
+        worksheet.write(row, 1, len(long_sessions), formats['metric_value'])
+        worksheet.write(row, 2, f'{len(long_sessions) / len(sessions_data) * 100:.1f}% от всех сессий', formats['cell_data'])
+        row += 1
+        
+        avg_duration = sum(s['duration_minutes'] for s in long_sessions) / len(long_sessions)
+        worksheet.write(row, 0, '⏰ Средняя длительность проблемных', formats['metric_label'])
+        worksheet.write(row, 1, avg_duration, formats['metric_decimal'])
+        worksheet.write(row, 2, 'минут', formats['metric_value'])
+        row += 1
+        
+        # Средние показатели проблемных сессий
+        avg_valid = sum(s.get('valid_requests', 0) for s in long_sessions) / len(long_sessions)
+        avg_actions = sum(s.get('total_actions', 0) for s in long_sessions) / len(long_sessions)
+        
+        worksheet.write(row, 0, '📊 Среднее валидных запросов', formats['metric_label'])
+        worksheet.write(row, 1, avg_valid, formats['metric_decimal'])
+        row += 1
+        
+        worksheet.write(row, 0, '🔘 Среднее всех действий', formats['metric_label'])
+        worksheet.write(row, 1, avg_actions, formats['metric_decimal'])
+        row += 2
+        
+        # === ДЕТАЛИ ПРОБЛЕМНЫХ СЕССИЙ ===
+        worksheet.merge_range(row, 0, row, 5,
+                            '🔍 ТОП-50 САМЫХ ДЛИННЫХ СЕССИЙ',
+                            formats['section_header'])
+        row += 1
+        
+        # Заголовки
+        headers = [
+            'Пользователь',
+            'Длительность',
+            'Активное время',
+            'Валидных запросов',
+            'Анализ причин',
+            'Рекомендации'
+        ]
+        for col, header in enumerate(headers):
+            worksheet.write(row, col, header, formats['table_header'])
+        row += 1
+        
+        # Сортируем по длительности (самые длинные первыми)
+        long_sessions_sorted = sorted(long_sessions, key=lambda x: x.get('duration_minutes', 0), reverse=True)
+        
+        for session in long_sessions_sorted[:50]:  # Топ-50 самых длинных
+            user_info = f"{session.get('user_name', 'Неизвестный')}"
+            if session.get('client_code'):
+                user_info += f"\n({session['client_code']})"
+            worksheet.write(row, 0, user_info, formats['cell_data'])
+            
+            duration = session.get('duration_minutes', 0)
+            duration_text = f"{duration:.1f} мин\n({duration/60:.1f} ч)"
+            worksheet.write(row, 1, duration_text, formats['cell_data'])
+            
+            active_time = session.get('active_time_minutes', 0)
+            active_text = f"{active_time:.1f} мин\n({(duration - active_time):.1f} мин на чтение)"
+            worksheet.write(row, 2, active_text, formats['cell_data'])
+            
+            valid_requests = session.get('valid_requests', 0)
+            total_actions = session.get('total_actions', 0)
+            requests_text = f"{valid_requests} валидных\n{total_actions} всего действий"
+            worksheet.write(row, 3, requests_text, formats['cell_data'])
+            
+            reasons = session.get('analysis_reasons', [])
+            reasons_text = '\n'.join(reasons)
+            worksheet.write(row, 4, reasons_text, formats['cell_data'])
+            
+            # Рекомендуемые действия на основе анализа
+            actions = []
+            reading_time = duration - active_time
+            
+            if reading_time > 10:
+                actions.append(f'📖 Пользователь долго изучал материал ({reading_time:.1f} мин)')
+                actions.append('→ Это нормально, информация полезна')
+            
+            if session.get('navigation_actions', 0) > valid_requests * 2:
+                nav_count = session.get('navigation_actions', 0)
+                actions.append(f'🔘 Много навигации ({nav_count} vs {valid_requests} запросов)')
+                actions.append('→ Возможно, сложно найти нужную функцию')
+            
+            if valid_requests == 0:
+                actions.append('⚠️ Только навигация, нет запросов')
+                actions.append('→ Пользователь не нашел что искал или просто смотрел')
+            
+            pauses = session.get('pauses', [])
+            if pauses:
+                max_pause = max(p['pause_minutes'] for p in pauses)
+                if max_pause > 10:
+                    actions.append(f'⏸️ Длинная пауза: {max_pause:.1f} мин')
+                    actions.append('→ Возможно отвлекся или думал над задачей')
+            
+            if not actions:
+                actions.append('✅ Активная работа с ботом')
+                actions.append('→ Нормальное использование')
+            
+            worksheet.write(row, 5, '\n'.join(actions), formats['cell_data'])
+            row += 1
+    
+    async def _create_recommendations_sheet(self, worksheet, formats, days):
+        """Создает лист с рекомендациями"""
+        # Настройка колонок
+        worksheet.set_column('A:A', 60)
+        worksheet.set_column('B:B', 80)
+        
+        row = 0
+        
+        # Заголовок
+        worksheet.merge_range(row, 0, row, 1,
+                            '💡 РЕКОМЕНДАЦИИ ПО ОПТИМИЗАЦИИ',
+                            formats['main_title'])
+        worksheet.set_row(row, 30)
+        row += 2
+        
+        # Получаем данные
+        sessions_data = await self.db.get_detailed_session_report(days)
+        
+        # Анализируем данные для рекомендаций
+        long_sessions = [s for s in sessions_data if s.get('duration_minutes', 0) > 30]
+        avg_duration = sum(s['duration_minutes'] for s in sessions_data) / len(sessions_data) if sessions_data else 0
+        
+        # === ОБЩИЕ РЕКОМЕНДАЦИИ ===
+        worksheet.merge_range(row, 0, row, 1,
+                            '🎯 ОБЩИЕ РЕКОМЕНДАЦИИ',
+                            formats['section_header'])
+        row += 1
+        
+        recommendations = [
+            {
+                'title': '1️⃣ Оптимизация времени сессий',
+                'desc': 'Текущая средняя длительность сессии: {:.1f} минут.\n\n'
+                        'Рекомендации:\n'
+                        '• Если время > 10 минут: добавьте быстрые подсказки и FAQ\n'
+                        '• Если время > 30 минут: проверьте, не возникают ли трудности у пользователей\n'
+                        '• Оптимальное время сессии: 3-7 минут'.format(avg_duration)
+            },
+            {
+                'title': '2️⃣ Анализ пауз между запросами',
+                'desc': 'Длинные паузы могут означать:\n'
+                        '• Пользователь изучает предоставленную информацию (это хорошо)\n'
+                        '• Пользователь испытывает трудности с интерфейсом (требует улучшения)\n'
+                        '• Пользователь отвлекся (нормально для рабочего процесса)\n\n'
+                        'Действие: Проверьте, насколько понятны ответы бота'
+            },
+            {
+                'title': '3️⃣ Мониторинг проблемных сессий',
+                'desc': f'Обнаружено {len(long_sessions)} сессий длительностью > 30 минут.\n\n'
+                        'Рекомендуется:\n'
+                        '• Проанализировать причины запредельного времени\n'
+                        '• Связаться с пользователями, у которых возникли проблемы\n'
+                        '• Оптимизировать процессы, вызывающие длительное ожидание'
+            },
+            {
+                'title': '4️⃣ Улучшение пользовательского опыта',
+                'desc': 'Для сокращения времени сессий:\n'
+                        '• Добавьте быстрый доступ к часто используемым функциям\n'
+                        '• Улучшите поиск и навигацию\n'
+                        '• Предоставляйте структурированные ответы\n'
+                        '• Добавьте возможность сохранения избранного'
+            }
+        ]
+        
+        for rec in recommendations:
+            worksheet.write(row, 0, rec['title'], formats['subsection_header'])
+            row += 1
+            worksheet.write(row, 0, rec['desc'], formats['cell_data'])
+            row += 2
+        
+        # === МЕТРИКИ ДЛЯ ОТСЛЕЖИВАНИЯ ===
+        worksheet.merge_range(row, 0, row, 1,
+                            '📊 КЛЮЧЕВЫЕ МЕТРИКИ ДЛЯ ОТСЛЕЖИВАНИЯ',
+                            formats['section_header'])
+        row += 1
+        
+        metrics_to_track = [
+            '✅ Средняя длительность сессии (целевое значение: 3-7 минут)',
+            '✅ Процент сессий > 30 минут (целевое значение: < 5%)',
+            '✅ Среднее количество запросов в сессии (целевое значение: 3-8)',
+            '✅ Процент пользователей с проблемными сессиями (целевое значение: < 10%)'
+        ]
+        
+        for metric in metrics_to_track:
+            worksheet.write(row, 0, metric, formats['metric_label'])
+            row += 1

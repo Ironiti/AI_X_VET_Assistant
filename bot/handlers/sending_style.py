@@ -254,7 +254,7 @@ def format_test_data(metadata: Dict) -> Dict:
         "test_name": metadata.get("test_name"),
         "department": metadata.get("department"),
         "important_information": metadata.get("important_information"),
-        "patient_preparation": metadata.get("patient_preparation"),
+        "patient_preparation": metadata.get("patient_preparation") + bool(metadata.get("additional_information_name"))*(' (Название файла:' + metadata.get("additional_information_name") + ')'),
         "biomaterial_type": metadata.get("biomaterial_type"),
         
         # Сохраняем ОРИГИНАЛЬНЫЕ данные для поиска фото
@@ -276,7 +276,7 @@ def format_test_data(metadata: Dict) -> Dict:
         "form_link": metadata.get("form_link"),
         "form_name": metadata.get("form_name"),
         "additional_information_link": metadata.get("additional_information_link"),
-        "additional_information_name": metadata.get("additional_information_name"),
+        "additional_information_name": metadata.get("additional_information_name").replace('_', ' '),
     }
 
 
@@ -304,9 +304,9 @@ def format_test_info(test_data: Dict) -> str:
             "📝patient_preparation",
             "Важная информация для подготовки животного",
         ),
-        "biomaterial_type": ("🧫biomaterial_type", "Исследуемый биоматериал"),
+        "biomaterial_type": ("🔬biomaterial_type", "Исследуемый биоматериал"),
         "primary_container_type": (
-            "🧰primary_container_type",
+            "🩸primary_container_type",
             "Тип первичного контейнера",
         ),
         "container_type": (
@@ -320,7 +320,7 @@ def format_test_info(test_data: Dict) -> str:
         "preanalytics": ("📋preanalytics", "Преаналитика"),
         "storage_temp": ("❄️storage_temp", "Температура"),
         "poss_postorder_container": (
-            "⏱️poss_postorder_container",
+            "⏳poss_postorder_container",
             "Возможность дозаказа с момента взятия биоматериала",
         ),
         "form_name": ("📃form_name", "Основной бланк"),
@@ -384,7 +384,7 @@ async def animate_loading(loading_msg: Message):
     """Animate loading message (edit text, not caption)."""
     animations = [
         "Обрабатываю ваш запрос...\n⏳ Анализирую данные...",
-        "Обрабатываю ваш запрос...\n🔍 Поиск в базе VetUnion...",
+        "Обрабатываю ваш запрос...\n🔍 Поиск в базе X-LAB VET...",
         "Обрабатываю ваш запрос...\n🧠 Формирую ответ...",
     ]
     i = 0

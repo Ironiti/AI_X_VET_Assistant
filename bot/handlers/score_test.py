@@ -6,6 +6,14 @@ from models.models_init import Google_Gemini_2_5_Flash_Lite as llm
 from bot.handlers.utils import normalize_test_code
 import re
 from bot.handlers.query_processing.query_preprocessing import expand_query_with_abbreviations
+import pymorphy3
+from fuzzywuzzy import fuzz
+from src.database.db_init import db
+
+
+# Инициализируем один раз при загрузке модуля
+morph = pymorphy3.MorphAnalyzer()
+
 
 def calculate_fuzzy_score(query: str, test_code: str, test_name: str = "") -> float:
     """Улучшенная функция для точного поиска по коду теста."""
@@ -235,9 +243,127 @@ def calculate_phonetic_score(query: str, test_code: str) -> float:
     return max(0, base_score - digit_penalty)
 
 
+def normalize_department_for_matching(text: str) -> str:
+    """Нормализует название вида исследования для точного сравнения с документами."""
+    if not text:
+        return ""
+    
+    # Приводим к нижнему регистру как в документах
+    text = text.lower().strip()
+    
+    # Прямое соответствие с тем как записано в документах
+    department_mapping = {
+        # Полные названия как в документах
+        'гематологическое исследования': 'Гематологическое исследования',
+        'исследование гемостаза': 'Исследование гемостаза',
+        'биохимическое исследование': 'Биохимическое исследование',
+        'исследование конкримента': 'Исследование конкримента', 
+        'витамины': 'Витамины',
+        'клиническое исследование мочи': 'Клиническое исследование мочи',
+        'паразитологическое исследование фекалий': 'Паразитологическое исследование фекалий',
+        'исследование гельминта': 'Исследование гельминта',
+        'клиническое исследование фекалий': 'Клиническое исследование фекалий',
+        'дерматологическое исследование': 'Дерматологическое исследование',
+        'серологическое исследование': 'Серологическое исследование',
+        'специфические белки': 'Специфические белки',
+        'гормональное исследование': 'Гормональное исследование',
+        'репродуктология': 'Репродуктология',
+        'лекарственный мониторинг': 'Лекарственный мониторинг',
+        'цитологическое исследование': 'Цитологическое исследование',
+        'гистологическое исследование': 'Гистологическое исследование',
+        'патоморфология': 'Патоморфология',
+        'токсикология': 'Токсикология',
+        'микроэлементы и тяжелые металлы': 'Микроэлементы и тяжелые металлы',
+        'микробиология': 'Микробиология',
+        'пцр-диагностика': 'ПЦР-диагностика',
+        'генетика': 'Генетика',
+        'биохимический профиль': 'Биохимический профиль',
+        
+        # Ключевые слова -> полные названия
+        'гематолог': 'Гематологическое исследования',
+        'биохим': 'Биохимическое исследование',
+        'гормон': 'Гормональное исследование',
+        'паразит': 'Паразитологическое исследование фекалий',
+        'гельминт': 'Исследование гельминта',
+        'дерматолог': 'Дерматологическое исследование',
+        'серолог': 'Серологическое исследование',
+        'белок': 'Специфические белки',
+        'репродуктолог': 'Репродуктология',
+        'лекарств': 'Лекарственный мониторинг',
+        'препарат': 'Лекарственный мониторинг',
+        'цитолог': 'Цитологическое исследование',
+        'гистолог': 'Гистологическое исследование',
+        'патоморфолог': 'Патоморфология',
+        'токсиколог': 'Токсикология',
+        'микроэлемент': 'Микроэлементы и тяжелые металлы',
+        'металл': 'Микроэлементы и тяжелые металлы',
+        'микробиолог': 'Микробиология',
+        'пцр': 'ПЦР-диагностика',
+        'генетик': 'Генетика',
+        'гемостаз': 'Исследование гемостаза',
+        'коагулог': 'Исследование гемостаза',
+        'свертывани': 'Исследование гемостаза',
+        'конкримент': 'Исследование конкримента',
+        'комплемент': 'Исследование конкримента',
+        'витамин': 'Витамины',
+    }
+    
+    # Ищем точное соответствие
+    for pattern, department in department_mapping.items():
+        if pattern in text:
+            return department
+    
+    return ""
+
+def extract_and_remove_department_from_query(query: str) -> tuple[str, str]:
+    """Извлекает вид исследования и возвращает очищенный запрос."""
+    original_query = query.lower()
+    found_department = normalize_department_for_matching(original_query)
+    cleaned_query = original_query
+    
+    if found_department:
+        # Создаем regex паттерны для удаления с учетом границ слов
+        patterns_to_remove = []
+        
+        # Полные названия - ищем как отдельные слова
+        full_departments = [
+            r'\bгематологическое исследования\b', r'\bисследование гемостаза\b', r'\bбиохимическое исследование\b',
+            r'\bисследование конкримента\b', r'\bклиническое исследование мочи\b', r'\bпаразитологическое исследование фекалий\b',
+            r'\bисследование гельминта\b', r'\bклиническое исследование фекалий\b', r'\bдерматологическое исследование\b',
+            r'\bсерологическое исследование\b', r'\bспецифические белки\b', r'\bгормональное исследование\b', 
+            r'\bлекарственный мониторинг\b', r'\bцитологическое исследование\b', r'\bгистологическое исследование\b',
+            r'\bмикроэлементы и тяжелые металлы\b', r'\bпцр-диагностика\b'
+        ]
+        
+        # Ключевые слова - ищем как отдельные слова
+        keywords = [
+            r'\bгематолог\w*\b', r'\bбиохим\w*\b', r'\bгормон\w*\b', r'\bпаразит\w*\b', r'\bгельминт\w*\b', r'\bдерматолог\w*\b', 
+            r'\bсеролог\w*\b', r'\bбелк\w*\b', r'\bрепродуктолог\w*\b', r'\bлекарств\w*\b', 
+            r'\bпрепарат\w*\b', r'\bцитолог\w*\b', r'\bгистолог\w*\b', r'\bпатоморфолог\w*\b', 
+            r'\bтоксиколог\w*\b', r'\bмикроэлемент\w*\b', r'\bметалл\w*\b', r'\bмикробиолог\w*\b', 
+            r'\bпцр\b', r'\bгенетик\w*\b', r'\bгемостаз\w*\b', r'\bкоагулог\w*\b', r'\bсвертывани\w*\b', 
+            r'\bконкримент\w*\b', r'\bкомплемент\w*\b', r'\bвитамин\w*\b'
+        ]
+        
+        patterns_to_remove = full_departments + keywords
+        
+        # Пробуем удалить каждый паттерн
+        for pattern in patterns_to_remove:
+            if re.search(pattern, cleaned_query):
+                cleaned_query = re.sub(pattern, '', cleaned_query).strip()
+                break
+    
+    # Очищаем запрос от лишних пробелов и одиночных букв
+    cleaned_query = re.sub(r'\s+', ' ', cleaned_query).strip()
+    cleaned_query = re.sub(r'\b[а-яё]\b', '', cleaned_query).strip()  # удаляем одиночные буквы
+    cleaned_query = re.sub(r'\s+', ' ', cleaned_query).strip()
+    
+    return cleaned_query, found_department
+
+
 async def smart_test_search(processor, original_query: str) -> Optional[tuple]:
     """Умный поиск с учетом различных вариантов написания."""
-
+    
     # Добавляем проверку на None и пустую строку
     if not original_query:
         return None, None, None
@@ -269,111 +395,258 @@ async def smart_test_search(processor, original_query: str) -> Optional[tuple]:
 
     return None, None, None
 
+# Добавляем в начало файля score_test.py после импортов
 
-async def select_best_match(
+def get_priority_tests_for_query(query: str) -> list[str]:
+    """Возвращает приоритетные тесты для запроса на основе таблицы с точным соответствием"""
+    query_lower = query.lower().strip()
+    
+    # Точные соответствия фраз из таблицы
+    prefferd_mapping = {
+        "игх": ["ANИГХ1", "ANИГХ2", "ANИГХ3", "ANИГХ4", "ANИГХ6"],
+    }
+
+    exact_mapping = {
+        # Колонка B: гистология
+        "гистология": ["AN511", "AN519", "AN523", "AN534", "AN535"],
+        "гиста": ["AN511", "AN519", "AN523", "AN534", "AN535"],
+        "онкология": ["AN511", "AN519", "AN523", "AN534", "AN535"],
+        "опухоль": ["AN511", "AN519", "AN523", "AN534", "AN535"],
+        "онко": ["AN511", "AN519", "AN523", "AN534", "AN535"],
+        
+        # Колонка C: цитология
+        "цитология": ["AN501", "AN505ГИЭ", "AN501УРО", "AN501КРВ", "AN514ГИЭ"],
+        "цита": ["AN501", "AN505ГИЭ", "AN501УРО", "AN501КРВ", "AN514ГИЭ"],
+        
+        # Колонка D: ИГХ
+        "иммуногисто": ["ANИГХ1", "ANИГХ2", "ANИГХ3", "ANИГХ4", "ANИГХ6"],
+        "иммуногистохимия": ["ANИГХ1", "ANИГХ2", "ANИГХ3", "ANИГХ4", "ANИГХ6"],
+        
+        # Колонка E: скан
+        "скан": ["AN520ГИЭ", "AN5202ГИЭ", "AN5203ГИЭ", "AN5204ГИЭ", "AN5205ГИЭ"],
+        "фото": ["AN520ГИЭ", "AN5202ГИЭ", "AN5203ГИЭ", "AN5204ГИЭ", "AN5205ГИЭ"],
+        "препарат": ["AN520ГИЭ", "AN5202ГИЭ", "AN5203ГИЭ", "AN5204ГИЭ", "AN5205ГИЭ"],
+        "цифровой скан": ["AN520ГИЭ", "AN5202ГИЭ", "AN5203ГИЭ", "AN5204ГИЭ", "AN5205ГИЭ"],
+        
+        # Колонка F: допокраски
+        "допокраски": ["ANДОКР", "AN513ГИЭ", "AN515ГИЭ"],
+        "дополнительные окраски": ["ANДОКР", "AN513ГИЭ", "AN515ГИЭ"],
+        "толуидинка": ["ANДОКР", "AN513ГИЭ", "AN515ГИЭ"],
+        "толуидиновый синий": ["ANДОКР", "AN513ГИЭ", "AN515ГИЭ"],
+        "мастоцитома": ["ANДОКР", "AN513ГИЭ", "AN515ГИЭ"],
+        "дифференциальная окраска": ["ANДОКР", "AN513ГИЭ", "AN515ГИЭ"],
+        "дифокраска": ["ANДОКР", "AN513ГИЭ", "AN515ГИЭ"],
+        
+        # Колонка G: грам
+        "грам": ["AN116"],
+        "окраска по граму": ["AN116"],
+        "бактерии в моче": ["AN116"],
+        "бактериурия": ["AN116"],
+        "пиелонефрит": ["AN116"],
+        "бактерии гарм+": ["AN116"],
+        "бактерии грам-": ["AN116"],
+    }
+    
+    # Проверяем точное совпадение запроса с фразами из таблицы
+    if query_lower in exact_mapping:
+        return exact_mapping[query_lower], False
+    if query_lower in prefferd_mapping:
+        return prefferd_mapping[query_lower], True
+    
+    return [], False
+
+
+
+async def select_best_match(query: str, docs: list[tuple[Document, float]]) -> list[Document]:
+    """Select best matching tests using LLM with priority table reordering."""
+    
+    # 1. Проверяем приоритетные тесты из таблицы
+    priority_tests, is_preferred = get_priority_tests_for_query(query)
+    
+    # 2. Для preferred запросов (ИГХ) - полностью заменяем логику, НЕ вызываем LLM
+    if priority_tests and is_preferred:
+        print(f"[DEBUG] Using PREFERRED mode for '{query}': {priority_tests}")
+        
+        preferred_docs = []
+        processor = DataProcessor()
+        all_docs = processor.search_test(query, top_k=2000)
+        # Ищем тесты ВО ВСЕХ документах в указанном порядке
+        for test_code in priority_tests:
+            for doc, score in all_docs:
+                if doc.metadata.get("test_code") == test_code and doc not in preferred_docs:
+                    preferred_docs.append(doc)
+                    break  # Нашли один - идем к следующему тесту
+        
+        if preferred_docs:
+            print(f"[DEBUG] Preferred docs found: {[doc.metadata.get('test_code') for doc in preferred_docs]}")
+            return preferred_docs
+        else:
+            print(f"[DEBUG] No docs found for preferred tests, falling back to standard logic")
+            return await original_select_best_match(query, docs)
+    
+    # 3. Для обычных приоритетных запросов - сначала LLM, потом переупорядочивание
+    elif priority_tests:
+        print(f"[DEBUG] Found priority tests for query '{query}': {priority_tests}")
+        
+        # Сначала получаем результаты от LLM
+        llm_selected_docs = await original_select_best_match(query, docs)
+        print(f"[DEBUG] LLM selected docs: {[doc.metadata.get('test_code') for doc in llm_selected_docs]}")
+        
+        # Переупорядочиваем LLM результаты: приоритетные тесты первыми
+        reordered_docs = []
+        other_docs = []
+        
+        # Сначала собираем приоритетные тесты в порядке таблицы из LLM результатов
+        for test_code in priority_tests:
+            for doc in llm_selected_docs:
+                if doc.metadata.get("test_code") == test_code and doc not in reordered_docs:
+                    reordered_docs.append(doc)
+                    break
+        
+        # Затем добавляем остальные тесты из LLM выбора
+        priority_set = set(priority_tests)
+        for doc in llm_selected_docs:
+            if doc.metadata.get("test_code") not in priority_set:
+                other_docs.append(doc)
+        
+        final_docs = reordered_docs + other_docs
+        
+        if reordered_docs:
+            print(f"[DEBUG] Reordered LLM results: {[doc.metadata.get('test_code') for doc in final_docs]}")
+        
+        return final_docs
+    
+    # 4. Если приоритетных тестов нет - используем обычную логику
+    print(f"[DEBUG] No priority tests found for '{query}', using standard logic")
+    return await original_select_best_match(query, docs)
+
+
+async def original_select_best_match(
     query: str, docs: list[tuple[Document, float]]
 ) -> list[Document]:
     """Select best matching tests using LLM from multiple options."""
     if len(docs) == 1:
         return [docs[0][0]]
 
-    query = expand_query_with_abbreviations(query).lower()
+    cleaned_query, query_department = extract_and_remove_department_from_query(query)
+
+    if not cleaned_query:
+        cleaned_query = query
+        query_department = ""
+    
+    print(f"[DEBUG] Original query: '{query}'")
+    print(f"[DEBUG] Cleaned query: '{cleaned_query}'") 
+    print(f"[DEBUG] Detected department: '{query_department}'")
+
+    cleaned_query = expand_query_with_abbreviations(cleaned_query)
+
+    for i, (doc, score) in enumerate(docs, 1):
+        print(doc.metadata.get('test_code'))
+
+    filtered_docs = docs
+    if query_department:
+        # Простая фильтрация - оставляем только документы с точным совпадением вида исследования
+        filtered_docs = [
+            (doc, score) for doc, score in docs 
+            if doc.metadata.get('department') == query_department
+        ]
+        
+        # Если после фильтрации ничего не осталось, используем оригинальные документы
+        if not filtered_docs:
+            filtered_docs = docs
+            print(f"[DEBUG] No documents found for department '{query_department}', using all docs")
+    
+
+
+    if len(filtered_docs) == 1:
+        return [filtered_docs[0][0]]
+
     options = "\n".join(
         [
             f'''{i}. Название теста: ({doc.metadata['test_name'].lower()}) 
                      Код теста: ({doc.metadata['test_code'].lower()})
-                     Специализация: ({doc.metadata['department'].lower()})
                      Буквы в коде теста: ({doc.metadata['code_letters'].lower()})
-                     Расшифрованные буквы в коде теста: ({doc.metadata['encoded'].lower()} 
-                     Тип биоматериала: ({doc.metadata['biomaterial_type'].lower()} 
+                     Расшифрованные букв в коде теста: ({doc.metadata['encoded'].lower()}) 
+                     Вид исследования: ({doc.metadata['department'].lower()})
+                     Тип биоматериала: ({doc.metadata['biomaterial_type'].lower()}) 
                      - score: {score:.2f}  \n
             '''
-            for i, (doc, score) in enumerate(docs, 1)
+            for i, (doc, score) in enumerate(filtered_docs, 1)
         ]
     )
+   
 
-    print(query)
+    print(cleaned_query)
     prompt = f"""
         # РОЛЬ: Эксперт по лабораторной диагностике животных
-        
+
+    
         ## КОНТЕКСТ:
-        Пользователь ищет: "{query}"
+        Пользователь ищет: исходный запрос: "{query}" запрос дополненный аббревиатурами нами: {cleaned_query}
         Необходимо выбрать наиболее релевантные лабораторные тесты из предложенных вариантов.
+
 
         ## КРИТЕРИИ ОЦЕНКИ:
 
         ### 1. СЕМАНТИЧЕСКОЕ СООТВЕТСТВИЕ (ВЫСОКИЙ ПРИОРИТЕТ):
-        - Совпадение ключевых терминов в названии теста и в расшифрованных буквах в коде теста
+        - Совпадение ключевых терминов в названии теста
 
         ### 2. КОДИРОВКА И АББРЕВИАТУРЫ (СРЕДНИЙ ПРИОРИТЕТ):
-        1) Совпадение букв в коде теста с запросом
-        2) Соответствие аббревиатур
-        3) Соответсвие биоматериала
-        4) Понимание закодированных обозначений
+        - Совпадение букв кода с запросом
+        - Понимание закодированных обозначений
+        - Соответствие аббревиатур
 
         ### 3. СТАТИСТИЧЕСКАЯ УВЕРЕННОСТЬ (ДОПОЛНИТЕЛЬНЫЙ ФАКТОР):
         - Учитывать score как дополнительный показатель, но не как основной критерий
 
+        ## ИСКЛЮЧЕНИЯ
+        - для ОАМ общий анализ мочи выводить только AN116
+
         ## ИНСТРУКЦИИ ПО ВЫБОРУ:
 
         ### ПРИОРИТЕТЫ ВЫБОРА:
-        1. **ТОЧНЫЕ СОВПАДЕНИЯ** - тесты, которые точно отвечают на запрос, если в запросе есть точное название теста или код теста, то надо вернуть только этот тест
-
+        1. **ТОЧНЫЕ СОВПАДЕНИЯ** - тесты, которые точно отвечают на запрос
+        2. **СМЕЖНЫЕ ТЕСТЫ** - связанные исследования, которые могут быть полезны
 
         ### ЧТО ИСКЛЮЧАТЬ:
         - Тесты с низкой релевантностью, даже с высоким score
         - Дублирующие исследования
         - Слишком специализированные тесты для общих запросов
-        - Если у нас есть точное совпадение какого-либо теста с запросом, то вернуть только этот тест, все остальное исключить
+        - Тесты не с совпадающим биоматериалом, если он присутствует в запросе
 
         ## ФОРМАТ ОТВЕТА:
-        Верните ТОЛЬКО номера выбранных вариантов (1-{len(docs)}) через запятую в порядке релевантности.
+        Верните ТОЛЬКО номера выбранных вариантов (1-{len(docs)}) через запятую.
         Не добавляйте пояснений, текста или форматирования.
-        Не бойся выдать мало значений, если это необходимо
 
         ## ВАРИАНТЫ ДЛЯ АНАЛИЗА:
         {options}
 
-        ## ЗАПРОС ПОЛЬЗОВАТЕЛЯ: "{query}"
+        ## ЗАПРОС ПОЛЬЗОВАТЕЛЯ: исходный запрос: "{query}" запрос дополненный аббревиатурами нами: {cleaned_query}
 
-        Верните номера наиболее релевантных тестов по порядку релевантности, если тесты не релевантны то не надо их возвращать:
+        Верните номера наиболее релевантных тестов по порядку релевантности:
         """
-
+        
     try:
-        response = await llm.agenerate([[SystemMessage(content=prompt)]])
-        selected = response.generations[0][0].text.strip()
+            response = await llm.agenerate([[SystemMessage(content=prompt)]])
+            selected = response.generations[0][0].text.strip()
 
-        if not selected:
-            return [docs[0][0]]  # Fallback to top result
+            if not selected:
+                return [filtered_docs[0][0]]
 
-        selected_indices = []
-        for num in selected.split(","):
-            num = num.strip()
-            if num.isdigit() and 1 <= int(num) <= len(docs):
-                selected_indices.append(int(num) - 1)
+            selected_indices = []
+            for num in selected.split(","):
+                num = num.strip()
+                if num.isdigit() and 1 <= int(num) <= len(filtered_docs):
+                    selected_indices.append(int(num) - 1)
 
-        if not selected_indices:
-            return [docs[0][0]]
+            if not selected_indices:
+                return [filtered_docs[0][0]]
 
-        # Получаем выбранные документы с сохранением порядка LLM
-        selected_docs_with_order = [
-            (docs[i][0], idx) for idx, i in enumerate(selected_indices)
-        ]
-
-        # Сортируем: сначала "Тесты", потом "Профили", внутри каждой группы сохраняем порядок LLM
-        sorted_docs = sorted(
-            selected_docs_with_order,
-            key=lambda x: (
-                0 if x[0].metadata.get("type") == "Тесты" else 1,  # Тесты первыми
-                x[1],  # Сохраняем порядок LLM внутри каждой группы
-            ),
-        )
-
-        return [doc for doc, _ in sorted_docs]
+            selected_docs = [filtered_docs[i][0] for i in selected_indices]
+            return selected_docs
 
     except Exception:
-        return [docs[0][0]]  # Fallback on error
-
+        return [filtered_docs[0][0]]
 
 def generate_test_code_variants(text: str) -> list[str]:
     """Генерирует различные варианты написания кода теста."""

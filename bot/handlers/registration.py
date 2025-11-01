@@ -6,8 +6,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from bot.keyboards import (
     get_user_type_kb, get_department_function_kb, 
-    get_main_menu_kb, get_admin_menu_kb, get_specialization_kb,
-    get_region_kb, get_country_kb
+    get_main_menu_kb, get_admin_menu_kb, get_specialization_kb
 )
 from bot.handlers.questions import (
     smart_test_search, 
@@ -22,36 +21,14 @@ from src.database.db_init import db
 
 registration_router = Router()
 
-# async def get_tech_support_message():
-#     return (
-#         "🛠 Техничка VET UNION Assistant\n\n"
-#         "Отдельный чат техподдержки\n\n"
-#         "📋 Данная группа предназначена для отправки ошибок в боте.\n\n"
-#         "🎯 Ваши сообщения об ошибках помогают:\n\n"
-#         "• Быстро устранять проблемы\n"
-#         "• Улучшать функционал бота\n"
-#         "• Делать сервис удобнее для всех\n\n"
-#         "💬 Как сообщить об ошибке:\n\n"
-#         "Укажите:\n"
-#         "• Ваш запрос - что именно вы спрашивали\n"
-#         "• Ответ бота - что ответил бот\n"
-#         "• Как должно быть - какой ответ ожидался\n\n"
-#         "👥 [Присоединиться к технической группе → https://t.me/+FUmjohiS_VQwNDIy]\n\n"
-#         "Вместе мы сделаем VET UNION Assistant лучше! ⚡️"
-#     )
-
 class RegistrationStates(StatesGroup):
     waiting_for_user_type = State()
-    waiting_for_country = State()
     # Для клиентов
     waiting_for_client_code = State()
     waiting_for_client_name = State()
     waiting_for_specialization = State()
     waiting_for_custom_specialization = State()
     # Для сотрудников
-    waiting_for_region = State()
-    waiting_for_custom_region = State()
-    waiting_for_employee_last_name = State()  
     waiting_for_employee_first_name = State()  
     waiting_for_department = State()
 
@@ -237,48 +214,7 @@ async def process_user_type(message: Message, state: FSMContext):
     user_id = message.from_user.id
     
     if message.text == "👨‍⚕️ Ветеринарный врач клиники-партнера":
-        await state.update_data(user_type='client')
-    elif message.text == "🔬 Сотрудник X-LAB VET":
-        await state.update_data(user_type='employee')
-    else:
-        await message.answer(
-            "❌ Пожалуйста, выберите из предложенных вариантов",
-            reply_markup=get_user_type_kb()
-        )
-        return
-    
-    # Переходим к выбору страны
-    await message.answer(
-        "🌍 В какой стране вы находитесь?",
-        reply_markup=get_country_kb()
-    )
-    await state.set_state(RegistrationStates.waiting_for_country)
-    
-@registration_router.message(RegistrationStates.waiting_for_country)
-async def process_country(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    
-    country_map = {
-        "🇧🇾 Беларусь": "BY",
-        "🇷🇺 Россия": "RU",
-        "🇰🇿 Казахстан": "KZ",
-        "🇦🇲 Армения": "AM"
-    }
-    
-    if message.text not in country_map:
-        await message.answer(
-            "❌ Пожалуйста, выберите страну из предложенных вариантов",
-            reply_markup=get_country_kb()
-        )
-        return
-    
-    country = country_map[message.text]
-    await state.update_data(country=country)
-    
-    # Продолжаем в зависимости от типа пользователя
-    data = await state.get_data()
-    
-    if data['user_type'] == 'client':
+        await state.update_data(user_type='client', country='RU')
         await message.answer(
             "📝 Регистрация ветеринарного врача\n\n"
             "Введите ваш код клиники:\n"
@@ -287,14 +223,20 @@ async def process_country(message: Message, state: FSMContext):
             reply_markup=ReplyKeyboardRemove()
         )
         await state.set_state(RegistrationStates.waiting_for_client_code)
-    else:
-        # Для сотрудников показываем регионы выбранной страны
+    elif message.text == "🔬 Сотрудник X-LAB VET":
+        await state.update_data(user_type='employee', country='RU')
         await message.answer(
             "📝 Регистрация сотрудника X-LAB VET\n\n"
-            "Выберите ваш регион:",
-            reply_markup=get_region_kb(country)
+            "Введите ваше имя:",
+            reply_markup=ReplyKeyboardRemove()
         )
-        await state.set_state(RegistrationStates.waiting_for_region)
+        await state.set_state(RegistrationStates.waiting_for_employee_first_name)
+    else:
+        await message.answer(
+            "❌ Пожалуйста, выберите из предложенных вариантов",
+            reply_markup=get_user_type_kb()
+        )
+        return
 
 # Обработчики для клиентов
 @registration_router.message(RegistrationStates.waiting_for_client_code)
@@ -323,7 +265,7 @@ async def process_client_code(message: Message, state: FSMContext):
 
 @registration_router.message(RegistrationStates.waiting_for_client_name)
 async def process_client_name(message: Message, state: FSMContext):
-    name = message.text.strip().title()  # Добавлен .title()
+    name = message.text.strip().title()
 
     if len(name) < 2 or len(name) > 50:
         await message.answer(
@@ -377,7 +319,7 @@ async def process_specialization(message: Message, state: FSMContext):
         name=data['name'],
         client_code=data['client_code'],
         specialization=specialization,
-        country=data.get('country', 'BY')
+        country=data.get('country', 'RU')
     )
 
     if success:
@@ -389,7 +331,6 @@ async def process_specialization(message: Message, state: FSMContext):
             "Теперь вы можете пользоваться всеми функциями бота!",
             reply_markup=get_main_menu_kb()
         )
-        # await message.answer(await get_tech_support_message())
     else:
         await message.answer(
             "❌ Ошибка регистрации. Возможно, вы уже зарегистрированы.\nПопробуйте еще раз: /start",
@@ -416,7 +357,7 @@ async def process_custom_specialization(message: Message, state: FSMContext):
         name=data['name'],
         client_code=data['client_code'],
         specialization=specialization,
-        country=data.get('country', 'BY')
+        country=data.get('country', 'RU')
     )
 
     if success:
@@ -428,7 +369,6 @@ async def process_custom_specialization(message: Message, state: FSMContext):
             "Теперь вы можете пользоваться всеми функциями бота!",
             reply_markup=get_main_menu_kb()
         )
-        # await message.answer(await get_tech_support_message())
     else:
         await message.answer(
             "❌ Ошибка регистрации. Возможно, вы уже зарегистрированы.\nПопробуйте еще раз: /start",
@@ -438,103 +378,31 @@ async def process_custom_specialization(message: Message, state: FSMContext):
     await state.clear()
 
 # Обработчики для сотрудников
-@registration_router.message(RegistrationStates.waiting_for_region)
-async def process_region(message: Message, state: FSMContext):
-    if message.text == "✏️ Ввести свой регион":
-        await message.answer(
-            "Введите ваш регион:",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        await state.set_state(RegistrationStates.waiting_for_custom_region)
-        return
-    
-    data = await state.get_data()
-    
-    if not message.text.startswith("📍"):
-        await message.answer(
-            "❌ Пожалуйста, выберите регион из списка или введите свой",
-            reply_markup=get_region_kb(data.get('country', 'BY'))
-        )
-        return
-    
-    region = message.text.replace("📍 ", "")
-    await state.update_data(region=region)
-    await message.answer(
-        f"📍 Регион: {region}\n\n"
-        "Введите вашу фамилию:",  # Сначала запрашиваем фамилию
-        reply_markup=ReplyKeyboardRemove()
-    )
-    await state.set_state(RegistrationStates.waiting_for_employee_last_name)
-    
-@registration_router.message(RegistrationStates.waiting_for_employee_last_name)
-async def process_employee_last_name(message: Message, state: FSMContext):
-    last_name = message.text.strip().title()  # Добавлен .title()
-
-    if len(last_name) < 2 or len(last_name) > 50:
-        await message.answer(
-            "❌ Фамилия должна содержать от 2 до 50 символов.\nПопробуйте еще раз:"
-        )
-        return
-    
-    # Проверяем, что введены только буквы и дефис
-    if not all(c.isalpha() or c in ['-', ' '] for c in last_name):
-        await message.answer(
-            "❌ Фамилия может содержать только буквы, пробел и дефис.\nПопробуйте еще раз:"
-        )
-        return
-
-    await state.update_data(last_name=last_name)
-    await message.answer(
-        f"👤 Фамилия: {last_name}\n\n"
-        "Теперь введите ваше имя:",
-        reply_markup=ReplyKeyboardRemove()
-    )
-    await state.set_state(RegistrationStates.waiting_for_employee_first_name)
-
 @registration_router.message(RegistrationStates.waiting_for_employee_first_name)
 async def process_employee_first_name(message: Message, state: FSMContext):
-    first_name = message.text.strip().title()  # Добавлен .title()
+    name = message.text.strip().title()
 
-    if len(first_name) < 2 or len(first_name) > 50:
+    if len(name) < 2 or len(name) > 50:
         await message.answer(
             "❌ Имя должно содержать от 2 до 50 символов.\nПопробуйте еще раз:"
         )
         return
     
     # Проверяем, что введены только буквы и дефис
-    if not all(c.isalpha() or c in ['-', ' '] for c in first_name):
+    if not all(c.isalpha() or c in ['-', ' '] for c in name):
         await message.answer(
             "❌ Имя может содержать только буквы, пробел и дефис.\nПопробуйте еще раз:"
         )
         return
 
-    data = await state.get_data()
-    await state.update_data(first_name=first_name)
+    await state.update_data(name=name)
     
     await message.answer(
-        f"👤 {data['last_name']} {first_name}\n\n"
+        f"👤 Имя: {name}\n\n"
         "Выберите функцию, которую вы исполняете:",
         reply_markup=get_department_function_kb()
     )
     await state.set_state(RegistrationStates.waiting_for_department)
-
-@registration_router.message(RegistrationStates.waiting_for_custom_region)
-async def process_custom_region(message: Message, state: FSMContext):
-    region = message.text.strip()
-
-    if len(region) < 2 or len(region) > 100:
-        await message.answer(
-            "❌ Регион должен содержать от 2 до 100 символов.\nПопробуйте еще раз:"
-        )
-        return
-
-    await state.update_data(region=region)
-    await message.answer(
-        f"📍 Регион: {region}\n\n"
-        "Введите вашу фамилию:",  # Сначала запрашиваем фамилию
-        reply_markup=ReplyKeyboardRemove()
-    )
-    await state.set_state(RegistrationStates.waiting_for_employee_last_name)
 
 @registration_router.message(RegistrationStates.waiting_for_department)
 async def process_department(message: Message, state: FSMContext):
@@ -555,26 +423,24 @@ async def process_department(message: Message, state: FSMContext):
 
     data = await state.get_data()
     
-    # Используем новую версию функции с раздельными именем и фамилией
+    # ✅ ИСПРАВЛЕНО: Используем хард-кодированный регион
     success = await db.add_employee(
         telegram_id=user_id,
-        first_name=data['first_name'],
-        last_name=data['last_name'],
-        region=data['region'],
+        name=data['name'],
+        region='Россия',  # ← Хард-кодированное значение
         department_function=department_map[message.text],
-        country=data['country']
+        country=data.get('country', 'RU')  # ← Используем .get() для безопасности
     )
 
     if success:
         await message.answer(
             f"✅ Регистрация завершена успешно!\n\n"
-            f"👤 {data['last_name']} {data['first_name']}\n"
-            f"📍 Регион: {data['region']}\n"
+            f"👤 Имя: {data['name']}\n"
             f"🏢 Функция: {message.text}\n\n"
             "Теперь вы можете пользоваться всеми функциями бота!",
             reply_markup=get_main_menu_kb()
         )
-        # await message.answer(await get_tech_support_message())
+        
         # Проверяем наличие отложенного теста
         if 'pending_test_code' in data:
             test_code = data['pending_test_code']

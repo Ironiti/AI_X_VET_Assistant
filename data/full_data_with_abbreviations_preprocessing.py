@@ -99,13 +99,30 @@ def join_pcr_data(main_file_path):
     pcr_df = pd.read_excel(main_file_path, sheet_name='Справочник сокращений ПЦР')
     
     # Функция для извлечения буквенной части из кода теста
+    
+
     def extract_letters(code):
         code_str = safe_str(code)
         if not code_str:
             return None
-        match = re.search(r'(\d+)([A-Za-zА-Яа-я]+)$', code_str)
+        
+        # Убираем начальные AN
+        code_without_an = re.sub(r'^AN', '', code_str)
+        
+        # Вариант 1: буквы после цифр (AN105СП -> СП)
+        match = re.search(r'(\d+)([A-Za-zА-Яа-я]+)$', code_without_an)
         if match:
             return match.group(2).strip()
+        
+        # Вариант 2: буквы до цифр (ANИГХ10 -> ИГХ)
+        match = re.search(r'^([A-Za-zА-Яа-я]+)(\d+)$', code_without_an)
+        if match:
+            return match.group(1).strip()
+        
+        # Вариант 3: только буквы (если нет цифр)
+        if re.match(r'^[A-Za-zА-Яа-я]+$', code_without_an):
+            return code_without_an.strip()
+        
         return None
     
     # Создаем столбец с буквенными частями кодов для основной таблицы
@@ -144,6 +161,7 @@ def join_pcr_data(main_file_path):
     
     return merged_df
 
+
 def enhance_data_with_vet_abbreviations(df):
     
     enhanced_rows = []
@@ -160,32 +178,29 @@ def enhance_data_with_vet_abbreviations(df):
         
         # 1. Добавляем оригинальные данные (только непустые)
         base_fields = [
+            safe_str(row.get('code_letters', '')),
+            safe_str(row.get('code_letters', '')),
+            safe_str(row.get('code_letters', '')),
+            safe_str(row.get('code_letters', '')),
+            safe_str(row.get('code_letters', '')),
+            safe_str(row.get('encoded', '')),
+            safe_str(row.get('encoded', '')),
+            safe_str(row.get('encoded', '')),
+            safe_str(row.get('encoded', '')),
+            safe_str(row.get('encoded', '')),
             test_name, test_name, test_name, test_name,
+            safe_str(row.get('test_name_abbreviations', '')),
+            safe_str(row.get('test_name_abbreviations', '')),
+            safe_str(row.get('test_name_abbreviations', '')),
             department, department,
-            specialization,
-            safe_str(row.get('type', '')),
-            safe_str(row.get('code_letters', '')),
-            safe_str(row.get('code_letters', '')),
-            safe_str(row.get('code_letters', '')),
-            safe_str(row.get('code_letters', '')),
-            safe_str(row.get('encoded', '')),
-            safe_str(row.get('encoded', '')),
-            safe_str(row.get('encoded', '')),
-            safe_str(row.get('encoded', '')),
             safe_str(row.get('biomaterial_type', '')),
             safe_str(row.get('biomaterial_type', '')),
-            safe_str(row.get('biomaterial_type', '')),
-            safe_str(row.get('test_name_abbreviations', '')),
-            safe_str(row.get('test_name_abbreviations', '')),
-            safe_str(row.get('test_name_abbreviations', '')),
-            # safe_str(row.get('important_information', '')),
-            safe_str(row.get('animal_type', '')),
+            safe_str(row.get('biomaterial_type', '')),            
             safe_str(row.get('animal_type', '')),
             safe_str(row.get('animal_type', '')),
             safe_str(row.get('container_type', '')),
-            # safe_str(row.get('storage_temp', ''))
         ]
-        
+
         # Фильтруем пустые значения
         enhanced_text_parts.extend([field for field in base_fields if field])
         

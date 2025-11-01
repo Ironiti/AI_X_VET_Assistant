@@ -212,7 +212,7 @@ class CSVExporter:
     
     def _generate_readme(self) -> str:
         """Генерирует README файл для архива"""
-        return f"""VetUnion Data Export - CSV Format
+        return f"""X-LAB VET Data Export - CSV Format
 Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
 Files included:

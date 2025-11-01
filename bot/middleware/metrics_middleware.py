@@ -48,14 +48,17 @@ class MetricsMiddleware(BaseMiddleware):
         except Exception as e:
             logger.error(f"[METRICS] Failed to check user role: {e}")
         
-        # Отслеживаем активность пользователя (для DAU и сессий)
-        # ВАЖНО: Отслеживание активности НЕ РАВНО логированию в request_metrics!
+        # Отслеживаем активность пользователя
+        # ВАЖНО:
         # - track_user_activity: обновляет user_activity (для DAU)
-        # - update_session_activity: обновляет user_sessions (для времени сессий)
-        # - log_request_metric: логирует запросы (ТОЛЬКО для валидных запросов)
+        # - update_session_activity: создает/обновляет сессии (для метрик времени активности)
+        # - log_request_metric: логирует запросы (ТОЛЬКО для валидных запросов в обработчиках)
         try:
-            # Отслеживаем активность для ВСЕХ действий (включая навигацию)
+            # Отслеживаем активность для DAU (Daily Active Users)
             await db.track_user_activity(user_id)
+            
+            # Создаем/обновляем сессию при ЛЮБОЙ активности (кнопки, запросы, все)
+            # Закрытие неактивных сессий происходит в фоновой задаче (main.py)
             await db.update_session_activity(user_id)
             
             # Логируем тип события для отладки
@@ -160,6 +163,7 @@ class DailyMetricsUpdater:
                 logger.info(f"[METRICS] Daily metrics updated for {today}")
             except Exception as e:
                 logger.error(f"[METRICS] Failed to update daily metrics: {e}")
+    
 
 
 # Глобальный экземпляр для обновления метрик

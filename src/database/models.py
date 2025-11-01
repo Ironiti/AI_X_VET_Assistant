@@ -1,4 +1,6 @@
 import json
+import time
+import asyncio
 from typing import Optional
 import aiosqlite
 from datetime import datetime, timedelta
@@ -10,6 +12,8 @@ class Database:
     def __init__(self, db_path: str):
         self.db_path = db_path
         self.test_processor = DataProcessor()
+        self._user_cache = {}  # Кэш пользователей
+        self._cache_ttl = 300  # 5 минут
         
     async def get_unique_container_types(self) -> list[str]:
         """Получает уникальные типы контейнеров из базы тестов (из обоих полей)"""
@@ -982,24 +986,6 @@ class Database:
                 )
             ''')
             
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS user_frequent_tests (
-                    user_id INTEGER NOT NULL,
-                    test_code TEXT NOT NULL,
-                    test_name TEXT,
-                    frequency INTEGER DEFAULT 1,
-                    last_accessed TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (user_id, test_code),
-                    FOREIGN KEY (user_id) REFERENCES users(telegram_id)
-                )
-            ''')
-
-            # Индекс для ускорения запросов
-            await db.execute('''
-                CREATE INDEX IF NOT EXISTS idx_user_frequent_tests
-                ON user_frequent_tests(user_id, frequency DESC, last_accessed DESC)
-            ''')
-            
             # Обновленная таблица пользователей
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS users (
@@ -1007,7 +993,7 @@ class Database:
                     user_type TEXT CHECK(user_type IN ('client', 'employee')),
                     
                     -- Общие поля
-                    name TEXT,  -- Для клиентов - полное имя
+                    name TEXT,  -- Теперь используется и для клиентов, и для сотрудников
                     country TEXT DEFAULT 'BY',
                     registration_date TIMESTAMP,
                     role TEXT DEFAULT 'user',
@@ -1017,9 +1003,9 @@ class Database:
                     client_code TEXT,
                     specialization TEXT,
                     
-                    -- Поля для сотрудников
-                    first_name TEXT,  -- Имя сотрудника
-                    last_name TEXT,   -- Фамилия сотрудника
+                    -- Поля для сотрудников (оставляем для совместимости, но не заполняем)
+                    first_name TEXT,  -- Устарело, используется name
+                    last_name TEXT,   -- Устарело, используется name
                     region TEXT,
                     department_function TEXT CHECK(department_function IN ('laboratory', 'sales', 'support', NULL))
                 )
@@ -1259,43 +1245,97 @@ class Database:
             # КОНЕЦ ДОБАВЛЕНИЯ
             # ============================================================
             
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_user_activity_user_date 
+                ON user_activity(user_id, activity_date DESC)
+            ''')
+            
+            # Индекс для фильтрации по типу запроса и дате
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_request_metrics_type_date
+                ON request_metrics(request_type, DATE(timestamp) DESC)
+            ''')
+            
+            # Индекс для быстрой фильтрации по роли (админ/не админ)
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_users_role
+                ON users(role)
+            ''')
+            
+            # Индекс для поиска активных сессий
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_sessions_active
+                ON user_sessions(is_active, user_id) WHERE is_active = TRUE
+            ''')
+            
+            # Индекс для поиска по user_id и role (составной)
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_users_telegram_role
+                ON users(telegram_id, role)
+            ''')
+            
+            # Индекс для быстрого подсчета DAU
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_request_metrics_user_date
+                ON request_metrics(user_id, DATE(timestamp) DESC)
+            ''')
+            
+            print("[INFO] Database indexes created successfully")
+            
+            # Теперь коммитим все изменения
             await db.commit()
     
-    async def add_client(self, telegram_id: int, name: str, client_code: str, 
-                        specialization: str, country: str = 'BY'):
+    async def add_client(self, telegram_id: int, name: str, client_code: str,
+                        specialization: str, country: str = 'RU'):
         """Добавление клиента (ветеринарной клиники)"""
         async with aiosqlite.connect(self.db_path) as db:
             try:
                 await db.execute('''
-                    INSERT INTO users (telegram_id, user_type, name, client_code, 
+                    INSERT INTO users (telegram_id, user_type, name, client_code,
                                      specialization, country, registration_date, role)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (telegram_id, 'client', name, client_code, specialization, 
+                ''', (telegram_id, 'client', name, client_code, specialization,
                      country, datetime.now(), 'user'))
                 await db.commit()
+                
+                # ВАЖНО: Очищаем кеш после успешной регистрации
+                self.clear_user_cache(telegram_id)
+                print(f"[REGISTRATION] ✓ Client registered: {telegram_id}")
+                
                 return True
             except aiosqlite.IntegrityError:
                 return False
     
-    async def add_employee(self, telegram_id: int, first_name: str, last_name: str, region: str, department_function: str, country: str = 'BY'):
-        """Добавление сотрудника с отдельными полями для имени и фамилии"""
+    async def add_employee(self, telegram_id: int, name: str, region: str, department_function: str, country: str = 'RU'):
+        """Добавление сотрудника только с именем (без фамилии)"""
         async with aiosqlite.connect(self.db_path) as db:
             try:
-                # Создаем полное имя для совместимости
-                full_name = f"{last_name} {first_name}"
-                
                 await db.execute('''
-                    INSERT INTO users (telegram_id, user_type, name, first_name, last_name,
+                    INSERT INTO users (telegram_id, user_type, name, first_name,
                                     region, department_function, country, registration_date, role)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (telegram_id, 'employee', full_name, first_name, last_name, 
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (telegram_id, 'employee', name, name,
                     region, department_function, country, datetime.now(), 'user'))
                 await db.commit()
+                
+                # ВАЖНО: Очищаем кеш после успешной регистрации
+                self.clear_user_cache(telegram_id)
+                print(f"[REGISTRATION] ✓ Employee registered: {telegram_id}")
+                
                 return True
             except aiosqlite.IntegrityError:
                 return False
     
     async def get_user(self, telegram_id: int):
+        """Получает пользователя с кэшированием"""
+        # Проверяем кэш
+        cache_key = f"user_{telegram_id}"
+        if cache_key in self._user_cache:
+            cached_data, cached_time = self._user_cache[cache_key]
+            if time.time() - cached_time < self._cache_ttl:
+                return cached_data
+        
+        # Загружаем из БД
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
@@ -1303,10 +1343,48 @@ class Database:
                 (telegram_id,)
             )
             row = await cursor.fetchone()
-            # Преобразуем Row в словарь для удобства
-            if row:
-                return dict(row)
-            return None
+            user_data = dict(row) if row else None
+            
+            # Сохраняем в кэш
+            self._user_cache[cache_key] = (user_data, time.time())
+            
+            return user_data
+        
+    def clear_user_cache(self, telegram_id: int = None):
+        """Очищает кэш пользователей"""
+        if telegram_id:
+            cache_key = f"user_{telegram_id}"
+            self._user_cache.pop(cache_key, None)
+        else:
+            self._user_cache.clear()
+            
+    async def get_dau_metrics_optimized(self, days: int = 30):
+        """Оптимизированная версия получения DAU метрик"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                start_date = datetime.now() - timedelta(days=days)
+                
+                # Используем агрегированные данные из user_activity вместо request_metrics
+                cursor = await db.execute('''
+                    SELECT
+                        ua.activity_date,
+                        COUNT(DISTINCT ua.user_id) as dau,
+                        SUM(ua.request_count) as total_requests,
+                        AVG(ua.request_count) as avg_requests_per_user
+                    FROM user_activity ua
+                    JOIN users u ON ua.user_id = u.telegram_id
+                    WHERE ua.activity_date >= DATE(?)
+                    AND u.role != 'admin'
+                    GROUP BY ua.activity_date
+                    ORDER BY ua.activity_date DESC
+                ''', (start_date,))
+                
+                return [dict(row) for row in await cursor.fetchall()]
+        except Exception as e:
+            print(f"[ERROR] Failed to get DAU metrics: {e}")
+            return []
     
     async def get_user_role(self, telegram_id: int):
         user = await self.get_user(telegram_id)
@@ -1337,11 +1415,9 @@ class Database:
         if not user:
             return "пользователь"
         
-        if user['user_type'] == 'employee' and user.get('first_name'):
-            # Для сотрудников используем только имя
-            return user['first_name']
-        elif user.get('name'):
-            # Для клиентов используем полное имя или только первое слово
+        if user.get('name'):
+            # Для всех пользователей используем поле name
+            # Берем только первое слово (если это составное имя)
             name_parts = user['name'].split()
             return name_parts[0] if name_parts else user['name']
         
@@ -1444,8 +1520,9 @@ class Database:
             stats['callbacks'] = 0
             for req_type, count in request_stats:
                 stats['total_requests'] += count
-                if req_type == 'question':
-                    stats['questions'] = count
+                # Считаем все типы поисков как вопросы
+                if req_type in ('question', 'code_search', 'name_search'):
+                    stats['questions'] += count
                 elif req_type == 'callback_request':
                     stats['callbacks'] = count
 
@@ -1644,21 +1721,59 @@ class Database:
         has_answer: bool = True,
         error_message: str = None
     ):
-        """Логирует метрику запроса"""
+        """
+        Логирует метрику запроса (ИСКЛЮЧАЯ админов и навигацию).
+        ИСПРАВЛЕНО: улучшена обработка ошибок и предотвращение блокировок БД
+        """
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            # Логируем только валидные типы запросов
+            valid_types = ['code_search', 'name_search', 'general']
+            if request_type not in valid_types:
+                print(f"[METRICS] Skipping invalid request type: {request_type}")
+                return
+            
+            # Проверяем, не админ ли это (с очисткой кеша при ошибке)
+            try:
+                user = await self.get_user(user_id)
+                if user and user.get('role') == 'admin':
+                    print(f"[METRICS] Skipping admin user: {user_id}")
+                    return
+            except Exception as cache_error:
+                # Если ошибка с кешем - очищаем его и пробуем снова
+                print(f"[METRICS] Cache error, clearing and retrying: {cache_error}")
+                self.clear_user_cache(user_id)
+                user = await self.get_user(user_id)
+                if user and user.get('role') == 'admin':
+                    return
+            
+            # Используем timeout для предотвращения блокировки
+            async with aiosqlite.connect(self.db_path, timeout=10.0) as db:
+                # Явно устанавливаем WAL mode для лучшей concurrent работы
+                await db.execute('PRAGMA journal_mode=WAL')
+                
                 await db.execute('''
-                    INSERT INTO request_metrics 
-                    (user_id, request_type, query_text, response_time, success, 
-                     relevance_score, has_answer, error_message, timestamp)
+                    INSERT INTO request_metrics
+                    (user_id, request_type, query_text, response_time, success,
+                    relevance_score, has_answer, error_message, timestamp)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     user_id, request_type, query_text[:500], response_time, success,
                     relevance_score, has_answer, error_message, datetime.now()
                 ))
                 await db.commit()
+                
+                print(f"[METRICS] ✓ Logged request: type={request_type}, user={user_id}, success={success}, has_answer={has_answer}")
+        except aiosqlite.OperationalError as db_error:
+            # Ошибка БД (блокировка, timeout и т.д.)
+            print(f"[ERROR] Database operational error in log_request_metric: {db_error}")
+            import traceback
+            traceback.print_exc()
         except Exception as e:
+            # Любая другая ошибка
             print(f"[ERROR] Failed to log request metric: {e}")
+            import traceback
+            traceback.print_exc()
+
     
     async def update_daily_metrics(self):
         """Обновляет ежедневные метрики"""
@@ -1878,14 +1993,37 @@ class Database:
     # ============================================================
     
     async def track_user_activity(self, user_id: int):
-        """Отслеживает активность пользователя за день - считает ВСЕ запросы"""
+        """
+        Отслеживает активность пользователя за день (ИСКЛЮЧАЯ админов).
+        ИСПРАВЛЕНО: НЕ трекает незарегистрированных пользователей
+        """
         try:
+            # КРИТИЧНО: Проверяем, зарегистрирован ли пользователь
+            # Не трекаем активность во время регистрации!
+            try:
+                user = await self.get_user(user_id)
+                if not user:
+                    print(f"[ACTIVITY] Skipping activity for unregistered user {user_id}")
+                    return
+                if user.get('role') == 'admin':
+                    return  # Не трекаем админов
+            except Exception as cache_error:
+                print(f"[ACTIVITY] Cache error, clearing: {cache_error}")
+                self.clear_user_cache(user_id)
+                user = await self.get_user(user_id)
+                if not user:
+                    print(f"[ACTIVITY] User {user_id} not found after cache clear")
+                    return
+                if user.get('role') == 'admin':
+                    return
+            
             today = datetime.now().date()
             current_time = datetime.now()
             
-            async with aiosqlite.connect(self.db_path) as db:
-                # Обновляем или создаем запись активности
-                # Считаем ВСЕ взаимодействия (включая навигацию, команды и т.д.)
+            # Используем timeout для предотвращения блокировки
+            async with aiosqlite.connect(self.db_path, timeout=10.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
                 await db.execute('''
                     INSERT INTO user_activity
                     (user_id, activity_date, request_count, last_activity)
@@ -1896,8 +2034,13 @@ class Database:
                 ''', (user_id, today, current_time))
                 
                 await db.commit()
+                print(f"[ACTIVITY] ✓ Tracked activity for user {user_id}")
+        except aiosqlite.OperationalError as db_error:
+            print(f"[ERROR] Database error in track_user_activity: {db_error}")
         except Exception as e:
             print(f"[ERROR] Failed to track user activity: {e}")
+            import traceback
+            traceback.print_exc()
     
     async def start_user_session(self, user_id: int) -> int:
         """Начинает новую сессию пользователя"""
@@ -1934,39 +2077,38 @@ class Database:
         """
         Закрывает сессии с неактивностью более указанного времени.
         
-        ВАЖНО: session_end устанавливается как (последний_запрос + inactivity_minutes),
-        чтобы учесть время изучения материала пользователем.
+        ВАЖНО:
+        - Проверяет последнюю активность в request_metrics ИЛИ session_start если запросов нет
+        - session_end = последняя_активность + inactivity_minutes (время на чтение)
         """
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 cutoff_time = datetime.now() - timedelta(minutes=inactivity_minutes)
                 
-                # Находим активные сессии, у которых последняя активность была более N минут назад
-                # session_end = последний запрос + N минут (время на изучение материала)
+                # Закрываем сессии, где последняя активность (или старт если нет запросов)
+                # была более N минут назад
                 cursor = await db.execute('''
                     UPDATE user_sessions
                     SET is_active = FALSE,
                         session_end = datetime(
-                            (SELECT MAX(timestamp)
-                             FROM request_metrics
-                             WHERE user_id = user_sessions.user_id
-                             AND timestamp >= user_sessions.session_start
-                             AND timestamp < ?),
+                            COALESCE(
+                                (SELECT MAX(timestamp)
+                                 FROM request_metrics
+                                 WHERE user_id = user_sessions.user_id
+                                 AND timestamp >= user_sessions.session_start),
+                                user_sessions.session_start
+                            ),
                             '+''' + str(inactivity_minutes) + ''' minutes'
                         )
                     WHERE is_active = TRUE
-                    AND id IN (
-                        SELECT us.id
-                        FROM user_sessions us
-                        WHERE us.is_active = TRUE
-                        AND (
-                            SELECT MAX(rm.timestamp)
-                            FROM request_metrics rm
-                            WHERE rm.user_id = us.user_id
-                            AND rm.timestamp >= us.session_start
-                        ) < ?
-                    )
-                ''', (cutoff_time, cutoff_time))
+                    AND COALESCE(
+                        (SELECT MAX(rm.timestamp)
+                         FROM request_metrics rm
+                         WHERE rm.user_id = user_sessions.user_id
+                         AND rm.timestamp >= user_sessions.session_start),
+                        user_sessions.session_start
+                    ) < ?
+                ''', (cutoff_time,))
                 
                 closed_count = cursor.rowcount
                 await db.commit()
@@ -1979,13 +2121,94 @@ class Database:
             print(f"[ERROR] Failed to close inactive sessions: {e}")
             return 0
     
-    async def update_session_activity(self, user_id: int):
-        """Обновляет активность в текущей сессии или создает новую"""
+    async def close_user_current_session(self, user_id: int):
+        """
+        Закрывает текущую активную сессию пользователя НЕМЕДЛЕННО.
+        Используется после успешной обработки валидного запроса.
+        """
         try:
-            # Сначала закрываем все неактивные сессии
-            await self.close_inactive_sessions(inactivity_minutes=3)
+            async with aiosqlite.connect(self.db_path, timeout=10.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                current_time = datetime.now()
+                
+                # Находим активную сессию пользователя
+                cursor = await db.execute('''
+                    SELECT us.id, us.session_start,
+                           (SELECT MAX(rm.timestamp)
+                            FROM request_metrics rm
+                            WHERE rm.user_id = us.user_id
+                            AND rm.timestamp >= us.session_start) as last_request
+                    FROM user_sessions us
+                    WHERE us.user_id = ? AND us.is_active = TRUE
+                    ORDER BY us.session_start DESC
+                    LIMIT 1
+                ''', (user_id,))
+                
+                session = await cursor.fetchone()
+                
+                if session:
+                    session_id = session[0]
+                    last_request = session[2]
+                    
+                    # Закрываем сессию, устанавливая session_end = последний запрос + 3 минуты на чтение
+                    if last_request:
+                        session_end = datetime.fromisoformat(last_request) + timedelta(minutes=3)
+                    else:
+                        session_end = current_time
+                    
+                    await db.execute('''
+                        UPDATE user_sessions
+                        SET is_active = FALSE,
+                            session_end = ?
+                        WHERE id = ?
+                    ''', (session_end, session_id))
+                    
+                    await db.commit()
+                    print(f"[SESSION] ✓ Closed session {session_id} for user {user_id} (ended at {session_end})")
+                    return True
+                else:
+                    print(f"[SESSION] No active session found for user {user_id}")
+                    return False
+                    
+        except Exception as e:
+            print(f"[ERROR] Failed to close user session: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    async def update_session_activity(self, user_id: int):
+        """
+        Обновляет активность в текущей сессии или создает новую.
+        ИСПРАВЛЕНО: НЕ создает сессии для незарегистрированных пользователей
+        """
+        try:
+            # КРИТИЧНО: Проверяем, зарегистрирован ли пользователь
+            # Не создаем сессии во время регистрации!
+            user = await self.get_user(user_id)
+            if not user:
+                print(f"[SESSION] Skipping session for unregistered user {user_id}")
+                return
             
-            async with aiosqlite.connect(self.db_path) as db:
+            # Не трекаем админов
+            if user.get('role') == 'admin':
+                return
+            
+            # Сначала закрываем все неактивные сессии (но не ждем долго)
+            try:
+                await asyncio.wait_for(
+                    self.close_inactive_sessions(inactivity_minutes=3),
+                    timeout=5.0
+                )
+            except asyncio.TimeoutError:
+                print(f"[SESSION] Timeout closing inactive sessions, proceeding anyway")
+            except Exception as e:
+                print(f"[SESSION] Error closing inactive sessions: {e}")
+            
+            # Используем timeout для предотвращения блокировки
+            async with aiosqlite.connect(self.db_path, timeout=10.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
                 current_time = datetime.now()
                 three_minutes_ago = current_time - timedelta(minutes=3)
                 
@@ -2011,6 +2234,7 @@ class Database:
                         SET request_count = request_count + 1
                         WHERE id = ?
                     ''', (session[0],))
+                    print(f"[SESSION] ✓ Updated session {session[0]} for user {user_id}")
                 else:
                     # Создаем новую сессию (старые уже закрыты выше)
                     await db.execute('''
@@ -2018,10 +2242,17 @@ class Database:
                         (user_id, session_start, request_count, is_active)
                         VALUES (?, ?, 1, TRUE)
                     ''', (user_id, current_time))
+                    print(f"[SESSION] ✓ Created new session for user {user_id}")
                 
                 await db.commit()
+        except aiosqlite.OperationalError as db_error:
+            print(f"[ERROR] Database error in update_session_activity: {db_error}")
+            import traceback
+            traceback.print_exc()
         except Exception as e:
             print(f"[ERROR] Failed to update session: {e}")
+            import traceback
+            traceback.print_exc()
     
     async def get_dau_metrics(self, days: int = 30):
         """Получает метрики Daily Active Users - ИСКЛЮЧАЯ администраторов"""
@@ -2134,29 +2365,41 @@ class Database:
             return None
     
     async def get_session_metrics(self, days: int = 7):
-        """Получает метрики по сессиям (ИСКЛЮЧАЯ администраторов)"""
+        """
+        Получает метрики по сессиям (ИСКЛЮЧАЯ администраторов).
+        ИСПРАВЛЕНО: считает общую длительность от session_start до session_end (включает время на чтение).
+        """
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
                 
                 start_date = datetime.now() - timedelta(days=days)
                 
+                # Считаем ОБЩУЮ длительность сессии (от начала до конца)
                 cursor = await db.execute('''
                     SELECT
                         COUNT(*) as total_sessions,
-                        AVG(CAST((julianday(us.session_end) - julianday(us.session_start)) * 24 * 60 AS REAL)) as avg_duration_minutes,
-                        AVG(us.request_count) as avg_requests_per_session,
-                        COUNT(DISTINCT us.user_id) as unique_users
-                    FROM user_sessions us
-                    JOIN users u ON us.user_id = u.telegram_id
-                    WHERE us.session_start >= ?
-                    AND us.session_end IS NOT NULL
-                    AND u.role != 'admin'
+                        AVG(
+                            CAST((julianday(session_end) - julianday(session_start)) * 24 * 60 AS REAL)
+                        ) as avg_duration_minutes,
+                        AVG(request_count) as avg_requests_per_session,
+                        COUNT(DISTINCT user_id) as unique_users
+                    FROM user_sessions
+                    WHERE session_start >= ?
+                      AND session_end IS NOT NULL
+                      AND user_id IN (SELECT telegram_id FROM users WHERE role != 'admin')
                 ''', (start_date,))
                 
-                return dict(await cursor.fetchone())
+                result = dict(await cursor.fetchone())
+                
+                # Добавляем пояснение
+                result['note'] = 'Среднее время = от начала до конца сессии (включает чтение материалов, +3 мин после последней активности)'
+                
+                return result
         except Exception as e:
             print(f"[ERROR] Failed to get session metrics: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     async def update_system_metrics(self):
@@ -2373,6 +2616,175 @@ class Database:
         except Exception as e:
             print(f"[ERROR] Failed to get average rating: {e}")
             return 0.0
+    
+    async def get_detailed_session_report(self, days: int = 30):
+        """
+        Получает детальный отчет по сессиям с анализом времени активности.
+        Показывает причины запредельного времени сессий.
+        ИСПРАВЛЕНО: общая длительность от session_start до session_end,
+        активное время - только между валидными запросами.
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                start_date = datetime.now() - timedelta(days=days)
+                
+                # Получаем все завершенные сессии с детальной информацией
+                cursor = await db.execute('''
+                    SELECT
+                        us.id as session_id,
+                        us.user_id,
+                        u.name as user_name,
+                        u.user_type,
+                        u.client_code,
+                        us.session_start,
+                        us.session_end,
+                        us.request_count as total_actions,
+                        -- ОБЩАЯ длительность сессии (от начала до конца, включает +3 мин на чтение)
+                        CAST((julianday(us.session_end) - julianday(us.session_start)) * 24 * 60 AS REAL) as duration_minutes,
+                        -- Подсчет валидных запросов из request_metrics
+                        (SELECT COUNT(*) FROM request_metrics rm
+                         WHERE rm.user_id = us.user_id
+                         AND rm.timestamp >= us.session_start
+                         AND rm.timestamp <= us.session_end) as valid_requests,
+                        -- Получаем первый и последний ВАЛИДНЫЕ запросы
+                        (SELECT MIN(rm.timestamp) FROM request_metrics rm
+                         WHERE rm.user_id = us.user_id
+                         AND rm.timestamp >= us.session_start
+                         AND rm.timestamp <= us.session_end) as first_request_time,
+                        (SELECT MAX(rm.timestamp) FROM request_metrics rm
+                         WHERE rm.user_id = us.user_id
+                         AND rm.timestamp >= us.session_start
+                         AND rm.timestamp <= us.session_end) as last_request_time
+                    FROM user_sessions us
+                    JOIN users u ON us.user_id = u.telegram_id
+                    WHERE us.session_start >= ?
+                      AND us.session_end IS NOT NULL
+                      AND u.role != 'admin'
+                    ORDER BY duration_minutes DESC
+                ''', (start_date,))
+                
+                sessions = await cursor.fetchall()
+                
+                # Обрабатываем каждую сессию для анализа
+                detailed_sessions = []
+                for session in sessions:
+                    session_dict = dict(session)
+                    
+                    # Получаем детальную информацию о ВАЛИДНЫХ запросах в этой сессии
+                    req_cursor = await db.execute('''
+                        SELECT
+                            rm.timestamp,
+                            rm.request_type,
+                            rm.query_text,
+                            rm.response_time,
+                            rm.success,
+                            rm.has_answer
+                        FROM request_metrics rm
+                        WHERE rm.user_id = ?
+                          AND rm.timestamp >= ?
+                          AND rm.timestamp <= ?
+                        ORDER BY rm.timestamp
+                    ''', (session_dict['user_id'],
+                          session_dict['session_start'],
+                          session_dict['session_end']))
+                    
+                    requests = await req_cursor.fetchall()
+                    session_dict['requests'] = [dict(r) for r in requests]
+                    
+                    # Используем количество ВАЛИДНЫХ запросов
+                    valid_requests_count = session_dict['valid_requests']
+                    total_actions = session_dict['total_actions']
+                    
+                    # Вычисляем активное время (между первым и последним валидным запросом)
+                    active_time_minutes = 0
+                    if session_dict['first_request_time'] and session_dict['last_request_time']:
+                        first_req = datetime.fromisoformat(session_dict['first_request_time'])
+                        last_req = datetime.fromisoformat(session_dict['last_request_time'])
+                        active_time_minutes = (last_req - first_req).total_seconds() / 60
+                    
+                    session_dict['active_time_minutes'] = active_time_minutes
+                    session_dict['navigation_actions'] = total_actions - valid_requests_count
+                    
+                    # Анализируем паузы между ВАЛИДНЫМИ запросами
+                    pauses = []
+                    if len(requests) > 1:
+                        for i in range(1, len(requests)):
+                            prev_time = datetime.fromisoformat(requests[i-1]['timestamp'])
+                            curr_time = datetime.fromisoformat(requests[i]['timestamp'])
+                            pause_minutes = (curr_time - prev_time).total_seconds() / 60
+                            pauses.append({
+                                'between_requests': f"{i} и {i+1}",
+                                'pause_minutes': pause_minutes,
+                                'prev_request_type': requests[i-1]['request_type'],
+                                'next_request_type': requests[i]['request_type']
+                            })
+                    
+                    session_dict['pauses'] = pauses
+                    
+                    # Определяем причину долгой сессии
+                    duration = session_dict['duration_minutes']
+                    
+                    reasons = []
+                    
+                    # Анализ времени на чтение (разница между общей длительностью и активным временем)
+                    reading_time = duration - active_time_minutes
+                    if reading_time > 3:
+                        reasons.append(f'📖 Время на изучение материала: {reading_time:.1f} мин')
+                    
+                    # Проверка на очень длинную сессию
+                    if duration > 60:
+                        reasons.append(f'⏰ Очень длинная сессия: {duration:.1f} мин ({duration/60:.1f} ч)')
+                    elif duration > 30:
+                        reasons.append(f'⏰ Длинная сессия: {duration:.1f} мин')
+                    
+                    # Анализ количества запросов
+                    if valid_requests_count == 0:
+                        reasons.append('⚠️ Нет валидных запросов (только навигация по меню)')
+                    elif valid_requests_count > 20:
+                        reasons.append(f'📊 Интенсивное использование: {valid_requests_count} запросов')
+                    
+                    # Анализ соотношения навигации к запросам
+                    if session_dict['navigation_actions'] > valid_requests_count * 2:
+                        reasons.append(f'🔘 Много навигации: {session_dict["navigation_actions"]} действий vs {valid_requests_count} запросов')
+                    
+                    # Анализ пауз между запросами
+                    if pauses:
+                        max_pause = max(p['pause_minutes'] for p in pauses)
+                        if max_pause > 10:
+                            reasons.append(f'⏸️ Длинная пауза между запросами: {max_pause:.1f} мин')
+                        
+                        avg_pause = sum(p['pause_minutes'] for p in pauses) / len(pauses)
+                        if avg_pause > 5:
+                            reasons.append(f'⏱️ Большие средние паузы: {avg_pause:.1f} мин')
+                    
+                    # Проверяем время после последнего запроса (время на изучение ответа)
+                    if session_dict['last_request_time']:
+                        last_req = datetime.fromisoformat(session_dict['last_request_time'])
+                        session_end = datetime.fromisoformat(session_dict['session_end'])
+                        final_reading_time = (session_end - last_req).total_seconds() / 60
+                        
+                        if final_reading_time > 3:
+                            reasons.append(f'📚 Изучение последнего ответа: {final_reading_time:.1f} мин')
+                    
+                    # Если нет особых причин
+                    if not reasons:
+                        if duration > 5:
+                            reasons.append('✅ Нормальная рабочая сессия')
+                        else:
+                            reasons.append('⚡ Быстрая сессия')
+                    
+                    session_dict['analysis_reasons'] = reasons
+                    detailed_sessions.append(session_dict)
+                
+                return detailed_sessions
+                
+        except Exception as e:
+            print(f"[ERROR] Failed to get detailed session report: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
         
      # ============================================================
     # МЕТОДЫ ДЛЯ ГАЛЕРЕИ ПРОБИРОК И КОНТЕЙНЕРОВ

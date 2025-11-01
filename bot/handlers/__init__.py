@@ -13,7 +13,6 @@ from bot.handlers.help import help_router
 from bot.handlers.content import content_router
 from bot.handlers.utils import gif_router, file_router
 from bot.handlers.faq_handler import faq_router
-from bot.handlers.metrics_handler import metrics_router
 from bot.middleware.metrics_middleware import MetricsMiddleware
 # from .questions import questions_router, questions_callbacks_router
 from config import BOT_API_KEY
@@ -39,7 +38,6 @@ dp.include_router(activation_router)
 dp.include_router(content_router)
 dp.include_router(questions_router)
 dp.include_router(admin_router)
-dp.include_router(metrics_router)
 dp.include_router(help_router)
 dp.include_router(gif_router)
 dp.include_router(faq_router)

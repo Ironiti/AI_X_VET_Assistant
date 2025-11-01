@@ -144,7 +144,6 @@ class DataProcessor:
             r'оценк[аиуе]\w*',
             r'профил[ейяю]\w*',
             r'комплексн\w*',
-            r'общ[иейяю]\w*',
             r'расширенн\w*',
             r'стандартн\w*',
             r'мал\w*',
@@ -284,7 +283,9 @@ class DataProcessor:
                     matches.append((doc, 1.0))
             
             return matches[:top_k]
-            
+        
+        for doc, score in self.vector_store.similarity_search_with_score(query.lower(), k=top_k):
+            print(doc.metadata['test_code'])
         return self.vector_store.similarity_search_with_score(query.lower(), k=top_k)
     
     def check_test_codes(self):

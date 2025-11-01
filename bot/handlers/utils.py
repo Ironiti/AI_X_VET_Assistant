@@ -11,7 +11,7 @@ import unicodedata
 import string
 from aiogram.filters import Command
 
-BOT_USERNAME = "AL_VET_UNION_BOT"
+BOT_USERNAME = "ai_x_lab_bot"
 
 gif_router = Router()
 file_router = Router()

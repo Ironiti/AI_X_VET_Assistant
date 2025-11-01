@@ -2225,48 +2225,67 @@ async def export_metrics(message: Message):
             f"❌ Ошибка при экспорте метрик: {str(e)}",
             reply_markup=get_admin_menu_kb()
         )
-
-# # Обработчики для просмотра контента админом (как обычный пользователь)
-# @admin_router.message(F.text == "🖼️ Просмотр галереи")
-# async def admin_view_gallery(message: Message):
-#     """Просмотр галереи админом как пользователем"""
-#     items = await db.get_all_gallery_items()
+@admin_router.message(F.text == "📃 Отчет")
+async def export_session_activity_report(message: Message):
+    """Экспорт детального отчета по времени активности пользователей"""
+    user_id = message.from_user.id
     
-#     if not items:
-#         await message.answer(
-#             "🖼️ Галерея пока пуста.\n"
-#             "Добавьте элементы через 'Управление контентом'.",
-#             reply_markup=get_admin_menu_kb()
-#         )
-#         return
+    user = await db.get_user(user_id)
+    if not user or user['role'] != 'admin':
+        await message.answer("У вас нет доступа к этой функции.")
+        return
     
-#     from bot.handlers.content import create_gallery_keyboard
+    loading_msg = await message.answer(
+        "⏳ Формирую детальный отчет по времени активности...\n\n"
+        "Это может занять некоторое время, так как анализируются:\n"
+        "• Все сессии пользователей\n"
+        "• Паузы между запросами\n"
+        "• Причины длительных сессий\n"
+        "• Рекомендации по оптимизации"
+    )
     
-#     await message.answer(
-#         "🖼️ <b>Галерея пробирок и контейнеров</b>\n\n"
-#         "Выберите интересующий вас элемент:",
-#         parse_mode="HTML",
-#         reply_markup=create_gallery_keyboard(items)
-#     )
-
-# @admin_router.message(F.text == "📄 Просмотр бланков")
-# async def admin_view_blanks(message: Message):
-#     """Просмотр бланков админом как пользователем"""
-#     items = await db.get_all_blank_links()
-    
-#     if not items:
-#         await message.answer(
-#             "📄 Список бланков пока пуст.\n"
-#             "Добавьте бланки через 'Управление контентом'.",
-#             reply_markup=get_admin_menu_kb()
-#         )
-#         return
-    
-#     from bot.handlers.content import create_blanks_keyboard
-    
-#     await message.answer(
-#         "📄 <b>Ссылки на бланки</b>\n\n"
-#         "Выберите нужный бланк для открытия:",
-#         parse_mode="HTML",
-#         reply_markup=create_blanks_keyboard(items)
-#     )
+    try:
+        # Обновляем метрики сессий
+        await db.close_inactive_sessions()
+        
+        exporter = MetricsExporter(db)
+        excel_data = await exporter.export_session_activity_report(days=30)
+        
+        filename = f"session_activity_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        
+        await loading_msg.delete()
+        await message.answer_document(
+            BufferedInputFile(excel_data, filename),
+            caption=(
+                "📃 <b>Детальный отчет по времени активности</b>\n\n"
+                "📊 <b>Что включено:</b>\n"
+                "• <b>Сводка</b> - общая статистика по всем сессиям\n"
+                "• <b>Детали сессий</b> - полная информация по каждой сессии\n"
+                "• <b>Анализ проблем</b> - разбор запредельных сессий (>30 мин)\n"
+                "• <b>Рекомендации</b> - советы по оптимизации\n\n"
+                "🔍 <b>Анализ включает:</b>\n"
+                "• Причины длительных сессий\n"
+                "• Паузы между запросами\n"
+                "• Время на изучение материала\n"
+                "• Проблемные сессии с рекомендациями\n\n"
+                f"📅 Период анализа: последние 30 дней\n"
+                f"🕐 Сформирован: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+            ),
+            parse_mode="HTML",
+            reply_markup=get_admin_menu_kb()
+        )
+        
+    except Exception as e:
+        import traceback
+        error_detail = traceback.format_exc()
+        print(f"[ERROR] Session activity report failed: {error_detail}")
+        
+        await loading_msg.delete()
+        await message.answer(
+            f"❌ Ошибка при формировании отчета:\n{str(e)}\n\n"
+            "Возможные причины:\n"
+            "• Недостаточно данных о сессиях\n"
+            "• Проблемы с базой данных\n"
+            "• Ошибка при создании Excel файла",
+            reply_markup=get_admin_menu_kb()
+        )
