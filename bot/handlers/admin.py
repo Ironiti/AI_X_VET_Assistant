@@ -97,13 +97,6 @@ def get_system_management_kb():
     ]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
-def get_update_bot_kb():
-    """Клавиатура с кнопкой перезапуска бота после обновления"""
-    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-    keyboard = [
-        [InlineKeyboardButton(text="🔄 Установить обновление", callback_data="restart_bot")]
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 @admin_router.message(SystemStates.in_system_menu, F.text == "🧪 Управление фото контейнеров")
 async def manage_container_photos(message: Message, state: FSMContext):
@@ -1235,46 +1228,6 @@ async def process_broadcast_message(message: Message, state: FSMContext):
     await state.update_data(text=message.text)
     await send_broadcast(message, state)
 
-@admin_router.callback_query(F.data == "restart_bot")
-async def restart_bot_handler(callback: CallbackQuery, state: FSMContext):
-    """Обработчик кнопки перезапуска бота"""
-    await callback.answer("♻️ Перезапускаю бот...", show_alert=False)
-    
-    try:
-        # Очищаем состояние пользователя
-        await state.clear()
-        
-        # Отправляем инструкцию и главное меню
-        user_id = callback.from_user.id
-        user = await db.get_user(user_id)
-        
-        if user:
-            # Определяем правильную клавиатуру в зависимости от роли
-            if user.get('role') == 'admin':
-                keyboard = get_admin_menu_kb()
-                menu_text = "✅ Бот успешно обновлен!\n\nГлавное меню администратора:"
-            else:
-                keyboard = get_main_menu_kb()
-                menu_text = "✅ Бот успешно обновлен!\n\nГлавное меню:"
-            
-            await callback.message.answer(
-                menu_text,
-                reply_markup=keyboard
-            )
-        else:
-            # Если пользователь не найден, предлагаем зарегистрироваться
-            await callback.message.answer(
-                "✅ Бот перезапущен!\n\n"
-                "Для начала работы введите команду /start",
-                reply_markup=None
-            )
-        
-    except Exception as e:
-        await callback.message.answer(
-            f"❌ Ошибка при перезапуске: {str(e)}\n\n"
-            "Попробуйте ввести команду /start вручную"
-        )
-
 async def send_broadcast(message: Message, state: FSMContext):
     data = await state.get_data()
     broadcast_type = data['broadcast_type']
@@ -1309,57 +1262,38 @@ async def send_broadcast(message: Message, state: FSMContext):
     success_count = 0
     failed_count = 0
     
-    # Проверяем, содержит ли текст слова об обновлении
-    text_content = data.get('text', '') if content_type == "text" else data.get('caption', '')
-    is_update_message = any(word in text_content.lower() for word in [
-        'обновлен', 'обновил', 'update', 'обнов', 'перезапус', 
-        'перезагруз', 'рестарт', 'restart', 'новая версия'
-    ])
-    
-    # Создаём клавиатуру только если это сообщение об обновлении
-    reply_markup = get_update_bot_kb() if is_update_message else None
-    
-    # Добавляем информацию об обновлении в текст, если это обновление
-    update_notice = ""
-    if is_update_message:
-        update_notice = "\n\n💡 <i>Для обновления бота нажмите на кнопку ниже👇</i>"
-    
     for recipient_id in recipients:
         try:
             if content_type == "text":
-                final_text = f"📢 <b>Сообщение от группы техподдержки</b>\n\n{data.get('text')}{update_notice}"
+                final_text = f"📢 <b>Сообщение от группы техподдержки</b>\n\n{data.get('text')}"
                 await bot.send_message(
                     recipient_id,
                     final_text,
-                    parse_mode="HTML",
-                    reply_markup=reply_markup
+                    parse_mode="HTML"
                 )
             elif content_type == "photo":
-                caption = f"📢 <b>Сообщение от группы техподдержки</b>\n\n{data.get('caption')}{update_notice}" if data.get('caption') else f"📢 <b>Сообщение от группы техподдержки</b>{update_notice}"
+                caption = f"📢 <b>Сообщение от группы техподдержки</b>\n\n{data.get('caption')}" if data.get('caption') else "📢 <b>Сообщение от группы техподдержки</b>"
                 await bot.send_photo(
                     recipient_id,
                     photo=data.get('file_id'),
                     caption=caption,
-                    parse_mode="HTML",
-                    reply_markup=reply_markup
+                    parse_mode="HTML"
                 )
             elif content_type == "video":
-                caption = f"📢 <b>Сообщение от группы техподдержки</b>\n\n{data.get('caption')}{update_notice}" if data.get('caption') else f"📢 <b>Сообщение от группы техподдержки</b>{update_notice}"
+                caption = f"📢 <b>Сообщение от группы техподдержки</b>\n\n{data.get('caption')}" if data.get('caption') else "📢 <b>Сообщение от группы техподдержки</b>"
                 await bot.send_video(
                     recipient_id,
                     video=data.get('file_id'),
                     caption=caption,
-                    parse_mode="HTML",
-                    reply_markup=reply_markup
+                    parse_mode="HTML"
                 )
             elif content_type == "animation":
-                caption = f"📢 <b>Сообщение от группы техподдержки</b>\n\n{data.get('caption')}{update_notice}" if data.get('caption') else f"📢 <b>Сообщение от группы техподдержки</b>{update_notice}"
+                caption = f"📢 <b>Сообщение от группы техподдержки</b>\n\n{data.get('caption')}" if data.get('caption') else "📢 <b>Сообщение от группы техподдержки</b>"
                 await bot.send_animation(
                     recipient_id,
                     animation=data.get('file_id'),
                     caption=caption,
-                    parse_mode="HTML",
-                    reply_markup=reply_markup
+                    parse_mode="HTML"
                 )
             
             success_count += 1
@@ -1368,13 +1302,8 @@ async def send_broadcast(message: Message, state: FSMContext):
             failed_count += 1
             print(f"Failed to send to {recipient_id}: {e}")
     
-    # Добавляем информацию о кнопке перезапуска в отчёт
-    update_info = ""
-    if is_update_message:
-        update_info = "\n\n💡 К сообщению добавлена кнопка перезапуска бота"
-    
     await message.answer(
-        f"✅ Рассылка завершена!{update_info}\n\n"
+        f"✅ Рассылка завершена!\n\n"
         f"📤 Успешно отправлено: {success_count}\n"
         f"❌ Не удалось отправить: {failed_count}",
         reply_markup=get_admin_menu_kb()

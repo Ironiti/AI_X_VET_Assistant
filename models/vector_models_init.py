@@ -14,7 +14,7 @@ import time
 import logging
 from functools import wraps
 
-from config import DEEPINFRA_API_KEY
+from config import OPENROUTER_API_KEY, POLZA_AI_API_KEY
 
 # Настройка логирования
 logger = logging.getLogger(__name__)
@@ -29,6 +29,7 @@ elif torch.backends.mps.is_available():
 else:
     device = torch.device('cpu')
 
+USE_POLZA_AI = True
 
 def retry_with_fallback(max_retries: int = 2, delay: float = 1.0):
     """Декоратор для повторных попыток с fallback"""
@@ -109,17 +110,24 @@ class QwenEmbeddings(Embeddings):
 
         # Determine remote vs local
         if use_remote is None:
-            self.use_remote = bool(DEEPINFRA_API_KEY)
+            self.use_remote = bool(OPENROUTER_API_KEY)
         else:
             self.use_remote = use_remote
 
+
+        if USE_POLZA_AI:
+            api_url = 'https://api.polza.ai/api/v1'
+            api_key = POLZA_AI_API_KEY
+        else:
+            api_url = 'https://openrouter.ai/api/v1'
+            api_key = OPENROUTER_API_KEY
+
         if self.use_remote:
-            api_key = DEEPINFRA_API_KEY
             if not api_key:
                 raise ValueError('DEEPINFRA_API_KEY not set for remote embeddings')
             self.client = OpenAI(
                 api_key=api_key,
-                base_url='https://api.deepinfra.com/v1/openai'
+                base_url=api_url
             )
             print(f'[INFO] Using DeepInfra remote embeddings for model: {model_name}')
         else:
@@ -235,16 +243,26 @@ class QwenEmbeddings(Embeddings):
         return self.current_model.model_name
 
 
+
+
+
+if USE_POLZA_AI:
+    pr_model = 'text-embedding-3-large'
+    fa_model = 'text-embedding-3-large'
+else:
+    pr_model = 'qwen/qwen3-embedding-8b'
+    fa_model = 'qwen/qwen3-embedding-8b'
+
 # Создаем основную модель (4B) с fallback на 8B
 primary_model = QwenEmbeddings(
-    model_name='Qwen/Qwen3-Embedding-4B', 
+    model_name=pr_model, 
     task_prompt=task_prompt, 
     use_remote=True
 )
 
 # Создаем fallback модель (8B)
 fallback_model = QwenEmbeddings(
-    model_name='Qwen/Qwen3-Embedding-8B',
+    model_name=fa_model,
     task_prompt=task_prompt, 
     use_remote=True
 )

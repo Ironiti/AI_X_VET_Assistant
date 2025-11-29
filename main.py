@@ -3,6 +3,7 @@ import logging
 from datetime import datetime
 from bot.handlers import bot, dp
 from src.database.db_init import db
+from utils.monthly_metrics_scheduler import monthly_scheduler
 
 # Настройка логирования
 logging.basicConfig(
@@ -93,6 +94,10 @@ async def startup_tasks():
         await db.update_quality_metrics()
         logger.info("[STARTUP] Initial metrics updated")
         
+        # Запускаем scheduler для ежемесячной отправки метрик
+        await monthly_scheduler.start()
+        logger.info("[STARTUP] Monthly metrics scheduler started")
+        
     except Exception as e:
         logger.error(f"[STARTUP] Error during startup: {e}")
         raise
@@ -102,6 +107,10 @@ async def shutdown_tasks():
     """Выполняет задачи при остановке бота"""
     try:
         logger.info("[SHUTDOWN] Starting graceful shutdown...")
+        
+        # Останавливаем scheduler ежемесячных метрик
+        await monthly_scheduler.stop()
+        logger.info("[SHUTDOWN] Monthly metrics scheduler stopped")
         
         # Устанавливаем флаг остановки
         shutdown_event.set()

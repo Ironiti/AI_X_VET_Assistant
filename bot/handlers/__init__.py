@@ -14,6 +14,7 @@ from bot.handlers.content import content_router
 from bot.handlers.utils import gif_router, file_router
 from bot.handlers.faq_handler import faq_router
 from bot.middleware.metrics_middleware import MetricsMiddleware
+from bot.middleware.state_recovery_middleware import StateRecoveryMiddleware
 # from .questions import questions_router, questions_callbacks_router
 from config import BOT_API_KEY
 
@@ -26,7 +27,12 @@ bot = Bot(
 )
 dp = Dispatcher(storage=MemoryStorage())
 
+# Регистрация middleware (порядок важен!)
+# 1. StateRecoveryMiddleware - восстанавливает состояние после перезагрузки
+dp.message.middleware(StateRecoveryMiddleware())
+dp.callback_query.middleware(StateRecoveryMiddleware())
 
+# 2. MetricsMiddleware - записывает метрики
 dp.message.middleware(MetricsMiddleware())
 dp.callback_query.middleware(MetricsMiddleware())
 

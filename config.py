@@ -7,6 +7,7 @@ load_dotenv()
 BOT_API_KEY = os.getenv('BOT_API_KEY')
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
 DEEPINFRA_API_KEY = os.getenv('DEEPINFRA_API_KEY')
+POLZA_AI_API_KEY = os.getenv('POLZA_AI_API_KEY')
 
 # Gmail SMTP config
 EMAIL_HOST = os.getenv('EMAIL_HOST', 'smtp.gmail.com')

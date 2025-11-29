@@ -248,16 +248,19 @@ class MetricsExporter:
         # 1. Сводный лист (Executive Dashboard)
         await self._create_summary_sheet(workbook, formats, days)
         
-        # 2. Клиентские метрики
+        # 2. Лист с инструкциями (новый)
+        await self._create_instructions_sheet(workbook, formats)
+        
+        # 3. Клиентские метрики
         await self._create_client_metrics_sheet(workbook, formats, days)
         
-        # 3. Технические метрики
+        # 4. Технические метрики
         await self._create_technical_metrics_sheet(workbook, formats, days)
         
-        # 4. Метрики качества
+        # 5. Метрики качества
         await self._create_quality_metrics_sheet(workbook, formats, days)
         
-        # 5. Детальные данные
+        # 6. Детальные данные
         await self._create_detailed_data_sheet(workbook, formats, days)
         
         workbook.close()
@@ -297,7 +300,7 @@ class MetricsExporter:
             return
         
         # ===== КЛЮЧЕВЫЕ ПОКАЗАТЕЛИ (KPI) =====
-        worksheet.merge_range(row, 0, row, 2, 
+        worksheet.merge_range(row, 0, row, 2,
                             '🎯 КЛЮЧЕВЫЕ ПОКАЗАТЕЛИ ЭФФЕКТИВНОСТИ',
                             formats['section_header'])
         worksheet.set_row(row, 25)
@@ -310,30 +313,28 @@ class MetricsExporter:
         if dau_list and len(dau_list) > 0:
             avg_dau = sum(d.get('dau', 0) for d in dau_list) / len(dau_list)
             worksheet.write(row, 0, '👥 Средний DAU (активных пользователей в день)', formats['metric_label'])
-            kpi_format = formats['kpi_high'] if avg_dau >= 50 else formats['kpi_medium'] if avg_dau >= 20 else formats['kpi_low']
+            kpi_format = formats['kpi_high'] if avg_dau >= 15 else formats['kpi_medium'] if avg_dau >= 5 else formats['kpi_low']
             worksheet.write(row, 1, avg_dau, kpi_format)
             worksheet.write(row, 2, 'пользователей', formats['metric_value'])
             row += 1
         
         # Коэффициент точности
-        tech = metrics.get('technical_metrics', {})
-        perf = tech.get('response_time', {})
-        overall = perf.get('overall', {}) if perf else {}
-        total_requests = overall.get('total_requests', 0)
-        successful_requests = overall.get('successful_requests', 0)
-        accuracy = (successful_requests / total_requests * 100) if total_requests > 0 else 0
+        quality = metrics.get('quality_metrics', {})
+        total_queries = quality.get('total', 0)
+        correct_answers = quality.get('correct', 0)
+        accuracy = (correct_answers / total_queries * 100) if total_queries > 0 else 0
         
         worksheet.write(row, 0, '✅ Коэффициент точности ответов', formats['metric_label'])
-        kpi_format = formats['kpi_high'] if accuracy >= 80 else formats['kpi_medium'] if accuracy >= 60 else formats['kpi_low']
+        kpi_format = formats['kpi_high'] if accuracy >= 95 else formats['kpi_medium'] if accuracy >= 90 else formats['kpi_low']
         worksheet.write(row, 1, accuracy / 100, kpi_format)
-        worksheet.write(row, 2, f'{successful_requests}/{total_requests}', formats['metric_value'])
+        worksheet.write(row, 2, f'{correct_answers}/{total_queries} вопросов', formats['metric_value'])
         row += 1
         
         # Средний рейтинг
         worksheet.write(row, 0, '⭐ Средняя оценка пользователей', formats['metric_label'])
-        kpi_format = formats['kpi_high'] if avg_rating >= 4.0 else formats['kpi_medium'] if avg_rating >= 3.0 else formats['kpi_low']
+        kpi_format = formats['kpi_high'] if avg_rating >= 4.0 else formats['kpi_medium'] if avg_rating >= 3.5 else formats['kpi_low']
         worksheet.write(row, 1, avg_rating, kpi_format)
-        worksheet.write(row, 2, 'из 5.00', formats['metric_value'])
+        worksheet.write(row, 2, 'из 5,00', formats['metric_value'])
         row += 2
         
         # ===== КЛИЕНТСКАЯ АКТИВНОСТЬ =====
@@ -352,19 +353,19 @@ class MetricsExporter:
             ret_1d = retention.get('retention_1d', 0)
             worksheet.write(row, 0, '  • Retention 1 день', formats['metric_label'])
             worksheet.write(row, 1, ret_1d / 100, formats['metric_percent'])
-            worksheet.write(row, 2, self._get_retention_status(ret_1d), formats['cell_data'])
+            worksheet.write(row, 2, self._get_retention_status_1d(ret_1d), formats['cell_data'])
             row += 1
             
             ret_7d = retention.get('retention_7d', 0)
             worksheet.write(row, 0, '  • Retention 7 дней', formats['metric_label'])
             worksheet.write(row, 1, ret_7d / 100, formats['metric_percent'])
-            worksheet.write(row, 2, self._get_retention_status(ret_7d), formats['cell_data'])
+            worksheet.write(row, 2, self._get_retention_status_7d(ret_7d), formats['cell_data'])
             row += 1
             
             ret_30d = retention.get('retention_30d', 0)
             worksheet.write(row, 0, '  • Retention 30 дней', formats['metric_label'])
             worksheet.write(row, 1, ret_30d / 100, formats['metric_percent'])
-            worksheet.write(row, 2, self._get_retention_status(ret_30d), formats['cell_data'])
+            worksheet.write(row, 2, self._get_retention_status_30d(ret_30d), formats['cell_data'])
             row += 1
         
         row += 1
@@ -387,12 +388,12 @@ class MetricsExporter:
             kpi_format_duration = workbook.add_format({
                 'bold': True,
                 'font_size': 14,
-                'font_color': '#10B981' if avg_duration >= 5 else '#F59E0B' if avg_duration >= 2 else '#EF4444',
-                'bg_color': '#ECFDF5' if avg_duration >= 5 else '#FFFBEB' if avg_duration >= 2 else '#FEF2F2',
+                'font_color': '#10B981' if 2 <= avg_duration <= 5 else '#F59E0B' if avg_duration < 2 or 5 < avg_duration <= 10 else '#EF4444',
+                'bg_color': '#ECFDF5' if 2 <= avg_duration <= 5 else '#FFFBEB' if avg_duration < 2 or 5 < avg_duration <= 10 else '#FEF2F2',
                 'align': 'center',
                 'valign': 'vcenter',
                 'border': 2,
-                'border_color': '#10B981' if avg_duration >= 5 else '#F59E0B' if avg_duration >= 2 else '#EF4444',
+                'border_color': '#10B981' if 2 <= avg_duration <= 5 else '#F59E0B' if avg_duration < 2 or 5 < avg_duration <= 10 else '#EF4444',
                 'num_format': '0.00'
             })
             worksheet.write(row, 1, avg_duration, kpi_format_duration)
@@ -410,13 +411,6 @@ class MetricsExporter:
             worksheet.write(row, 1, total_activity_time, formats['metric_decimal'])
             worksheet.write(row, 2, 'минут', formats['metric_value'])
             row += 1
-            
-            # Среднее время в часах для удобства
-            avg_hours = avg_duration / 60
-            worksheet.write(row, 0, '  🕐 Средняя длительность (часы)', formats['metric_label'])
-            worksheet.write(row, 1, avg_hours, formats['metric_decimal'])
-            worksheet.write(row, 2, 'часов', formats['metric_value'])
-            row += 1
         else:
             worksheet.write(row, 0, '⏱️ Средняя длительность сессии', formats['metric_label'])
             worksheet.merge_range(row, 1, row, 2, 'Данные недоступны', formats['metric_value'])
@@ -424,7 +418,9 @@ class MetricsExporter:
         
         row += 1
         
-        # Количество обращений
+        row += 1
+        
+        # Объем обращений
         if dau_list:
             worksheet.merge_range(row, 0, row, 2, 'Объем обращений', formats['subsection_header'])
             row += 1
@@ -452,15 +448,79 @@ class MetricsExporter:
         worksheet.set_row(row, 25)
         row += 1
         
+        # Получаем данные о времени ответа
+        tech = metrics.get('technical_metrics', {})
+        perf = tech.get('response_time', {})
+        overall = perf.get('overall', {}) if perf else {}
+        
         if overall:
+            total_requests = overall.get('total_requests', 0)
+            
+            # Подсчет запросов по времени ответа
+            import aiosqlite
+            start_date = datetime.now() - timedelta(days=days)
+            async with aiosqlite.connect(self.db.db_path) as db:
+                # До 3 секунд
+                cursor = await db.execute('''
+                    SELECT COUNT(*) FROM request_metrics
+                    WHERE timestamp >= ? AND response_time < 3
+                ''', (start_date,))
+                under_3_sec = (await cursor.fetchone())[0]
+                
+                # До 6 секунд
+                cursor = await db.execute('''
+                    SELECT COUNT(*) FROM request_metrics
+                    WHERE timestamp >= ? AND response_time < 6
+                ''', (start_date,))
+                under_6_sec = (await cursor.fetchone())[0]
+                
+                # После 10 секунд
+                cursor = await db.execute('''
+                    SELECT COUNT(*) FROM request_metrics
+                    WHERE timestamp >= ? AND response_time > 10
+                ''', (start_date,))
+                over_10_sec = (await cursor.fetchone())[0]
+            
+            # Скорость ответа до 3 секунд
+            pct_3_sec = (under_3_sec / total_requests * 100) if total_requests > 0 else 0
+            worksheet.write(row, 0, '⚡ Скорость ответа до 3 секунд (%)', formats['metric_label'])
+            worksheet.write(row, 1, pct_3_sec / 100, formats['metric_percent'])
+            worksheet.write(row, 2, '%', formats['metric_value'])
+            row += 1
+            
+            # Скорость ответа до 6 секунд
+            pct_6_sec = (under_6_sec / total_requests * 100) if total_requests > 0 else 0
+            worksheet.write(row, 0, '⚡ Скорость ответа до 6 секунд (%)', formats['metric_label'])
+            pct_format = formats['good'] if pct_6_sec >= 95 else formats['warning'] if pct_6_sec >= 90 else formats['bad']
+            worksheet.write(row, 1, pct_6_sec / 100, pct_format)
+            worksheet.write(row, 2, '%', formats['metric_value'])
+            row += 1
+            
+            # Скорость ответа после 10 секунд
+            pct_10_sec = (over_10_sec / total_requests * 100) if total_requests > 0 else 0
+            worksheet.write(row, 0, '🔴 Скорость ответа после 10 секунд (%)', formats['metric_label'])
+            pct_format = formats['good'] if pct_10_sec < 2 else formats['warning'] if pct_10_sec < 5 else formats['bad']
+            worksheet.write(row, 1, pct_10_sec / 100, pct_format)
+            worksheet.write(row, 2, '%', formats['metric_value'])
+            row += 1
+            
+            # Среднее время ответа
             avg_response = overall.get('avg_response_time', 0)
             worksheet.write(row, 0, '⏱️ Среднее время ответа', formats['metric_label'])
             worksheet.write(row, 1, avg_response, formats['metric_decimal'])
             worksheet.write(row, 2, 'секунд', formats['metric_value'])
             row += 1
             
+            # Минимальное время ответа
+            min_response = overall.get('min_response_time', 0)
+            worksheet.write(row, 0, '⚡ Минимальное время ответа', formats['metric_label'])
+            worksheet.write(row, 1, min_response, formats['metric_decimal'])
+            worksheet.write(row, 2, 'секунд', formats['metric_value'])
+            row += 1
+            
+            # Максимальное время ответа (с учетом аварийных случаев)
             max_response = overall.get('max_response_time', 0)
-            worksheet.write(row, 0, '⏱️ Максимальное время ответа', formats['metric_label'])
+            worksheet.write(row, 0, '🔴 Максимальное время с учетом аварийных случаев', formats['metric_label'])
             worksheet.write(row, 1, max_response, formats['metric_decimal'])
             worksheet.write(row, 2, 'секунд', formats['metric_value'])
             row += 2
@@ -502,12 +562,30 @@ class MetricsExporter:
             worksheet.write(row, 2, f'{no_answer} запросов', formats['metric_value'])
             row += 1
     
-    def _get_retention_status(self, retention_pct):
-        """Возвращает статус retention"""
-        if retention_pct >= 40:
+    def _get_retention_status_1d(self, retention_pct):
+        """Возвращает статус retention 1 день"""
+        if retention_pct >= 35:
             return '🟢 Отлично'
         elif retention_pct >= 20:
-            return '🟡 Хорошо'
+            return '🟡 Норма'
+        else:
+            return '🔴 Требует внимания'
+    
+    def _get_retention_status_7d(self, retention_pct):
+        """Возвращает статус retention 7 дней"""
+        if retention_pct >= 20:
+            return '🟢 Отлично'
+        elif retention_pct >= 10:
+            return '🟡 Норма'
+        else:
+            return '🔴 Требует внимания'
+    
+    def _get_retention_status_30d(self, retention_pct):
+        """Возвращает статус retention 30 дней"""
+        if retention_pct >= 15:
+            return '🟢 Отлично'
+        elif retention_pct >= 8:
+            return '🟡 Норма'
         else:
             return '🔴 Требует внимания'
     
@@ -834,6 +912,230 @@ class MetricsExporter:
                 status_text = '✅ Успешно'
             worksheet.write(row, 5, status_text, formats['cell_data'])
             
+            row += 1
+    
+    async def _create_instructions_sheet(self, workbook, formats):
+        """Создает лист с инструкциями по интерпретации метрик"""
+        worksheet = workbook.add_worksheet('📖 Инструкции')
+        
+        # Настройка колонок
+        worksheet.set_column('A:A', 30)  # Метрика
+        worksheet.set_column('B:B', 50)  # Что обозначает
+        worksheet.set_column('C:C', 25)  # Норма
+        worksheet.set_column('D:D', 80)  # Интерпретация
+        
+        row = 0
+        
+        # Главный заголовок
+        worksheet.merge_range(row, 0, row, 3,
+                            'ИНСТРУКЦИЯ ПО ИНТЕРПРЕТАЦИИ МЕТРИК',
+                            formats['main_title'])
+        worksheet.set_row(row, 30)
+        row += 2
+        
+        # === КЛЮЧЕВЫЕ ПОКАЗАТЕЛИ ЭФФЕКТИВНОСТИ ===
+        worksheet.merge_range(row, 0, row, 3,
+                            '🎯 КЛЮЧЕВЫЕ ПОКАЗАТЕЛИ ЭФФЕКТИВНОСТИ',
+                            formats['section_header'])
+        row += 1
+        
+        # Заголовки таблицы
+        headers = ['Метрика', 'Что обозначает', 'Норма', 'Интерпретация']
+        for col, header in enumerate(headers):
+            worksheet.write(row, col, header, formats['table_header'])
+        row += 1
+        
+        # Данные по KPI
+        kpi_data = [
+            ('Средний DAU', 'Среднее число уникальных пользователей в день',
+             '5 - 15% от месячной активности пользователей',
+             '🔴 < 5 — низкая вовлечённость\n🟢 5–15 — норма\n🟢 >15 — высокая интеграция'),
+            
+            ('Коэффициент точности ответов', 'Доля корректных ответов среди оцененных',
+             '≥ 95%',
+             '🔴 < 90% — проблемы с контентом\n🟢 ≥ 95% — высокий показатель понимания сути'),
+            
+            ('Средняя оценка пользователей', 'Удовлетворенность по шкале 1–5',
+             '≥ 4.0',
+             '🔴 < 3.5 — низкое восприятие\n🟢 ≥ 4.0 — пользователи довольны'),
+        ]
+        
+        for metric, meaning, norm, interpretation in kpi_data:
+            worksheet.write(row, 0, metric, formats['cell_data'])
+            worksheet.write(row, 1, meaning, formats['cell_data'])
+            worksheet.write(row, 2, norm, formats['cell_data'])
+            worksheet.write(row, 3, interpretation, formats['cell_data'])
+            row += 1
+        
+        row += 1
+        
+        # === КЛИЕНТСКАЯ АКТИВНОСТЬ (RETENTION) ===
+        worksheet.merge_range(row, 0, row, 3,
+                            '👥 КЛИЕНТСКАЯ АКТИВНОСТЬ (RETENTION)',
+                            formats['section_header'])
+        row += 1
+        
+        # Заголовки таблицы
+        for col, header in enumerate(headers):
+            worksheet.write(row, col, header, formats['table_header'])
+        row += 1
+        
+        # Данные по Retention
+        retention_data = [
+            ('Retention 1 день', 'Доля пользователей, вернувшихся на следующий день',
+             '20–35%',
+             '🔴 < 20% — первый опыт не мотивирует вернуться\n🟢 20–35% — норма\n🟢 >35% — отличный показатель'),
+            
+            ('Retention 7 дней', '% пользователей, обращающихся к системе повторно в течение недели',
+             '10–20%',
+             '🔴 < 10% — низкая ценность для повторного использования\n🟢 10–20% — хороший показатель для эпизодических запросов'),
+            
+            ('Retention 30 дней', 'Долгосрочная востребованность: сколько пользователей возвращаются спустя месяц',
+             '8–15%',
+             '🔴 < 5% — Низкий показатель\n🟢 ≥ 8% — норма'),
+        ]
+        
+        for metric, meaning, norm, interpretation in retention_data:
+            worksheet.write(row, 0, metric, formats['cell_data'])
+            worksheet.write(row, 1, meaning, formats['cell_data'])
+            worksheet.write(row, 2, norm, formats['cell_data'])
+            worksheet.write(row, 3, interpretation, formats['cell_data'])
+            row += 1
+        
+        row += 1
+        
+        # === ВРЕМЯ АКТИВНОСТИ ПОЛЬЗОВАТЕЛЕЙ ===
+        worksheet.merge_range(row, 0, row, 3,
+                            '⏱️ ВРЕМЯ АКТИВНОСТИ ПОЛЬЗОВАТЕЛЕЙ',
+                            formats['section_header'])
+        row += 1
+        
+        # Заголовки таблицы
+        for col, header in enumerate(headers):
+            worksheet.write(row, col, header, formats['table_header'])
+        row += 1
+        
+        # Данные по времени активности
+        activity_data = [
+            ('Средняя длительность сессии', 'Среднее время, которое пользователь проводит в боте за одну сессию',
+             '2–5 минут',
+             '🔴 < 1 мин — пользователь не находит нужное\n🟢 2–5 мин — оптимально\n🔴 > 10 мин — возможны сложности с навигацией или поиском'),
+            
+            ('Всего сессий за период', 'Общее число сессий всех пользователей за отчётный период',
+             'Не нормируется, но важна стабильность или рост',
+             '📉 Резкое снижение — сигнал к анализу вовлечённости\n📈 Пик активности — повод изучить внешние триггеры (обучение, рассылка и др.)'),
+            
+            ('Суммарное время активности', 'Общее время всех пользователей в боте за период',
+             'Не нормируется',
+             'Используется для расчёта средних значений и оценки общей нагрузки на систему'),
+        ]
+        
+        for metric, meaning, norm, interpretation in activity_data:
+            worksheet.write(row, 0, metric, formats['cell_data'])
+            worksheet.write(row, 1, meaning, formats['cell_data'])
+            worksheet.write(row, 2, norm, formats['cell_data'])
+            worksheet.write(row, 3, interpretation, formats['cell_data'])
+            row += 1
+        
+        row += 1
+        
+        # === ОБЪЁМ ОБРАЩЕНИЙ ===
+        worksheet.merge_range(row, 0, row, 3,
+                            '📊 ОБЪЁМ ОБРАЩЕНИЙ',
+                            formats['section_header'])
+        row += 1
+        
+        # Заголовки таблицы
+        for col, header in enumerate(headers):
+            worksheet.write(row, col, header, formats['table_header'])
+        row += 1
+        
+        # Данные по объему обращений
+        volume_data = [
+            ('Запросов за день / неделю / месяц', 'Интенсивность использования бота',
+             'Не нормируется',
+             '🟢 Низкий, но стабильный объём — типично для профессиональных инструментов\n🔴 Полное отсутствие активности в течение недели — требует проверки доступности и вовлечённости'),
+        ]
+        
+        for metric, meaning, norm, interpretation in volume_data:
+            worksheet.write(row, 0, metric, formats['cell_data'])
+            worksheet.write(row, 1, meaning, formats['cell_data'])
+            worksheet.write(row, 2, norm, formats['cell_data'])
+            worksheet.write(row, 3, interpretation, formats['cell_data'])
+            row += 1
+        
+        row += 1
+        
+        # === ПРОИЗВОДИТЕЛЬНОСТЬ СИСТЕМЫ ===
+        worksheet.merge_range(row, 0, row, 3,
+                            '⚡ ПРОИЗВОДИТЕЛЬНОСТЬ СИСТЕМЫ',
+                            formats['section_header'])
+        row += 1
+        
+        # Заголовки таблицы
+        for col, header in enumerate(headers):
+            worksheet.write(row, col, header, formats['table_header'])
+        row += 1
+        
+        # Данные по производительности
+        performance_data = [
+            ('Ответы < 6 сек', 'Доля запросов, обработанных менее чем за 6 секунд',
+             '≥ 95%',
+             ''),
+            
+            ('Ответы > 10 сек', 'Доля запросов с длительной обработкой',
+             '≤ 2%',
+             ''),
+            
+            ('Среднее время ответа', 'Средняя скорость генерации ответа',
+             '< 6 секунд',
+             ''),
+            
+            ('Максимальное время', 'Самое долгое время обработки за период (включая аварийные случаи)',
+             '< 30 секунд',
+             '🔴 Превышение — признак неоптимального запроса или технической проблемы, требует анализа'),
+        ]
+        
+        for metric, meaning, norm, interpretation in performance_data:
+            worksheet.write(row, 0, metric, formats['cell_data'])
+            worksheet.write(row, 1, meaning, formats['cell_data'])
+            worksheet.write(row, 2, norm, formats['cell_data'])
+            worksheet.write(row, 3, interpretation, formats['cell_data'])
+            row += 1
+        
+        row += 1
+        
+        # === КАЧЕСТВО ОБСЛУЖИВАНИЯ ===
+        worksheet.merge_range(row, 0, row, 3,
+                            '🎯 КАЧЕСТВО ОБСЛУЖИВАНИЯ',
+                            formats['section_header'])
+        row += 1
+        
+        # Заголовки таблицы
+        for col, header in enumerate(headers):
+            worksheet.write(row, col, header, formats['table_header'])
+        row += 1
+        
+        # Данные по качеству
+        quality_data = [
+            ('Корректных ответов', 'Доля запросов с точной и полезной информацией',
+             '≥ 95%',
+             '🟢 Высокий уровень надёжности\n < 90% — база знаний требует расширения или коррекции'),
+            
+            ('Некорректных ответов', 'Доля ошибочных или вводящих в заблуждение ответов',
+             '0%',
+             '🔴 Любое значение > 0 — недопустимо в контексте (риск ошибок)'),
+            
+            ('Без ответа', 'Доля запросов, по которым система не выдала информацию',
+             '≤ 5%',
+             '🟢 Допустимо для редких или нестандартных формулировок, которых нет в предоставленном материале\n🔴 > 5% — указывает на пробелы в базе знаний или проблемы с обработкой свободной речи'),
+        ]
+        
+        for metric, meaning, norm, interpretation in quality_data:
+            worksheet.write(row, 0, metric, formats['cell_data'])
+            worksheet.write(row, 1, meaning, formats['cell_data'])
+            worksheet.write(row, 2, norm, formats['cell_data'])
+            worksheet.write(row, 3, interpretation, formats['cell_data'])
             row += 1
     
     async def export_dau_report(self, days: int = 30) -> bytes:

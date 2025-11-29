@@ -1285,16 +1285,16 @@ class Database:
             # Теперь коммитим все изменения
             await db.commit()
     
-    async def add_client(self, telegram_id: int, name: str, client_code: str,
-                        specialization: str, country: str = 'RU'):
+    async def add_client(self, telegram_id: int, name: str, client_code: str, 
+                        specialization: str, country: str = 'BY'):
         """Добавление клиента (ветеринарной клиники)"""
         async with aiosqlite.connect(self.db_path) as db:
             try:
                 await db.execute('''
-                    INSERT INTO users (telegram_id, user_type, name, client_code,
+                    INSERT INTO users (telegram_id, user_type, name, client_code, 
                                      specialization, country, registration_date, role)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (telegram_id, 'client', name, client_code, specialization,
+                ''', (telegram_id, 'client', name, client_code, specialization, 
                      country, datetime.now(), 'user'))
                 await db.commit()
                 
@@ -1306,15 +1306,15 @@ class Database:
             except aiosqlite.IntegrityError:
                 return False
     
-    async def add_employee(self, telegram_id: int, name: str, region: str, department_function: str, country: str = 'RU'):
+    async def add_employee(self, telegram_id: int, name: str, region: str, department_function: str, country: str = 'BY'):
         """Добавление сотрудника только с именем (без фамилии)"""
         async with aiosqlite.connect(self.db_path) as db:
             try:
                 await db.execute('''
-                    INSERT INTO users (telegram_id, user_type, name, first_name,
+                    INSERT INTO users (telegram_id, user_type, name,
                                     region, department_function, country, registration_date, role)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (telegram_id, 'employee', name, name,
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (telegram_id, 'employee', name, 
                     region, department_function, country, datetime.now(), 'user'))
                 await db.commit()
                 
@@ -1998,8 +1998,6 @@ class Database:
         ИСПРАВЛЕНО: НЕ трекает незарегистрированных пользователей
         """
         try:
-            # КРИТИЧНО: Проверяем, зарегистрирован ли пользователь
-            # Не трекаем активность во время регистрации!
             try:
                 user = await self.get_user(user_id)
                 if not user:
@@ -2193,7 +2191,11 @@ class Database:
             # Не трекаем админов
             if user.get('role') == 'admin':
                 return
-            
+        except Exception as e:
+            print(f"[ERROR] Failed to check user in update_session_activity: {e}")
+            return
+        
+        try:
             # Сначала закрываем все неактивные сессии (но не ждем долго)
             try:
                 await asyncio.wait_for(
@@ -2785,6 +2787,64 @@ class Database:
             import traceback
             traceback.print_exc()
             return []
+    
+    async def clear_monthly_metrics(self):
+        """
+        Очищает все данные метрик за текущий месяц.
+        Используется для начала нового отчетного периода.
+        Возвращает словарь с количеством удаленных записей из каждой таблицы.
+        """
+        try:
+            deleted_counts = {}
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                # 1. Очистка детальных метрик запросов
+                cursor = await db.execute('DELETE FROM request_metrics')
+                deleted_counts['request_metrics'] = cursor.rowcount
+                
+                # 2. Очистка агрегированных ежедневных метрик
+                cursor = await db.execute('DELETE FROM bot_metrics')
+                deleted_counts['bot_metrics'] = cursor.rowcount
+                
+                # 3. Очистка активности пользователей (DAU)
+                cursor = await db.execute('DELETE FROM user_activity')
+                deleted_counts['user_activity'] = cursor.rowcount
+                
+                # 4. Очистка сессий пользователей
+                cursor = await db.execute('DELETE FROM user_sessions')
+                deleted_counts['user_sessions'] = cursor.rowcount
+                
+                # 5. Очистка системных метрик
+                cursor = await db.execute('DELETE FROM system_metrics')
+                deleted_counts['system_metrics'] = cursor.rowcount
+                
+                # 6. Очистка метрик качества
+                cursor = await db.execute('DELETE FROM quality_metrics')
+                deleted_counts['quality_metrics'] = cursor.rowcount
+                
+                # 7. Очистка оценок пользователей
+                cursor = await db.execute('DELETE FROM response_ratings')
+                deleted_counts['response_ratings'] = cursor.rowcount
+                
+                await db.commit()
+                
+                # Вычисляем общее количество удаленных записей
+                total_deleted = sum(deleted_counts.values())
+                deleted_counts['total'] = total_deleted
+                
+                print(f"[METRICS CLEANUP] Successfully cleared all metrics tables:")
+                for table, count in deleted_counts.items():
+                    if table != 'total':
+                        print(f"  - {table}: {count} records")
+                print(f"  Total: {total_deleted} records deleted")
+                
+                return deleted_counts
+                
+        except Exception as e:
+            print(f"[ERROR] Failed to clear monthly metrics: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
         
      # ============================================================
     # МЕТОДЫ ДЛЯ ГАЛЕРЕИ ПРОБИРОК И КОНТЕЙНЕРОВ
