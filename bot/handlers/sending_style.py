@@ -318,7 +318,7 @@ def format_test_info(test_data: Dict) -> str:
             "Номер контейнера для хранения и транспортировки",
         ),
         "preanalytics": ("📋preanalytics", "Преаналитика"),
-        "storage_temp": ("❄️storage_temp", "Температура"),
+        "storage_temp": ("🌡️storage_temp", "Температура"),
         "poss_postorder_container": (
             "⏳poss_postorder_container",
             "Возможность дозаказа с момента взятия биоматериала",

@@ -117,10 +117,9 @@ def get_department_function_kb():
 def get_main_menu_kb():
     """Единое меню для всех пользователей (кроме админа)"""
     kb = [
-        [KeyboardButton(text="🔬 Задать вопрос ассистенту")],
+        [KeyboardButton(text="🔬 Задать вопрос"), KeyboardButton(text="📋 Стоп-лист")],
         # [KeyboardButton(text="📚 Часто задаваемые вопросы")],
-        [KeyboardButton(text="🖼️ Галерея пробирок и контейнеров")],
-        [KeyboardButton(text="📄 Бланки и документы")],
+        [KeyboardButton(text="🖼️ Галерея пробирок"), KeyboardButton(text="📄 Скачать бланки")],
         [KeyboardButton(text="📞 Связь с лабораторией")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
@@ -141,12 +140,14 @@ def get_admin_menu_kb():
         [KeyboardButton(text="📢 Рассылка")],
         
         # Контент и система
+        [KeyboardButton(text="⚙️ Управление стоп-листом")],
         [KeyboardButton(text="🎨 Управление контентом"), KeyboardButton(text="📚 Часто задаваемые вопросы")],
         [KeyboardButton(text="🔧 Управление системой")],
         
         # Основные функции
-        [KeyboardButton(text="🔬 Задать вопрос ассистенту")],
-        [KeyboardButton(text="🖼️ Галерея пробирок и контейнеров"), KeyboardButton(text="📄 Бланки и документы")],
+        [KeyboardButton(text="🔬 Задать вопрос")],
+        [KeyboardButton(text="📋 Стоп-лист")],
+        [KeyboardButton(text="🖼️ Галерея пробирок"), KeyboardButton(text="📄 Скачать бланки")],
         [KeyboardButton(text="📞 Связь с лабораторией")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)

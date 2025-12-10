@@ -484,7 +484,7 @@ class Database:
                         
                         # Добавляем детальную информацию
                         detail_cursor = await db.execute('''
-                            SELECT pr.answer, u.name, u.telegram_id
+                            SELECT pr.answer, u.name, u.telegram_id, u.user_type
                             FROM poll_responses pr
                             LEFT JOIN users u ON pr.user_id = u.telegram_id
                             WHERE pr.question_id = ?
@@ -494,7 +494,8 @@ class Database:
                             {
                                 'answer': d[0],
                                 'user_name': d[1] or f'ID: {d[2]}',
-                                'user_id': d[2]
+                                'user_id': d[2],
+                                'user_type': d[3]
                             }
                             for d in details
                         ]
@@ -527,7 +528,7 @@ class Database:
                         
                         # Добавляем детальную информацию
                         detail_cursor = await db.execute('''
-                            SELECT pr.answer, u.name, u.telegram_id, u.client_code
+                            SELECT pr.answer, u.name, u.telegram_id, u.client_code, u.user_type
                             FROM poll_responses pr
                             LEFT JOIN users u ON pr.user_id = u.telegram_id
                             WHERE pr.question_id = ?
@@ -538,7 +539,8 @@ class Database:
                                 'answer': d[0],
                                 'user_name': d[1] or f'ID: {d[2]}',
                                 'user_id': d[2],
-                                'client_code': d[3]
+                                'client_code': d[3],
+                                'user_type': d[4]
                             }
                             for d in details
                         ]
@@ -3012,6 +3014,40 @@ class Database:
                 return dict(row) if row else None
         except Exception as e:
             print(f"[ERROR] Failed to get blank document: {e}")
+            return None
+
+    # ============================================================
+    # МЕТОДЫ ДЛЯ РАБОТЫ СО СТОП-ЛИСТОМ
+    # ============================================================
+    
+    async def update_stoplist_file(self, file_type: str, file_id: str):
+        """Обновление файла стоп-листа (suspended или removed)"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                file_name = f"stoplist_{file_type}"
+                await db.execute('''
+                    INSERT OR REPLACE INTO blank_files (file_name, file_id, created_at)
+                    VALUES (?, ?, ?)
+                ''', (file_name, file_id, datetime.now()))
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"[ERROR] Failed to update stoplist file: {e}")
+            return False
+    
+    async def get_stoplist_file(self, file_type: str):
+        """Получение файла стоп-листа"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                file_name = f"stoplist_{file_type}"
+                cursor = await db.execute(
+                    'SELECT file_id FROM blank_files WHERE file_name = ?',
+                    (file_name,)
+                )
+                row = await cursor.fetchone()
+                return row[0] if row else None
+        except Exception as e:
+            print(f"[ERROR] Failed to get stoplist file: {e}")
             return None
 
     # В класс Database добавим:

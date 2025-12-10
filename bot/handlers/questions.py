@@ -712,7 +712,7 @@ async def handle_back_to_menu(message: Message, state: FSMContext):
     farewell = get_time_based_farewell(user_name)
     await message.answer(farewell, reply_markup=get_menu_by_role(role))
 
-@questions_router.message(F.text == "🔬 Задать вопрос ассистенту")
+@questions_router.message(F.text == "🔬 Задать вопрос")
 async def start_question(message: Message, state: FSMContext):
     """Начало диалога с ассистентом"""
     user_id = message.from_user.id

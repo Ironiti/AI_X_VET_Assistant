@@ -23,14 +23,14 @@ class PollExporter:
             'border': 1
         })
         
-        question_format = workbook.add_format({
-            'bold': True,
-            'bg_color': '#F5F5F5',
-            'border': 1,
-            'text_wrap': True
+        # ВАЖНО: Числовой формат для ячеек
+        number_format = workbook.add_format({
+            'num_format': '0',  # Целое число без десятичных
+            'border': 1
         })
         
-        text_wrap_format = workbook.add_format({
+        text_format = workbook.add_format({
+            'border': 1,
             'text_wrap': True,
             'valign': 'top'
         })
@@ -45,7 +45,7 @@ class PollExporter:
         row = 1
         for poll in polls_data:
             summary_sheet.write(row, 0, poll['title'])
-            summary_sheet.write(row, 1, poll['total_responses'])
+            summary_sheet.write(row, 1, poll['total_responses'], number_format)
             summary_sheet.write(row, 2, poll['created_at'])
             summary_sheet.write(row, 3, 'Активен' if poll['is_active'] else 'Завершен')
             row += 1
@@ -62,109 +62,162 @@ class PollExporter:
             worksheet = workbook.add_worksheet(sheet_name)
             
             # Заголовок опроса
-            worksheet.merge_range(0, 0, 0, 5, poll['title'], header_format)
+            worksheet.merge_range(0, 0, 0, len(poll['questions']) + 2, poll['title'], header_format)
             if poll.get('description'):
-                worksheet.merge_range(1, 0, 1, 5, poll['description'], subheader_format)
+                worksheet.merge_range(1, 0, 1, len(poll['questions']) + 2, poll['description'], subheader_format)
                 current_row = 3
             else:
                 current_row = 2
             
-            # Для каждого вопроса
+            # НОВАЯ СТРУКТУРА: По человеку (горизонтально)
+            # Собираем уникальных пользователей
+            users_dict = {}  # user_id -> {name, client_code, user_type, answers}
+            
             for q_idx, question in enumerate(poll['questions'], 1):
-                # Заголовок вопроса
-                worksheet.merge_range(current_row, 0, current_row, 5, 
-                                     f"Вопрос {q_idx}: {question['text']}", 
-                                     question_format)
-                current_row += 1
+                question_key = f"q_{q_idx}"
                 
-                if question['type'] in ['single', 'multiple']:
-                    # Статистика по вариантам ответов
-                    worksheet.write(current_row, 0, 'Вариант', subheader_format)
-                    worksheet.write(current_row, 1, 'Количество', subheader_format)
-                    worksheet.write(current_row, 2, 'Процент', subheader_format)
-                    current_row += 1
-                    
-                    if question.get('options_stats'):
-                        for option in question['options_stats']:
-                            worksheet.write(current_row, 0, option['text'])
-                            worksheet.write(current_row, 1, option['count'])
-                            worksheet.write(current_row, 2, f"{option['percentage']:.1f}%")
-                            current_row += 1
-                    
-                    # Детальные ответы
-                    current_row += 1
-                    worksheet.write(current_row, 0, 'Детальные ответы:', subheader_format)
-                    current_row += 1
-                    
-                    if question.get('detailed_answers'):
-                        worksheet.write(current_row, 0, 'Пользователь', subheader_format)
-                        worksheet.write(current_row, 1, 'ID', subheader_format)
-                        worksheet.write(current_row, 2, 'Код клиента', subheader_format)
-                        worksheet.write(current_row, 3, 'Ответ', subheader_format)
-                        current_row += 1
-                        
-                        for detail in question['detailed_answers']:
-                            worksheet.write(current_row, 0, detail.get('user_name', 'Неизвестный'))
-                            worksheet.write(current_row, 1, detail.get('user_id', ''))
-                            worksheet.write(current_row, 2, detail.get('client_code', '-'))
-                            worksheet.write(current_row, 3, detail.get('answer', ''))
-                            current_row += 1
-                
-                elif question['type'] == 'rating':
-                    worksheet.write(current_row, 0, 'Средняя оценка:', subheader_format)
-                    worksheet.write(current_row, 1, f"{question.get('avg_rating', 0):.2f}")
-                    current_row += 1
-                    
-                    # Детальные оценки
-                    if question.get('detailed_answers'):
-                        current_row += 1
-                        worksheet.write(current_row, 0, 'Пользователь', subheader_format)
-                        worksheet.write(current_row, 1, 'ID', subheader_format)
-                        worksheet.write(current_row, 2, 'Оценка', subheader_format)
-                        current_row += 1
-                        
-                        for detail in question['detailed_answers']:
-                            worksheet.write(current_row, 0, detail.get('user_name', 'Неизвестный'))
-                            worksheet.write(current_row, 1, detail.get('user_id', ''))
-                            worksheet.write(current_row, 2, detail.get('answer', ''))
-                            current_row += 1
-                
-                elif question['type'] == 'text':
-                    worksheet.write(current_row, 0, 'Текстовые ответы:', subheader_format)
-                    current_row += 1
-                    
-                    if question.get('text_answers_detailed'):
-                        # Заголовки колонок
-                        worksheet.write(current_row, 0, 'Пользователь', subheader_format)
-                        worksheet.write(current_row, 1, 'ID', subheader_format)
-                        worksheet.write(current_row, 2, 'Код клиента', subheader_format)
-                        worksheet.write(current_row, 3, 'Тип', subheader_format)
-                        worksheet.write(current_row, 4, 'Дата ответа', subheader_format)
-                        worksheet.merge_range(current_row, 5, current_row, 7, 'Ответ', subheader_format)
-                        current_row += 1
-                        
-                        for answer_detail in question['text_answers_detailed']:
-                            worksheet.write(current_row, 0, answer_detail.get('user_name', 'Неизвестный'))
-                            worksheet.write(current_row, 1, answer_detail.get('user_id', ''))
-                            worksheet.write(current_row, 2, answer_detail.get('client_code', '-'))
-                            worksheet.write(current_row, 3, answer_detail.get('user_type', '-'))
-                            worksheet.write(current_row, 4, answer_detail.get('answered_at', '-'))
+                # Собираем ответы по всем типам вопросов
+                if question.get('detailed_answers'):
+                    for detail in question['detailed_answers']:
+                        user_id = detail.get('user_id')
+                        if user_id not in users_dict:
+                            # Определяем роль пользователя
+                            user_type = detail.get('user_type', '')
+                            if user_type == 'client':
+                                role_display = 'Клиент'
+                            elif user_type == 'employee':
+                                role_display = 'Сотрудник'
+                            else:
+                                role_display = '-'
                             
-                            # Объединяем ячейки для длинного текста ответа
-                            worksheet.merge_range(current_row, 5, current_row, 7, 
-                                                answer_detail.get('answer', ''), 
-                                                text_wrap_format)
-                            current_row += 1
+                            users_dict[user_id] = {
+                                'name': detail.get('user_name', 'Неизвестный'),
+                                'user_id': user_id,
+                                'client_code': detail.get('client_code', '-'),
+                                'user_type': role_display,
+                                'answers': {}
+                            }
+                        users_dict[user_id]['answers'][question_key] = detail.get('answer', '')
                 
-                current_row += 2  # Отступ между вопросами
+                if question.get('text_answers_detailed'):
+                    for detail in question['text_answers_detailed']:
+                        user_id = detail.get('user_id')
+                        if user_id not in users_dict:
+                            # Определяем роль пользователя
+                            user_type = detail.get('user_type', '')
+                            if user_type == 'client':
+                                role_display = 'Клиент'
+                            elif user_type == 'employee':
+                                role_display = 'Сотрудник'
+                            else:
+                                role_display = '-'
+                            
+                            users_dict[user_id] = {
+                                'name': detail.get('user_name', 'Неизвестный'),
+                                'user_id': user_id,
+                                'client_code': detail.get('client_code', '-'),
+                                'user_type': role_display,
+                                'answers': {}
+                            }
+                        users_dict[user_id]['answers'][question_key] = detail.get('answer', '')
+            
+            # Заголовки таблицы
+            worksheet.write(current_row, 0, 'ID', header_format)
+            worksheet.write(current_row, 1, 'Имя', header_format)
+            worksheet.write(current_row, 2, 'Роль', header_format)
+            worksheet.write(current_row, 3, 'Код клиента', header_format)
+            
+            # Заголовки вопросов
+            for q_idx, question in enumerate(poll['questions'], 1):
+                col = 3 + q_idx
+                question_text = f"Вопрос {q_idx}"
+                worksheet.write(current_row, col, question_text, header_format)
+            
+            current_row += 1
+            
+            # Вторая строка с текстом вопросов
+            worksheet.write(current_row, 0, '', subheader_format)
+            worksheet.write(current_row, 1, '', subheader_format)
+            worksheet.write(current_row, 2, '', subheader_format)
+            worksheet.write(current_row, 3, '', subheader_format)
+            
+            for q_idx, question in enumerate(poll['questions'], 1):
+                col = 3 + q_idx
+                question_text = question['text']
+                if len(question_text) > 50:
+                    question_text = question_text[:47] + "..."
+                worksheet.write(current_row, col, question_text, subheader_format)
+            
+            current_row += 1
+            
+            # Данные пользователей (каждая строка = один человек)
+            for user_data in users_dict.values():
+                worksheet.write(current_row, 0, user_data['user_id'], number_format)
+                worksheet.write(current_row, 1, user_data['name'], text_format)
+                worksheet.write(current_row, 2, user_data['user_type'], text_format)
+                worksheet.write(current_row, 3, user_data['client_code'], text_format)
+                
+                # Ответы на каждый вопрос
+                for q_idx, question in enumerate(poll['questions'], 1):
+                    col = 3 + q_idx
+                    question_key = f"q_{q_idx}"
+                    answer = user_data['answers'].get(question_key, '-')
+                    
+                    # Проверяем, является ли ответ числом (рейтинг)
+                    if question['type'] == 'rating':
+                        try:
+                            # Извлекаем число из ответа
+                            if isinstance(answer, str) and answer.strip().isdigit():
+                                numeric_answer = int(answer.strip())
+                                worksheet.write(current_row, col, numeric_answer, number_format)
+                            elif isinstance(answer, (int, float)):
+                                worksheet.write(current_row, col, answer, number_format)
+                            else:
+                                worksheet.write(current_row, col, answer, text_format)
+                        except:
+                            worksheet.write(current_row, col, answer, text_format)
+                    else:
+                        worksheet.write(current_row, col, answer, text_format)
+                
+                current_row += 1
+            
+            # Добавляем строку статистики (средние значения для рейтинговых вопросов)
+            current_row += 1
+            worksheet.write(current_row, 0, '', header_format)
+            worksheet.write(current_row, 1, 'Средние значения', header_format)
+            worksheet.write(current_row, 2, '', header_format)
+            worksheet.write(current_row, 3, '', header_format)
+            
+            for q_idx, question in enumerate(poll['questions'], 1):
+                col = 3 + q_idx
+                if question['type'] == 'rating':
+                    # Формула для расчета среднего
+                    start_row = current_row - len(users_dict)
+                    end_row = current_row - 1
+                    if start_row <= end_row:
+                        col_letter = chr(65 + col)  # A=65, B=66, etc.
+                        formula = f'=AVERAGE({col_letter}{start_row}:{col_letter}{end_row})'
+                        avg_format = workbook.add_format({
+                            'bold': True,
+                            'bg_color': '#E8F5E9',
+                            'border': 1,
+                            'num_format': '0.0'  # Десятичная для среднего
+                        })
+                        worksheet.write_formula(current_row, col, formula, avg_format)
+                    else:
+                        worksheet.write(current_row, col, '-', header_format)
+                else:
+                    worksheet.write(current_row, col, '-', header_format)
             
             # Настройка ширины колонок
-            worksheet.set_column(0, 0, 25)  # Пользователь
-            worksheet.set_column(1, 1, 12)  # ID
-            worksheet.set_column(2, 2, 15)  # Код клиента
-            worksheet.set_column(3, 3, 12)  # Тип
-            worksheet.set_column(4, 4, 18)  # Дата
-            worksheet.set_column(5, 7, 30)  # Ответ
+            worksheet.set_column(0, 0, 12)  # ID
+            worksheet.set_column(1, 1, 25)  # Имя
+            worksheet.set_column(2, 2, 15)  # Роль
+            worksheet.set_column(3, 3, 15)  # Код клиента
+            # Вопросы
+            for q_idx in range(len(poll['questions'])):
+                col = 4 + q_idx
+                worksheet.set_column(col, col, 20)
         
         workbook.close()
         output.seek(0)

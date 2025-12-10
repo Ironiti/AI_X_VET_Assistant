@@ -626,7 +626,7 @@ async def handle_faq_search(message: Message, state: FSMContext):
     """Обработчик поиска по FAQ"""
     # Пропускаем команды и системные сообщения
     if (message.text.startswith('/') or 
-        message.text in ["📚 Часто задаваемые вопросы", "🔬 Задать вопрос ассистенту",
+        message.text in ["📚 Часто задаваемые вопросы", "🔬 Задать вопрос",
                         "🔍 Поиск по базе знаний", "📋 Показать все вопросы",
                         "🔙 Назад к списку вопросов", "🏠 В главное меню", "🔍 Новый поиск"] or
         message.text.startswith("❌")):

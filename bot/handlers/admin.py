@@ -789,43 +789,133 @@ async def view_poll_results(message: Message, state: FSMContext):
         )
         return
     
+    # Показываем только краткую сводку, чтобы избежать "message is too long"
     text = "📈 Результаты опросов:\n\n"
-    for poll in polls:
+    
+    # Ограничиваем количество опросов и деталей
+    for poll in polls[:5]:  # Показываем максимум 5 опросов
         text += f"📊 {poll['title']}\n"
-        text += f"Участников: {poll['total_responses']}\n"
+        text += f"👥 Участников: {poll['total_responses']}\n"
+        text += f"❓ Вопросов: {len(poll['questions'])}\n"
         
-        # Показываем краткую статистику по каждому вопросу
-        for q_idx, question in enumerate(poll['questions'], 1):
-            text += f"\n{q_idx}. {question['text']}\n"
+        # Показываем только первый вопрос как пример
+        if poll['questions']:
+            question = poll['questions'][0]
+            q_text = question['text']
+            if len(q_text) > 40:
+                q_text = q_text[:37] + "..."
+            text += f"📌 Пример: {q_text}\n"
             
             if question['type'] == 'rating':
                 avg_rating = question.get('avg_rating', 0)
-                text += f"   Средняя оценка: ⭐ {avg_rating:.1f}\n"
-            elif question['type'] in ['single', 'multiple']:
-                top_answer = question.get('top_answer', 'Нет ответов')
-                text += f"   Популярный ответ: {top_answer}\n"
-            else:
-                text += f"   Ответов: {question.get('answer_count', 0)}\n"
+                text += f"   ⭐ Средняя оценка: {avg_rating:.1f}\n"
         
-        text += "─" * 30 + "\n"
+        text += "─" * 30 + "\n\n"
+    
+    if len(polls) > 5:
+        text += f"...и еще {len(polls) - 5} опросов\n\n"
+    
+    text += "💡 Для детального просмотра используйте 'Выгрузить результаты'"
     
     await message.answer(text, reply_markup=get_poll_management_kb())
 
 @admin_router.message(PollStates.poll_menu, F.text == "📥 Выгрузить результаты")
-async def export_poll_results(message: Message):
-    loading_msg = await message.answer("⏳ Подготавливаю выгрузку результатов опросов...")
+async def export_poll_results(message: Message, state: FSMContext):
+    # Получаем список опросов с результатами
+    polls_data = await db.get_full_poll_results()
+    
+    if not polls_data:
+        await message.answer(
+            "Нет опросов с результатами для выгрузки.",
+            reply_markup=get_poll_management_kb()
+        )
+        return
+    
+    # Создаем клавиатуру с выбором опроса
+    keyboard = []
+    for poll in polls_data:
+        button_text = f"📊 {poll['title']} ({poll['total_responses']} ответов)"
+        if len(button_text) > 60:
+            button_text = button_text[:57] + "..."
+        keyboard.append([InlineKeyboardButton(
+            text=button_text,
+            callback_data=f"export_poll:{poll['id']}"
+        )])
+    
+    # Добавляем кнопку "Все опросы"
+    keyboard.append([InlineKeyboardButton(
+        text="📥 Выгрузить все опросы",
+        callback_data="export_poll:all"
+    )])
+    
+    await message.answer(
+        "📊 Выберите опрос для выгрузки:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+    )
+    await state.set_state(PollStates.viewing_results)
+    
+@admin_router.message(PollStates.poll_menu, F.text == "📥 Выгрузить результаты")
+async def export_poll_results(message: Message, state: FSMContext):
+    # Получаем список опросов с результатами
+    polls_data = await db.get_full_poll_results()
+    
+    if not polls_data:
+        await message.answer(
+            "Нет опросов с результатами для выгрузки.",
+            reply_markup=get_poll_management_kb()
+        )
+        return
+    
+    # Создаем клавиатуру с выбором опроса
+    keyboard = []
+    for poll in polls_data:
+        button_text = f"📊 {poll['title']} ({poll['total_responses']} ответов)"
+        if len(button_text) > 60:
+            button_text = button_text[:57] + "..."
+        keyboard.append([InlineKeyboardButton(
+            text=button_text,
+            callback_data=f"export_poll:{poll['id']}"
+        )])
+    
+    # Добавляем кнопку "Все опросы"
+    keyboard.append([InlineKeyboardButton(
+        text="📥 Выгрузить все опросы",
+        callback_data="export_poll:all"
+    )])
+    
+    await message.answer(
+        "📊 Выберите опрос для выгрузки:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+    )
+    await state.set_state(PollStates.viewing_results)
+
+@admin_router.callback_query(F.data.startswith("export_poll:"))
+async def handle_poll_export(callback: CallbackQuery, state: FSMContext):
+    poll_id_str = callback.data.split(":")[1]
+    
+    loading_msg = await callback.message.answer("⏳ Подготавливаю выгрузку...")
     
     try:
-        # Получаем все результаты опросов
-        polls_data = await db.get_full_poll_results()
-        
-        if not polls_data:
-            await loading_msg.delete()
-            await message.answer(
-                "Нет данных для выгрузки.",
-                reply_markup=get_poll_management_kb()
-            )
-            return
+        # Получаем данные опроса(ов)
+        if poll_id_str == "all":
+            polls_data = await db.get_full_poll_results()
+            caption = "📊 Результаты всех опросов"
+        else:
+            poll_id = int(poll_id_str)
+            # Получаем данные конкретного опроса
+            all_polls = await db.get_full_poll_results()
+            polls_data = [p for p in all_polls if p['id'] == poll_id]
+            
+            if not polls_data:
+                await loading_msg.delete()
+                await callback.message.answer(
+                    "❌ Опрос не найден.",
+                    reply_markup=get_poll_management_kb()
+                )
+                await callback.answer()
+                return
+            
+            caption = f"📊 Результаты опроса: {polls_data[0]['title']}"
         
         # Создаем Excel файл с результатами
         from utils.poll_exporter import PollExporter
@@ -835,18 +925,30 @@ async def export_poll_results(message: Message):
         filename = f"poll_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
         
         await loading_msg.delete()
-        await message.answer_document(
+        await callback.message.answer_document(
             BufferedInputFile(excel_data, filename),
-            caption=f"📊 Результаты опросов\n📅 Дата выгрузки: {datetime.now().strftime('%d.%m.%Y %H:%M')}",
+            caption=f"{caption}\n📅 Дата выгрузки: {datetime.now().strftime('%d.%m.%Y %H:%M')}",
             reply_markup=get_poll_management_kb()
         )
         
+        await callback.answer("✅ Выгрузка готова!")
+        await state.clear()
+        
     except Exception as e:
         await loading_msg.delete()
-        await message.answer(
+        await callback.message.answer(
             f"❌ Ошибка при выгрузке: {str(e)}",
             reply_markup=get_poll_management_kb()
         )
+        await callback.answer()
+
+@admin_router.message(PollStates.viewing_results, F.text == "🔙 Назад")
+async def back_from_viewing_results(message: Message, state: FSMContext):
+    await message.answer(
+        "📋 Управление опросами",
+        reply_markup=get_poll_management_kb()
+    )
+    await state.set_state(PollStates.poll_menu)
 
 @admin_router.message(PollStates.poll_menu, F.text == "🔙 Назад")
 async def back_from_polls(message: Message, state: FSMContext):

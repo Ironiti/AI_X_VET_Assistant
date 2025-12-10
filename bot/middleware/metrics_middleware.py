@@ -90,7 +90,7 @@ class MetricsMiddleware(BaseMiddleware):
         
         # 2. Кнопки навигации с эмодзи (логируются но как navigation)
         emoji_buttons = [
-            "🔬 Задать вопрос ассистенту", "❌ Завершить диалог", "🔄 Новый вопрос",
+            "🔬 Задать вопрос", "❌ Завершить диалог", "🔄 Новый вопрос",
             "🖼 Галерея пробирок и контейнеров", "📄 Ссылки на бланки",
             "🤝 Поддержка"
         ]
@@ -107,8 +107,8 @@ class MetricsMiddleware(BaseMiddleware):
             r'^🇦🇲\s*Армения$',
             r'^📍\s*.+$',  # Город с эмодзи
             r'^🏙\s*.+$',  # Регион с эмодзи
-            r'^🔬\s*Сотрудник X-LAB VET$',
-            r'^🏥\s*Клиент X-LAB VET$'
+            r'^🔬\s*Сотрудник VET UNION$',
+            r'^🏥\s*Клиент VET UNION$'
         ]
         
         for pattern in registration_patterns:

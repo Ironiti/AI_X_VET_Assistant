@@ -12,7 +12,7 @@ content_router = Router()
 # ГАЛЕРЕЯ ПРОБИРОК - ПОКАЗ ПОЛЬЗОВАТЕЛЯМ
 # ============================================================
 
-@content_router.message(F.text == "🖼️ Галерея пробирок и контейнеров")
+@content_router.message(F.text == "🖼️ Галерея пробирок")
 async def show_gallery(message: Message):
     """Показ галереи пользователю"""
     user_id = message.from_user.id
@@ -139,7 +139,7 @@ async def close_gallery_and_photo(callback: CallbackQuery):
 # ССЫЛКИ НА БЛАНКИ - ПОКАЗ ПОЛЬЗОВАТЕЛЯМ
 # ============================================================
 
-@content_router.message(F.text == "📄 Бланки и документы")
+@content_router.message(F.text == "📄 Скачать бланки")
 async def show_blanks(message: Message):
     """Показ бланков пользователю"""
     user_id = message.from_user.id
