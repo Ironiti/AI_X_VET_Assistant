@@ -378,9 +378,9 @@ async def show_comprehensive_metrics(message: Message, state: FSMContext):
         response += f"• Всего запросов: <b>{total_requests}</b>\n"
         response += f"• Успешных запросов: <b>{successful_requests}</b>\n"
         
-        # Коэффициент точности
-        accuracy = (successful_requests / total_requests * 100) if total_requests > 0 else 0
-        response += f"• Коэффициент точности: <b>{accuracy:.1f}%</b>\n"
+        # ИСПРАВЛЕНО: Коэффициент успешной обработки (не путать с точностью!)
+        success_rate = (successful_requests / total_requests * 100) if total_requests > 0 else 0
+        response += f"• Коэффициент успешной обработки: <b>{success_rate:.1f}%</b>\n"
         
         # Средний рейтинг
         response += f"• Средний рейтинг: <b>{avg_rating:.2f}/5</b> ⭐\n\n"

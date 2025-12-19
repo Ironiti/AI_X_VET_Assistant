@@ -2316,6 +2316,14 @@ class Database:
                     )
                 ''', (today, yesterday))
                 returned_1d = (await cursor.fetchone())['returned']
+                # Получаем количество пользователей вчера
+                cursor = await db.execute('''
+                    SELECT COUNT(DISTINCT ua.user_id) as yesterday_users
+                    FROM user_activity ua
+                    JOIN users u ON ua.user_id = u.telegram_id
+                    WHERE ua.activity_date = ? AND u.role != 'admin'
+                ''', (yesterday,))
+                yesterday_users = (await cursor.fetchone())['yesterday_users']
                 
                 # Возвратность за 7 дней
                 week_ago = today - timedelta(days=7)
@@ -2332,6 +2340,15 @@ class Database:
                 ''', (today, week_ago, yesterday))
                 returned_7d = (await cursor.fetchone())['returned']
                 
+                # ИСПРАВЛЕНО: Получаем количество пользователей 7 дней назад
+                cursor = await db.execute('''
+                    SELECT COUNT(DISTINCT ua.user_id) as week_ago_users
+                    FROM user_activity ua
+                    JOIN users u ON ua.user_id = u.telegram_id
+                    WHERE ua.activity_date = ? AND u.role != 'admin'
+                ''', (week_ago,))
+                week_ago_users = (await cursor.fetchone())['week_ago_users']
+                
                 # Возвратность за 30 дней
                 month_ago = today - timedelta(days=30)
                 cursor = await db.execute('''
@@ -2347,19 +2364,21 @@ class Database:
                 ''', (today, month_ago, yesterday))
                 returned_30d = (await cursor.fetchone())['returned']
                 
+                
+                # ИСПРАВЛЕНО: Получаем количество пользователей 30 дней назад
                 cursor = await db.execute('''
-                    SELECT COUNT(DISTINCT ua.user_id) as yesterday_users
+                    SELECT COUNT(DISTINCT ua.user_id) as month_ago_users
                     FROM user_activity ua
                     JOIN users u ON ua.user_id = u.telegram_id
                     WHERE ua.activity_date = ? AND u.role != 'admin'
-                ''', (yesterday,))
-                yesterday_users = (await cursor.fetchone())['yesterday_users']
+                ''', (month_ago,))
+                month_ago_users = (await cursor.fetchone())['month_ago_users']
                 
                 return {
                     'today_users': today_users,
                     'retention_1d': (returned_1d / yesterday_users * 100) if yesterday_users > 0 else 0,
-                    'retention_7d': (returned_7d / today_users * 100) if today_users > 0 else 0,
-                    'retention_30d': (returned_30d / today_users * 100) if today_users > 0 else 0,
+                    'retention_7d': (returned_7d / week_ago_users * 100) if week_ago_users > 0 else 0,
+                    'retention_30d': (returned_30d / month_ago_users * 100) if month_ago_users > 0 else 0,
                     'returned_1d': returned_1d,
                     'returned_7d': returned_7d,
                     'returned_30d': returned_30d
