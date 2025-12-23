@@ -284,9 +284,12 @@ class DataProcessor:
             
             return matches[:top_k]
         
-        for doc, score in self.vector_store.similarity_search_with_score(query.lower(), k=top_k):
-            print(doc.metadata['test_code'])
-        return self.vector_store.similarity_search_with_score(query.lower(), k=top_k)
+        results = self.vector_store.similarity_search_with_score(query.lower(), k=top_k)
+        # Выводим все коды в одну строку вместо каждого с новой
+        test_codes = [doc.metadata.get('test_code', 'N/A') for doc, score in results]
+        if test_codes:
+            print(f'[DEBUG] Found tests: {", ".join(test_codes[:10])}{"..." if len(test_codes) > 10 else ""}')
+        return results
     
     def check_test_codes(self):
         if self.vector_store is None:

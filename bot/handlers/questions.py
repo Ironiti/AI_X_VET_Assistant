@@ -34,7 +34,8 @@ from bot.handlers.utils import (
     normalize_test_code,
     check_profile_request,
     filter_results_by_type,
-    is_profile_test
+    is_profile_test,
+    split_long_message
 )
 from bot.handlers.sending_style import (
     animate_loading,
@@ -3322,11 +3323,14 @@ async def _clarify_with_llm(
 # questions.py - ВОССТАНОВЛЕННАЯ функция с добавлением дополнительных бланков
 
 async def send_test_info_with_photo(
-    message: Message, 
-    test_data: Dict, 
+    message: Message,
+    test_data: Dict,
     response_text: str
 ):
-    """Отправляет информацию о тесте и ВСЕ соответствующие бланки"""
+    """
+    Отправляет информацию о тесте и ВСЕ соответствующие бланки.
+    Автоматически разбивает длинные сообщения на части.
+    """
     
     # Собираем все типы контейнеров
     raw_container_types = []
@@ -3383,13 +3387,60 @@ async def send_test_info_with_photo(
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons) if keyboard_buttons else None
     
-    # Отправляем основную информацию о тесте
-    await message.answer(
-        response_text,
-        parse_mode="HTML",
-        disable_web_page_preview=True,
-        reply_markup=keyboard,
-    )
+    # Проверяем длину сообщения
+    if len(response_text) <= 4000:
+        # Сообщение короткое - отправляем как есть
+        try:
+            await message.answer(
+                response_text,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+                reply_markup=keyboard,
+            )
+        except Exception as e:
+            logger.error(f"[SEND_TEST] Failed to send message: {e}")
+            # Пробуем без HTML
+            clean_text = re.sub(r'<[^>]+>', '', response_text)
+            await message.answer(
+                clean_text,
+                reply_markup=keyboard,
+            )
+    else:
+        # Сообщение длинное - разбиваем на части
+        logger.info(f"[SEND_TEST] Message too long ({len(response_text)} chars), splitting...")
+        
+        # Разбиваем на части
+        parts = split_long_message(response_text, max_length=3900)
+        
+        logger.info(f"[SEND_TEST] Split into {len(parts)} parts")
+        
+        # Отправляем части
+        for i, part in enumerate(parts):
+            try:
+                # Последняя часть - с клавиатурой
+                part_keyboard = keyboard if (i == len(parts) - 1) else None
+                
+                await message.answer(
+                    part,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                    reply_markup=part_keyboard,
+                )
+                
+                # Небольшая задержка между частями
+                if i < len(parts) - 1:
+                    await asyncio.sleep(0.3)
+                    
+            except Exception as e:
+                logger.error(f"[SEND_TEST] Failed to send part {i+1}/{len(parts)}: {e}")
+                # Если не удалось отправить с HTML - пробуем без
+                try:
+                    clean_part = re.sub(r'<[^>]+>', '', part)
+                    part_keyboard = keyboard if (i == len(parts) - 1) else None
+                    await message.answer(clean_part, reply_markup=part_keyboard)
+                except Exception as e2:
+                    logger.error(f"[SEND_TEST] Failed to send clean part {i+1}: {e2}")
+                    continue
     
     return True
 

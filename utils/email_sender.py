@@ -231,14 +231,14 @@ async def send_monthly_metrics_email(excel_data: bytes, month_name: str, metrics
     
     Args:
         excel_data: Данные Excel файла в байтах
-        month_name: Название месяца для отчета (например, "Октябрь 2024")
+        month_name: Название месяца для отчета (например, "Октябрь 2025")
         metrics_recipient: Email получателя (если None, используется EMAIL_TO)
     """
     try:
         recipient = metrics_recipient or EMAIL_TO
         
         msg = MIMEMultipart('mixed')
-        msg['Subject'] = f'Ежемесячный отчет по метрикам - {month_name}'
+       msg['Subject'] = f'Ежемесячный отчет по метрикам X-LAB VET - {month_name}'
         msg['From'] = EMAIL_LOGIN
         msg['To'] = recipient
         msg['Reply-To'] = EMAIL_LOGIN

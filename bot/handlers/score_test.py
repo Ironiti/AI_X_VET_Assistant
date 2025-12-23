@@ -540,8 +540,10 @@ async def original_select_best_match(
 
     cleaned_query = expand_query_with_abbreviations(cleaned_query)
 
-    for i, (doc, score) in enumerate(docs, 1):
-        print(doc.metadata.get('test_code'))
+    # Выводим все коды в одну строку вместо каждого с новой
+    test_codes = [doc.metadata.get('test_code', 'N/A') for doc, score in docs]
+    if test_codes:
+        print(f'[DEBUG] Processing {len(test_codes)} tests: {", ".join(test_codes[:10])}{"..." if len(test_codes) > 10 else ""}')
 
     filtered_docs = docs
     if query_department:
