@@ -950,6 +950,19 @@ class Database:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+
+            # Таблица для медиа-инструкций (видео/GIF) по ключам
+            # Пример keys:
+            # - instruction_stoplist
+            # - instruction_blanks
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS instruction_media (
+                    media_key TEXT PRIMARY KEY,
+                    file_id TEXT NOT NULL,
+                    media_type TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
             # ПРАВИЛЬНАЯ версия таблицы container_photos
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS container_photos (
@@ -971,6 +984,19 @@ class Database:
                     search_type TEXT CHECK(search_type IN ('code', 'text', 'voice')),
                     success BOOLEAN DEFAULT TRUE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(telegram_id)
+                )
+            ''')
+            
+            # Таблица для частых тестов пользователей
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS user_frequent_tests (
+                    user_id INTEGER,
+                    test_code TEXT,
+                    test_name TEXT,
+                    frequency INTEGER DEFAULT 1,
+                    last_accessed TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (user_id, test_code),
                     FOREIGN KEY (user_id) REFERENCES users(telegram_id)
                 )
             ''')
@@ -1224,6 +1250,66 @@ class Database:
                 ON quality_metrics(metric_date DESC)
             ''')
 
+            # Таблица для оценок ответов бота (новая структура)
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS bot_response_ratings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    rating_type TEXT CHECK(rating_type IN ('positive', 'negative', 'declined')) NOT NULL,
+                    question TEXT,
+                    bot_response TEXT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(telegram_id)
+                )
+            ''')
+
+            # Таблица для фиксации ПОКАЗОВ запроса оценки (denominator для response_rate)
+            # Важно: это именно факт отправки сообщения с кнопками оценки пользователю.
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS bot_feedback_prompts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    bot_response_message_id INTEGER NOT NULL,
+                    prompt_message_id INTEGER,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(user_id, bot_response_message_id),
+                    FOREIGN KEY (user_id) REFERENCES users(telegram_id)
+                )
+            ''')
+
+            # Таблица для настроек запроса оценок пользователей
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS user_rating_preferences (
+                    user_id INTEGER PRIMARY KEY,
+                    is_rating_enabled BOOLEAN DEFAULT TRUE,
+                    disabled_at TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(telegram_id)
+                )
+            ''')
+
+            # Индексы для быстрого поиска
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_bot_response_ratings_user_time
+                ON bot_response_ratings(user_id, timestamp DESC)
+            ''')
+            
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_bot_response_ratings_type
+                ON bot_response_ratings(rating_type, timestamp DESC)
+            ''')
+
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_bot_feedback_prompts_user_time
+                ON bot_feedback_prompts(user_id, timestamp DESC)
+            ''')
+
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_bot_feedback_prompts_time
+                ON bot_feedback_prompts(timestamp DESC)
+            ''')
+            
+            # Оставляем старую таблицу для обратной совместимости
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS response_ratings (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1239,7 +1325,7 @@ class Database:
 
             # Индекс для быстрого поиска
             await db.execute('''
-                CREATE INDEX IF NOT EXISTS idx_response_ratings_user_time 
+                CREATE INDEX IF NOT EXISTS idx_response_ratings_user_time
                 ON response_ratings(user_id, timestamp DESC)
             ''')
             
@@ -1248,14 +1334,20 @@ class Database:
             # ============================================================
             
             await db.execute('''
-                CREATE INDEX IF NOT EXISTS idx_user_activity_user_date 
+                CREATE INDEX IF NOT EXISTS idx_user_activity_user_date
                 ON user_activity(user_id, activity_date DESC)
             ''')
             
-            # Индекс для фильтрации по типу запроса и дате
+            # ИСПРАВЛЕНО: Индекс БЕЗ функции DATE() для лучшей производительности
             await db.execute('''
-                CREATE INDEX IF NOT EXISTS idx_request_metrics_type_date
-                ON request_metrics(request_type, DATE(timestamp) DESC)
+                CREATE INDEX IF NOT EXISTS idx_request_metrics_type_timestamp
+                ON request_metrics(request_type, timestamp DESC)
+            ''')
+            
+            # Дополнительный индекс для activity_date для быстрого поиска по датам
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_user_activity_date_user
+                ON user_activity(activity_date, user_id)
             ''')
             
             # Индекс для быстрой фильтрации по роли (админ/не админ)
@@ -1286,6 +1378,90 @@ class Database:
             
             # Теперь коммитим все изменения
             await db.commit()
+
+    # ============================================================
+    # МЕДИА-ИНСТРУКЦИИ (ВИДЕО/GIF)
+    # ============================================================
+
+    async def ensure_instruction_media_table(self):
+        """Создает таблицу instruction_media если её нет"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS instruction_media (
+                    media_key TEXT PRIMARY KEY,
+                    file_id TEXT NOT NULL,
+                    media_type TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            await db.commit()
+
+    async def set_instruction_media(self, media_key: str, file_id: str, media_type: str) -> bool:
+        """Сохраняет/обновляет медиа-инструкцию по ключу"""
+        try:
+            if not media_key or not file_id or not media_type:
+                return False
+
+            await self.ensure_instruction_media_table()
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    INSERT OR REPLACE INTO instruction_media (media_key, file_id, media_type, created_at)
+                    VALUES (?, ?, ?, ?)
+                ''', (media_key, file_id, media_type, datetime.now()))
+                await db.commit()
+            return True
+        except Exception as e:
+            print(f"[ERROR] Failed to set instruction media: {e}")
+            return False
+
+    async def get_instruction_media(self, media_key: str) -> dict | None:
+        """Возвращает медиа-инструкцию: {file_id, media_type}"""
+        try:
+            await self.ensure_instruction_media_table()
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute(
+                    'SELECT file_id, media_type FROM instruction_media WHERE media_key = ?',
+                    (media_key,)
+                )
+                row = await cursor.fetchone()
+                if not row:
+                    return None
+                return {'file_id': row[0], 'media_type': row[1]}
+        except Exception as e:
+            print(f"[ERROR] Failed to get instruction media: {e}")
+            return None
+
+    async def log_feedback_prompt(
+        self,
+        user_id: int,
+        bot_response_message_id: int,
+        prompt_message_id: int | None = None,
+        timestamp=None
+    ) -> bool:
+        """
+        Логирует факт ПОКАЗА формы оценки пользователю.
+
+        Это используется как знаменатель для метрики "Коэффициент отклика":
+        сколько раз мы показали кнопки оценки.
+        """
+        try:
+            if timestamp is None:
+                timestamp = datetime.now()
+
+            async with aiosqlite.connect(self.db_path, timeout=10.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                await db.execute('''
+                    INSERT OR IGNORE INTO bot_feedback_prompts
+                    (user_id, bot_response_message_id, prompt_message_id, timestamp)
+                    VALUES (?, ?, ?, ?)
+                ''', (user_id, bot_response_message_id, prompt_message_id, timestamp))
+                await db.commit()
+            return True
+        except Exception as e:
+            print(f"[ERROR] Failed to log feedback prompt: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
     
     async def add_client(self, telegram_id: int, name: str, client_code: str, 
                         specialization: str, country: str = 'BY'):
@@ -1400,6 +1576,10 @@ class Database:
                 (role, telegram_id)
             )
             await db.commit()
+        
+        # КРИТИЧНО: Очищаем кеш пользователя после изменения роли
+        self.clear_user_cache(telegram_id)
+        print(f"[ROLE_UPDATE] ✓ Updated role to '{role}' for user {telegram_id}, cache cleared")
     
     async def check_activation_code(self, code: str):
         """Проверка кода активации администратора"""
@@ -2259,34 +2439,84 @@ class Database:
             traceback.print_exc()
     
     async def get_dau_metrics(self, days: int = 30):
-        """Получает метрики Daily Active Users - ИСКЛЮЧАЯ администраторов"""
+        """
+        Получает метрики Daily Active Users за последние N дней - ИСКЛЮЧАЯ администраторов.
+        ИСПРАВЛЕНО: использует user_activity для корректного подсчета активности за 30 дней
+        """
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
                 
                 start_date = datetime.now() - timedelta(days=days)
                 
-                # Считаем запросы ТОЛЬКО от не-админов
+                # Используем user_activity для корректного подсчета DAU за период
                 cursor = await db.execute('''
                     SELECT
-                        DATE(rm.timestamp) as activity_date,
-                        COUNT(DISTINCT rm.user_id) as dau,
-                        COUNT(*) as total_requests,
-                        CAST(COUNT(*) AS REAL) / COUNT(DISTINCT rm.user_id) as avg_requests_per_user
-                    FROM request_metrics rm
-                    JOIN users u ON rm.user_id = u.telegram_id
-                    WHERE rm.timestamp >= ? AND u.role != 'admin'
-                    GROUP BY DATE(rm.timestamp)
-                    ORDER BY activity_date DESC
+                        ua.activity_date,
+                        COUNT(DISTINCT ua.user_id) as dau,
+                        COALESCE(SUM(ua.request_count), 0) as total_requests,
+                        CASE
+                            WHEN COUNT(DISTINCT ua.user_id) > 0
+                            THEN CAST(COALESCE(SUM(ua.request_count), 0) AS REAL) / COUNT(DISTINCT ua.user_id)
+                            ELSE 0
+                        END as avg_requests_per_user
+                    FROM user_activity ua
+                    JOIN users u ON ua.user_id = u.telegram_id
+                    WHERE ua.activity_date >= DATE(?) AND u.role != 'admin'
+                    GROUP BY ua.activity_date
+                    ORDER BY ua.activity_date DESC
                 ''', (start_date,))
                 
                 return [dict(row) for row in await cursor.fetchall()]
         except Exception as e:
             print(f"[ERROR] Failed to get DAU metrics: {e}")
+            import traceback
+            traceback.print_exc()
             return []
+
+    async def get_valid_requests_by_day(self, days: int = 30) -> dict:
+        """
+        Возвращает количество *валидных* запросов по дням.
+
+        Используется для отчётов, где «Всего запросов» должно соответствовать
+        прежней семантике: только запросы, залогированные в request_metrics
+        (general/code_search/name_search), исключая админов.
+
+        Важно: НЕ использует user_activity, потому что user_activity отражает
+        любую активность (включая навигацию и шаги регистрации) и может
+        раздувать «Всего запросов».
+        """
+        try:
+            start_date = datetime.now() - timedelta(days=days)
+
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute('''
+                    SELECT
+                        DATE(rm.timestamp) as activity_date,
+                        COUNT(*) as total_requests
+                    FROM request_metrics rm
+                    JOIN users u ON rm.user_id = u.telegram_id
+                    WHERE rm.timestamp >= ?
+                      AND rm.request_type IN ('general', 'code_search', 'name_search')
+                      AND u.role != 'admin'
+                    GROUP BY DATE(rm.timestamp)
+                ''', (start_date,))
+
+                rows = await cursor.fetchall()
+                # activity_date в SQLite DATE() возвращается как строка YYYY-MM-DD
+                return {row[0]: (row[1] or 0) for row in rows if row and row[0]}
+        except Exception as e:
+            print(f"[ERROR] Failed to get valid requests by day: {e}")
+            import traceback
+            traceback.print_exc()
+            return {}
     
     async def get_retention_metrics(self):
-        """Получает метрики возвратности пользователей (ИСКЛЮЧАЯ администраторов)"""
+        """
+        Получает метрики возвратности пользователей (ИСКЛЮЧАЯ администраторов).
+        ИСПРАВЛЕНО: правильный расчет retention за последние 30 дней
+        Retention X дней = (пользователи активные СЕГОДНЯ, которые также были активны X дней назад) / (пользователи активные X дней назад)
+        """
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
@@ -2302,8 +2532,20 @@ class Database:
                 ''', (today,))
                 today_users = (await cursor.fetchone())['today_users']
                 
-                # Возвратность за 1 день
+                # ========== Retention 1 день ==========
+                # Сколько из пользователей вчера вернулись сегодня
                 yesterday = today - timedelta(days=1)
+                
+                # Количество пользователей вчера
+                cursor = await db.execute('''
+                    SELECT COUNT(DISTINCT ua.user_id) as yesterday_users
+                    FROM user_activity ua
+                    JOIN users u ON ua.user_id = u.telegram_id
+                    WHERE ua.activity_date = ? AND u.role != 'admin'
+                ''', (yesterday,))
+                yesterday_users = (await cursor.fetchone())['yesterday_users']
+                
+                # Сколько из них вернулись сегодня
                 cursor = await db.execute('''
                     SELECT COUNT(DISTINCT ua1.user_id) as returned
                     FROM user_activity ua1
@@ -2314,33 +2556,14 @@ class Database:
                         WHERE ua2.user_id = ua1.user_id
                         AND ua2.activity_date = ?
                     )
-                ''', (today, yesterday))
+                ''', (yesterday, today))
                 returned_1d = (await cursor.fetchone())['returned']
-                # Получаем количество пользователей вчера
-                cursor = await db.execute('''
-                    SELECT COUNT(DISTINCT ua.user_id) as yesterday_users
-                    FROM user_activity ua
-                    JOIN users u ON ua.user_id = u.telegram_id
-                    WHERE ua.activity_date = ? AND u.role != 'admin'
-                ''', (yesterday,))
-                yesterday_users = (await cursor.fetchone())['yesterday_users']
                 
-                # Возвратность за 7 дней
+                # ========== Retention 7 дней ==========
+                # Сколько из пользователей 7 дней назад были активны В ЛЮБОЙ ДЕНЬ за последние 7 дней
                 week_ago = today - timedelta(days=7)
-                cursor = await db.execute('''
-                    SELECT COUNT(DISTINCT ua1.user_id) as returned
-                    FROM user_activity ua1
-                    JOIN users u ON ua1.user_id = u.telegram_id
-                    WHERE ua1.activity_date = ? AND u.role != 'admin'
-                    AND EXISTS (
-                        SELECT 1 FROM user_activity ua2
-                        WHERE ua2.user_id = ua1.user_id
-                        AND ua2.activity_date BETWEEN ? AND ?
-                    )
-                ''', (today, week_ago, yesterday))
-                returned_7d = (await cursor.fetchone())['returned']
                 
-                # ИСПРАВЛЕНО: Получаем количество пользователей 7 дней назад
+                # Количество пользователей 7 дней назад
                 cursor = await db.execute('''
                     SELECT COUNT(DISTINCT ua.user_id) as week_ago_users
                     FROM user_activity ua
@@ -2349,8 +2572,7 @@ class Database:
                 ''', (week_ago,))
                 week_ago_users = (await cursor.fetchone())['week_ago_users']
                 
-                # Возвратность за 30 дней
-                month_ago = today - timedelta(days=30)
+                # Сколько из них были активны в последующие 7 дней
                 cursor = await db.execute('''
                     SELECT COUNT(DISTINCT ua1.user_id) as returned
                     FROM user_activity ua1
@@ -2359,13 +2581,17 @@ class Database:
                     AND EXISTS (
                         SELECT 1 FROM user_activity ua2
                         WHERE ua2.user_id = ua1.user_id
-                        AND ua2.activity_date BETWEEN ? AND ?
+                        AND ua2.activity_date > ?
+                        AND ua2.activity_date <= ?
                     )
-                ''', (today, month_ago, yesterday))
-                returned_30d = (await cursor.fetchone())['returned']
+                ''', (week_ago, week_ago, today))
+                returned_7d = (await cursor.fetchone())['returned']
                 
+                # ========== Retention 30 дней ==========
+                # Сколько из пользователей 30 дней назад были активны В ЛЮБОЙ ДЕНЬ за последние 30 дней
+                month_ago = today - timedelta(days=30)
                 
-                # ИСПРАВЛЕНО: Получаем количество пользователей 30 дней назад
+                # Количество пользователей 30 дней назад
                 cursor = await db.execute('''
                     SELECT COUNT(DISTINCT ua.user_id) as month_ago_users
                     FROM user_activity ua
@@ -2374,6 +2600,21 @@ class Database:
                 ''', (month_ago,))
                 month_ago_users = (await cursor.fetchone())['month_ago_users']
                 
+                # Сколько из них были активны в последующие 30 дней
+                cursor = await db.execute('''
+                    SELECT COUNT(DISTINCT ua1.user_id) as returned
+                    FROM user_activity ua1
+                    JOIN users u ON ua1.user_id = u.telegram_id
+                    WHERE ua1.activity_date = ? AND u.role != 'admin'
+                    AND EXISTS (
+                        SELECT 1 FROM user_activity ua2
+                        WHERE ua2.user_id = ua1.user_id
+                        AND ua2.activity_date > ?
+                        AND ua2.activity_date <= ?
+                    )
+                ''', (month_ago, month_ago, today))
+                returned_30d = (await cursor.fetchone())['returned']
+                
                 return {
                     'today_users': today_users,
                     'retention_1d': (returned_1d / yesterday_users * 100) if yesterday_users > 0 else 0,
@@ -2381,16 +2622,22 @@ class Database:
                     'retention_30d': (returned_30d / month_ago_users * 100) if month_ago_users > 0 else 0,
                     'returned_1d': returned_1d,
                     'returned_7d': returned_7d,
-                    'returned_30d': returned_30d
+                    'returned_30d': returned_30d,
+                    'base_1d': yesterday_users,
+                    'base_7d': week_ago_users,
+                    'base_30d': month_ago_users
                 }
         except Exception as e:
             print(f"[ERROR] Failed to get retention metrics: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     async def get_session_metrics(self, days: int = 7):
         """
-        Получает метрики по сессиям (ИСКЛЮЧАЯ администраторов).
-        ИСПРАВЛЕНО: считает общую длительность от session_start до session_end (включает время на чтение).
+        Получает метрики по сессиям за последние N дней (ИСКЛЮЧАЯ администраторов).
+        ПРАВИЛЬНО: считает общую длительность от session_start до session_end (включает время на чтение материалов).
+        Параметр days может быть любым (7, 30 и т.д.) - корректно работает для любого периода.
         """
         try:
             async with aiosqlite.connect(self.db_path) as db:
@@ -2398,7 +2645,7 @@ class Database:
                 
                 start_date = datetime.now() - timedelta(days=days)
                 
-                # Считаем ОБЩУЮ длительность сессии (от начала до конца)
+                # Считаем ОБЩУЮ длительность сессии (от начала до конца) за последние N дней
                 cursor = await db.execute('''
                     SELECT
                         COUNT(*) as total_sessions,
@@ -2465,18 +2712,37 @@ class Database:
             print(f"[ERROR] Failed to update system metrics: {e}")
     
     async def update_quality_metrics(self):
-        """Обновляет метрики качества работы бота"""
+        """
+        Обновляет метрики качества работы бота.
+        ИСПРАВЛЕНО: success=FALSE теперь считается как "вне специализации", а не ошибка.
+        """
         try:
             today = datetime.now().date()
             
             async with aiosqlite.connect(self.db_path) as db:
                 # Подсчитываем метрики за сегодня ТОЛЬКО для валидных типов запросов
+                # SQLite допускает хранение BOOLEAN как 0/1 или строк.
+                # Чтобы метрики не "обнулялись" из-за типа данных, используем IN-списки.
                 cursor = await db.execute('''
                     SELECT
                         COUNT(*) as total,
-                        SUM(CASE WHEN success = TRUE AND has_answer = TRUE THEN 1 ELSE 0 END) as correct,
-                        SUM(CASE WHEN success = FALSE THEN 1 ELSE 0 END) as incorrect,
-                        SUM(CASE WHEN has_answer = FALSE THEN 1 ELSE 0 END) as no_answer,
+                        -- Корректные ответы с данными
+                        SUM(CASE WHEN has_answer IN (1, '1', 'true', 'True', 'TRUE') THEN 1 ELSE 0 END) as correct,
+                        -- 🔵 Вне специализации/нет результата.
+                        -- ВАЖНО: считаем по той же логике, что и статус в листе «📋 Детали»:
+                        --   «✅ Обработано (нет результата)» = success=TRUE и has_answer=FALSE.
+                        -- Дополнительно (на случай иной схемы логирования) включаем success=FALSE.
+                        SUM(
+                            CASE
+                                WHEN success IN (0, '0', 'false', 'False', 'FALSE') THEN 1
+                                WHEN success IN (1, '1', 'true', 'True', 'TRUE')
+                                     AND has_answer IN (0, '0', 'false', 'False', 'FALSE') THEN 1
+                                ELSE 0
+                            END
+                        ) as out_of_scope,
+                        -- Нет информации (оставляем для совместимости): success=TRUE, но has_answer=FALSE
+                        SUM(CASE WHEN success IN (1, '1', 'true', 'True', 'TRUE')
+                                  AND has_answer IN (0, '0', 'false', 'False', 'FALSE') THEN 1 ELSE 0 END) as no_answer,
                         SUM(CASE WHEN request_type = 'code_search' THEN 1 ELSE 0 END) as code_search,
                         SUM(CASE WHEN request_type = 'name_search' THEN 1 ELSE 0 END) as name_search,
                         SUM(CASE WHEN request_type = 'general' THEN 1 ELSE 0 END) as general_question
@@ -2488,6 +2754,8 @@ class Database:
                 stats = await cursor.fetchone()
                 
                 if stats and stats[0] > 0:
+                    # NOTE: В таблице quality_metrics поле называется "incorrect_answers"
+                    # но семантически теперь это "out_of_scope" (вне специализации)
                     await db.execute('''
                         INSERT OR REPLACE INTO quality_metrics
                         (metric_date, total_queries, correct_answers, incorrect_answers,
@@ -2502,7 +2770,12 @@ class Database:
             print(f"[ERROR] Failed to update quality metrics: {e}")
     
     async def get_quality_metrics_summary(self, days: int = 7):
-        """Получает сводку по метрикам качества - ТОЛЬКО валидные типы запросов"""
+        """
+        Получает сводку по метрикам качества - ТОЛЬКО валидные типы запросов.
+        
+        ВАЖНО: success=FALSE не считается ошибкой, это корректная работа бота (вопрос вне специализации).
+        В "коэффициент точности" попадают ТОЛЬКО has_answer=TRUE (корректные ответы с данными).
+        """
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
@@ -2510,12 +2783,34 @@ class Database:
                 start_date = datetime.now().date() - timedelta(days=days)
                 
                 # Считаем напрямую из request_metrics с фильтрацией типов (ИСКЛЮЧАЯ админов)
+                # ИСПРАВЛЕНО: success=FALSE не считается "некорректным", это "вне специализации"
+                # SQLite допускает хранение BOOLEAN как 0/1 или строк.
+                # Чтобы метрики не "обнулялись" из-за типа данных, используем IN-списки.
                 cursor = await db.execute('''
                     SELECT
                         COUNT(*) as total,
-                        SUM(CASE WHEN rm.success = TRUE AND rm.has_answer = TRUE THEN 1 ELSE 0 END) as correct,
-                        SUM(CASE WHEN rm.success = FALSE THEN 1 ELSE 0 END) as incorrect,
-                        SUM(CASE WHEN rm.has_answer = FALSE THEN 1 ELSE 0 END) as no_answer,
+                        -- Корректные ответы с данными (has_answer=TRUE, независимо от success)
+                        SUM(CASE WHEN rm.has_answer IN (1, '1', 'true', 'True', 'TRUE') THEN 1 ELSE 0 END) as correct,
+                        -- 🔵 Вопросы вне специализации бота
+                        -- ВАЖНО: считаем по той же логике, что и статус в листе «📋 Детали»:
+                        --   «✅ Обработано (нет результата)» = success=TRUE и has_answer=FALSE.
+                        -- Дополнительно (на случай иной схемы логирования) включаем success=FALSE.
+                        -- ВАЖНО: НЕ влияет на точность (исключаем из denominator).
+                        SUM(
+                            CASE
+                                WHEN rm.success IN (0, '0', 'false', 'False', 'FALSE') THEN 1
+                                WHEN rm.success IN (1, '1', 'true', 'True', 'TRUE')
+                                     AND rm.has_answer IN (0, '0', 'false', 'False', 'FALSE') THEN 1
+                                ELSE 0
+                            END
+                        ) as out_of_scope,
+                        -- ✅ Обработано (нет результата): success=TRUE, но has_answer=FALSE
+                        -- ВАЖНО: участвует в расчёте точности как "no_answer" (как было ранее)
+                        SUM(CASE WHEN rm.success IN (1, '1', 'true', 'True', 'TRUE')
+                                  AND rm.has_answer IN (0, '0', 'false', 'False', 'FALSE') THEN 1 ELSE 0 END) as no_result,
+                        -- ⚠️ Без ответа (таймаут): пользователь не получил ответ в течение 60 секунд
+                        -- ВАЖНО: по требованию НЕ влияет на точность (в отчёте показываем отдельно)
+                        SUM(CASE WHEN rm.response_time IS NULL OR rm.response_time >= 60 THEN 1 ELSE 0 END) as timeout_no_answer,
                         SUM(CASE WHEN rm.request_type = 'code_search' THEN 1 ELSE 0 END) as code_searches,
                         SUM(CASE WHEN rm.request_type = 'name_search' THEN 1 ELSE 0 END) as name_searches,
                         SUM(CASE WHEN rm.request_type = 'general' THEN 1 ELSE 0 END) as general_questions
@@ -2528,15 +2823,64 @@ class Database:
                 
                 result = dict(await cursor.fetchone())
                 
-                # Вычисляем проценты
-                total = result['total'] or 1
-                result['correct_percentage'] = (result['correct'] / total * 100) if total > 0 else 0
-                result['incorrect_percentage'] = (result['incorrect'] / total * 100) if total > 0 else 0
-                result['no_answer_percentage'] = (result['no_answer'] / total * 100) if total > 0 else 0
+                # ИСПРАВЛЕНО: безопасная обработка None значений
+                total = result.get('total') or 0
+                correct = result.get('correct') or 0
+                out_of_scope = result.get('out_of_scope') or 0
+                no_result = result.get('no_result') or 0
+                timeout_no_answer = result.get('timeout_no_answer') or 0
+                
+                # Обновляем result с безопасными значениями
+                result['total'] = total
+                result['correct'] = correct
+                # ВАЖНО:
+                # - out_of_scope = success=FALSE (вне специализации) — НЕ влияет на точность
+                # - no_result = success=TRUE & has_answer=FALSE — влияет на точность (как было ранее)
+                # - no_answer в отчёте = таймаут (>=60 сек или NULL) — НЕ влияет на точность
+                result['out_of_scope'] = out_of_scope
+                result['no_answer'] = timeout_no_answer
+                # Доп. поля, чтобы сохранить прежние расчёты точности
+                result['no_result'] = no_result
+                result['timeout_no_answer'] = timeout_no_answer
+                result['code_searches'] = result.get('code_searches') or 0
+                result['name_searches'] = result.get('name_searches') or 0
+                result['general_questions'] = result.get('general_questions') or 0
+                
+                # Вычисляем проценты (защита от деления на ноль)
+                # Требование пользователя: «вопросы вне специализации» (🔵 out_of_scope)
+                # НЕ должны участвовать в процентах, но количество нужно показывать.
+                #
+                # Поэтому проценты считаем только в рамках релевантных запросов:
+                #   relevant_total = correct + timeout_no_answer
+                # где:
+                #   correct = has_answer=TRUE
+                #   timeout_no_answer = response_time IS NULL OR response_time >= 60
+                #
+                # Важно: no_result (success=TRUE & has_answer=FALSE) остаётся в данных как часть out_of_scope
+                # и не влияет на проценты.
+                relevant_total = correct + timeout_no_answer
+                if relevant_total > 0:
+                    result['correct_percentage'] = (correct / relevant_total * 100)
+                    result['no_answer_percentage'] = (timeout_no_answer / relevant_total * 100)
+                else:
+                    result['correct_percentage'] = 0
+                    result['no_answer_percentage'] = 0
+                
+                # Процент вопросов вне специализации (от общего числа запросов)
+                result['out_of_scope_percentage'] = (out_of_scope / total * 100) if total > 0 else 0
+
+                # Процент таймаутов (>= 60 сек) от общего числа запросов
+                result['timeout_no_answer_percentage'] = (timeout_no_answer / total * 100) if total > 0 else 0
+                
+                # Для обратной совместимости добавляем старое поле
+                result['incorrect'] = result['out_of_scope']
+                result['incorrect_percentage'] = result['out_of_scope_percentage']
                 
                 return result
         except Exception as e:
             print(f"[ERROR] Failed to get quality metrics summary: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     async def get_comprehensive_metrics(self, days: int = 7):
@@ -2545,12 +2889,12 @@ class Database:
             return {
                 'client_metrics': {
                     'dau': await self.get_dau_metrics(days),
-                    'retention': await self.get_retention_metrics(),
+                    'retention': await self.get_retention_metrics(),  # NOTE: retention всегда считается от "сегодня"
                     'sessions': await self.get_session_metrics(days)
                 },
                 'technical_metrics': {
                     'response_time': await self.get_metrics_summary(days),
-                    'system': await self._get_latest_system_metrics()
+                    'system': await self._get_latest_system_metrics(days)  # ИСПРАВЛЕНО: передаем days
                 },
                 'quality_metrics': await self.get_quality_metrics_summary(days),
                 'period_days': days
@@ -2559,17 +2903,22 @@ class Database:
             print(f"[ERROR] Failed to get comprehensive metrics: {e}")
             return None
     
-    async def _get_latest_system_metrics(self):
-        """Получает последние системные метрики"""
+    async def _get_latest_system_metrics(self, days: int = 7):
+        """
+        Получает системные метрики за последние N дней.
+        По умолчанию возвращает последние 7 записей для тренда.
+        """
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
                 
+                start_date = datetime.now().date() - timedelta(days=days)
+                
                 cursor = await db.execute('''
                     SELECT * FROM system_metrics
+                    WHERE metric_date >= ?
                     ORDER BY metric_date DESC
-                    LIMIT 7
-                ''')
+                ''', (start_date,))
                 
                 return [dict(row) for row in await cursor.fetchall()]
         except Exception as e:
@@ -2639,6 +2988,403 @@ class Database:
         except Exception as e:
             print(f"[ERROR] Failed to get average rating: {e}")
             return 0.0
+    
+    async def get_binary_feedback_metrics(self, days: int = 30) -> dict:
+        """
+        Получает метрики бинарной системы оценок (positive/negative/declined)
+        
+        Args:
+            days: Период анализа в днях
+            
+        Returns:
+            dict: Словарь с метриками:
+                - total_ratings: общее количество оценок
+                - positive_count: количество положительных
+                - negative_count: количество отрицательных
+                - declined_count: количество отказов
+                - satisfaction_rate: процент положительных оценок
+                - dissatisfaction_rate: процент отрицательных оценок
+                - declined_rate: процент отказов
+                - total_interactions: общее количество взаимодействий (валидных запросов)
+                - response_rate: коэффициент отклика (оценок к взаимодействиям)
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                start_date = datetime.now() - timedelta(days=days)
+                
+                # Получаем статистику по оценкам из bot_response_ratings (ИСКЛЮЧАЯ админов)
+                cursor = await db.execute('''
+                    SELECT
+                        COUNT(*) as total_ratings,
+                        SUM(CASE WHEN rating_type = 'positive' THEN 1 ELSE 0 END) as positive_count,
+                        SUM(CASE WHEN rating_type = 'negative' THEN 1 ELSE 0 END) as negative_count,
+                        SUM(CASE WHEN rating_type = 'declined' THEN 1 ELSE 0 END) as declined_count,
+                        COUNT(DISTINCT brr.user_id) as unique_users_rated
+                    FROM bot_response_ratings brr
+                    JOIN users u ON brr.user_id = u.telegram_id
+                    WHERE brr.timestamp >= ?
+                      AND u.role != 'admin'
+                ''', (start_date,))
+                
+                ratings = dict(await cursor.fetchone())
+
+                # Получаем количество ПОКАЗОВ формы оценки (denominator)
+                cursor = await db.execute('''
+                    SELECT
+                        COUNT(*) as total_interactions,
+                        COUNT(DISTINCT bfp.user_id) as unique_users_interacted
+                    FROM bot_feedback_prompts bfp
+                    JOIN users u ON bfp.user_id = u.telegram_id
+                    WHERE bfp.timestamp >= ?
+                      AND u.role != 'admin'
+                ''', (start_date,))
+
+                interactions = dict(await cursor.fetchone())
+                
+                # Вычисляем метрики
+                total_ratings = ratings.get('total_ratings') or 0
+                positive = ratings.get('positive_count') or 0
+                negative = ratings.get('negative_count') or 0
+                declined = ratings.get('declined_count') or 0
+                total_interactions = interactions.get('total_interactions') or 0
+                
+                # Процентные показатели от общего числа оценок
+                satisfaction_rate = (positive / total_ratings * 100) if total_ratings > 0 else 0
+                dissatisfaction_rate = (negative / total_ratings * 100) if total_ratings > 0 else 0
+                declined_rate = (declined / total_ratings * 100) if total_ratings > 0 else 0
+                
+                # Коэффициент отклика (response rate) - сколько пользователей оставляют оценки
+                response_rate = (total_ratings / total_interactions * 100) if total_interactions > 0 else 0
+                
+                return {
+                    'total_ratings': total_ratings,
+                    'positive_count': positive,
+                    'negative_count': negative,
+                    'declined_count': declined,
+                    'satisfaction_rate': round(satisfaction_rate, 2),
+                    'dissatisfaction_rate': round(dissatisfaction_rate, 2),
+                    'declined_rate': round(declined_rate, 2),
+                    'total_interactions': total_interactions,
+                    'response_rate': round(response_rate, 2),
+                    'unique_users_rated': ratings.get('unique_users_rated') or 0,
+                    'unique_users_interacted': interactions.get('unique_users_interacted') or 0
+                }
+                
+        except Exception as e:
+            print(f"[ERROR] Failed to get binary feedback metrics: {e}")
+            import traceback
+            traceback.print_exc()
+            return {
+                'total_ratings': 0,
+                'positive_count': 0,
+                'negative_count': 0,
+                'declined_count': 0,
+                'satisfaction_rate': 0,
+                'dissatisfaction_rate': 0,
+                'declined_rate': 0,
+                'total_interactions': 0,
+                'response_rate': 0,
+                'unique_users_rated': 0,
+                'unique_users_interacted': 0
+            }
+    
+    # ============================================================
+    # МЕТОДЫ ДЛЯ НОВОЙ СИСТЕМЫ ОЦЕНОК ОТВЕТОВ
+    # ============================================================
+    
+    async def save_bot_response_rating(
+        self,
+        user_id: int,
+        message_id: int,
+        rating_type: str,
+        question: str = "",
+        bot_response: str = ""
+    ) -> bool:
+        """
+        Сохраняет оценку ответа бота в новой системе
+        
+        Args:
+            user_id: ID пользователя Telegram
+            message_id: ID сообщения
+            rating_type: Тип оценки ('positive', 'negative', 'declined')
+            question: Текст вопроса пользователя
+            bot_response: Текст ответа бота
+            
+        Returns:
+            bool: True если успешно, False при ошибке
+        """
+        try:
+            # Валидация типа оценки
+            valid_types = ['positive', 'negative', 'declined']
+            if rating_type not in valid_types:
+                print(f"[ERROR] Invalid rating type: {rating_type}")
+                return False
+            
+            # Валидация user_id и message_id
+            if not user_id or not message_id:
+                print(f"[ERROR] Invalid user_id or message_id")
+                return False
+            
+            # Обрезаем длинные тексты
+            question_truncated = question[:2000] if question else ""
+            response_truncated = bot_response[:3000] if bot_response else ""
+            
+            async with aiosqlite.connect(self.db_path, timeout=10.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                await db.execute('''
+                    INSERT INTO bot_response_ratings
+                    (user_id, message_id, rating_type, question, bot_response, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (
+                    user_id,
+                    message_id,
+                    rating_type,
+                    question_truncated,
+                    response_truncated,
+                    datetime.now()
+                ))
+                
+                await db.commit()
+                print(f"[RATING] ✓ Saved {rating_type} rating from user {user_id}, message {message_id}")
+                return True
+                
+        except Exception as e:
+            print(f"[ERROR] Failed to save bot response rating: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    async def is_user_rating_enabled(self, user_id: int) -> bool:
+        """
+        Проверяет, включены ли запросы оценки для пользователя
+        
+        Args:
+            user_id: ID пользователя Telegram
+            
+        Returns:
+            bool: True если включены, False если отключены
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute('''
+                    SELECT is_rating_enabled
+                    FROM user_rating_preferences
+                    WHERE user_id = ?
+                ''', (user_id,))
+                
+                result = await cursor.fetchone()
+                
+                # Если записи нет - по умолчанию включено
+                if not result:
+                    return True
+                
+                return bool(result[0])
+                
+        except Exception as e:
+            print(f"[ERROR] Failed to check rating enabled: {e}")
+            # При ошибке возвращаем True (по умолчанию включено)
+            return True
+    
+    async def disable_user_ratings(self, user_id: int) -> bool:
+        """
+        Отключает запросы оценки для пользователя
+        
+        Args:
+            user_id: ID пользователя Telegram
+            
+        Returns:
+            bool: True если успешно
+        """
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=10.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                await db.execute('''
+                    INSERT INTO user_rating_preferences (user_id, is_rating_enabled, disabled_at)
+                    VALUES (?, FALSE, ?)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        is_rating_enabled = FALSE,
+                        disabled_at = excluded.disabled_at
+                ''', (user_id, datetime.now()))
+                
+                await db.commit()
+                print(f"[RATING] ✓ Disabled ratings for user {user_id}")
+                return True
+                
+        except Exception as e:
+            print(f"[ERROR] Failed to disable user ratings: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    async def enable_user_ratings(self, user_id: int) -> bool:
+        """
+        Включает запросы оценки для пользователя
+        
+        Args:
+            user_id: ID пользователя Telegram
+            
+        Returns:
+            bool: True если успешно
+        """
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=10.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                await db.execute('''
+                    INSERT INTO user_rating_preferences (user_id, is_rating_enabled, disabled_at)
+                    VALUES (?, TRUE, NULL)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        is_rating_enabled = TRUE,
+                        disabled_at = NULL
+                ''', (user_id,))
+                
+                await db.commit()
+                print(f"[RATING] ✓ Enabled ratings for user {user_id}")
+                return True
+                
+        except Exception as e:
+            print(f"[ERROR] Failed to enable user ratings: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    async def get_bot_rating_stats(self, days: int = 30) -> dict:
+        """
+        Получает статистику оценок ответов бота
+        
+        Args:
+            days: Количество дней для анализа
+            
+        Returns:
+            dict: Словарь со статистикой
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                start_date = datetime.now() - timedelta(days=days)
+                
+                # Общая статистика
+                cursor = await db.execute('''
+                    SELECT
+                        COUNT(*) as total_ratings,
+                        SUM(CASE WHEN rating_type = 'positive' THEN 1 ELSE 0 END) as positive_count,
+                        SUM(CASE WHEN rating_type = 'negative' THEN 1 ELSE 0 END) as negative_count,
+                        SUM(CASE WHEN rating_type = 'declined' THEN 1 ELSE 0 END) as declined_count,
+                        COUNT(DISTINCT user_id) as unique_users
+                    FROM bot_response_ratings
+                    WHERE timestamp >= ?
+                ''', (start_date,))
+                
+                overall = dict(await cursor.fetchone())
+                
+                # Вычисляем процентные показатели
+                total = overall.get('total_ratings', 0)
+                if total > 0:
+                    overall['positive_percentage'] = round((overall['positive_count'] / total) * 100, 2)
+                    overall['negative_percentage'] = round((overall['negative_count'] / total) * 100, 2)
+                    overall['declined_percentage'] = round((overall['declined_count'] / total) * 100, 2)
+                else:
+                    overall['positive_percentage'] = 0
+                    overall['negative_percentage'] = 0
+                    overall['declined_percentage'] = 0
+                
+                # Динамика по дням
+                cursor = await db.execute('''
+                    SELECT
+                        DATE(timestamp) as rating_date,
+                        COUNT(*) as total,
+                        SUM(CASE WHEN rating_type = 'positive' THEN 1 ELSE 0 END) as positive,
+                        SUM(CASE WHEN rating_type = 'negative' THEN 1 ELSE 0 END) as negative,
+                        SUM(CASE WHEN rating_type = 'declined' THEN 1 ELSE 0 END) as declined
+                    FROM bot_response_ratings
+                    WHERE timestamp >= ?
+                    GROUP BY DATE(timestamp)
+                    ORDER BY rating_date DESC
+                ''', (start_date,))
+                
+                daily_stats = [dict(row) for row in await cursor.fetchall()]
+                
+                # Топ пользователей по количеству оценок
+                cursor = await db.execute('''
+                    SELECT
+                        brr.user_id,
+                        u.name,
+                        u.user_type,
+                        COUNT(*) as rating_count,
+                        SUM(CASE WHEN brr.rating_type = 'positive' THEN 1 ELSE 0 END) as positive,
+                        SUM(CASE WHEN brr.rating_type = 'negative' THEN 1 ELSE 0 END) as negative
+                    FROM bot_response_ratings brr
+                    JOIN users u ON brr.user_id = u.telegram_id
+                    WHERE brr.timestamp >= ?
+                    GROUP BY brr.user_id
+                    ORDER BY rating_count DESC
+                    LIMIT 10
+                ''', (start_date,))
+                
+                top_users = [dict(row) for row in await cursor.fetchall()]
+                
+                # Статистика отключений
+                cursor = await db.execute('''
+                    SELECT COUNT(*) as disabled_count
+                    FROM user_rating_preferences
+                    WHERE is_rating_enabled = FALSE
+                ''')
+                
+                disabled = dict(await cursor.fetchone())
+                
+                return {
+                    'overall': overall,
+                    'daily_stats': daily_stats,
+                    'top_users': top_users,
+                    'disabled_users_count': disabled.get('disabled_count', 0),
+                    'period_days': days
+                }
+                
+        except Exception as e:
+            print(f"[ERROR] Failed to get bot rating stats: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    async def get_user_rating_history(self, user_id: int, limit: int = 20) -> list:
+        """
+        Получает историю оценок конкретного пользователя
+        
+        Args:
+            user_id: ID пользователя
+            limit: Максимальное количество записей
+            
+        Returns:
+            list: Список оценок
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                cursor = await db.execute('''
+                    SELECT
+                        id,
+                        message_id,
+                        rating_type,
+                        question,
+                        bot_response,
+                        timestamp
+                    FROM bot_response_ratings
+                    WHERE user_id = ?
+                    ORDER BY timestamp DESC
+                    LIMIT ?
+                ''', (user_id, limit))
+                
+                return [dict(row) for row in await cursor.fetchall()]
+                
+        except Exception as e:
+            print(f"[ERROR] Failed to get user rating history: {e}")
+            return []
     
     async def get_detailed_session_report(self, days: int = 30):
         """

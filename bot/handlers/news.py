@@ -21,6 +21,8 @@ class StoplistStates(StatesGroup):
     menu = State()
     uploading_suspended = State()
     uploading_removed = State()
+    uploading_instruction_stoplist = State()
+    uploading_instruction_blanks = State()
 
 # ============================================================
 # КЛАВИАТУРЫ
@@ -31,10 +33,31 @@ def get_stoplist_management_kb():
     keyboard = [
         [KeyboardButton(text="📤 Загрузить 'Тесты в приостановке'")],
         [KeyboardButton(text="📤 Загрузить 'Тесты выведенные'")],
+        [KeyboardButton(text="🎥 Видео-инструкция: стоп-лист")],
+        [KeyboardButton(text="🎥 Видео-инструкция: бланки")],
         [KeyboardButton(text="📋 Текущие файлы")],
         [KeyboardButton(text="🔙 Назад")]
     ]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+
+
+def _extract_media_file_id_and_type(message: Message) -> tuple[str | None, str | None]:
+    """Достает file_id и тип медиа из входящего сообщения (видео/GIF)."""
+    # Видео
+    if message.video:
+        return message.video.file_id, 'video'
+
+    # GIF (animation)
+    if message.animation:
+        return message.animation.file_id, 'animation'
+
+    # Иногда GIF прилетает как документ
+    if message.document and message.document.mime_type:
+        mime = message.document.mime_type.lower()
+        if 'gif' in mime:
+            return message.document.file_id, 'animation'
+
+    return None, None
 
 def create_stoplist_keyboard():
     """Создает inline клавиатуру для стоп-листа"""
@@ -109,6 +132,38 @@ async def upload_removed_tests(message: Message, state: FSMContext):
     )
     await state.set_state(StoplistStates.uploading_removed)
 
+
+@news_router.message(StoplistStates.menu, F.text == "🎥 Видео-инструкция: стоп-лист")
+async def upload_stoplist_instruction_video(message: Message, state: FSMContext):
+    """Загрузка видео-инструкции для стоп-листа (админ)."""
+    await message.answer(
+        "🎥 <b>Видео-инструкция: стоп-лист</b>\n\n"
+        "Отправьте видео (MP4) или GIF.\n"
+        "После загрузки бот будет показывать это видео, когда пользователь спрашивает про стоп-лист.",
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="🔙 Отмена")]],
+            resize_keyboard=True,
+        ),
+    )
+    await state.set_state(StoplistStates.uploading_instruction_stoplist)
+
+
+@news_router.message(StoplistStates.menu, F.text == "🎥 Видео-инструкция: бланки")
+async def upload_blanks_instruction_video(message: Message, state: FSMContext):
+    """Загрузка видео-инструкции для бланков (админ)."""
+    await message.answer(
+        "🎥 <b>Видео-инструкция: бланки</b>\n\n"
+        "Отправьте видео (MP4) или GIF.\n"
+        "После загрузки бот будет показывать это видео, когда пользователь спрашивает про бланки/формы.",
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="🔙 Отмена")]],
+            resize_keyboard=True,
+        ),
+    )
+    await state.set_state(StoplistStates.uploading_instruction_blanks)
+
 @news_router.message(StoplistStates.uploading_suspended, F.document | F.photo | F.video)
 async def save_suspended_file(message: Message, state: FSMContext):
     """Сохранение файла для тестов в приостановке"""
@@ -167,6 +222,78 @@ async def save_removed_file(message: Message, state: FSMContext):
     
     await state.set_state(StoplistStates.menu)
 
+
+@news_router.message(StoplistStates.uploading_instruction_stoplist)
+async def save_stoplist_instruction_media(message: Message, state: FSMContext):
+    """Сохраняет медиа-инструкцию для стоп-листа (video/gif)."""
+    if message.text == "🔙 Отмена":
+        await message.answer(
+            "Операция отменена.",
+            reply_markup=get_stoplist_management_kb(),
+        )
+        await state.set_state(StoplistStates.menu)
+        return
+
+    file_id, media_type = _extract_media_file_id_and_type(message)
+    if not file_id or not media_type:
+        await message.answer("❌ Пожалуйста, отправьте видео (MP4) или GIF.")
+        return
+
+    success = await db.set_instruction_media(
+        media_key="instruction_stoplist",
+        file_id=file_id,
+        media_type=media_type,
+    )
+
+    if success:
+        await message.answer(
+            "✅ Видео-инструкция для стоп-листа сохранена!",
+            reply_markup=get_stoplist_management_kb(),
+        )
+    else:
+        await message.answer(
+            "❌ Ошибка при сохранении видео-инструкции.",
+            reply_markup=get_stoplist_management_kb(),
+        )
+
+    await state.set_state(StoplistStates.menu)
+
+
+@news_router.message(StoplistStates.uploading_instruction_blanks)
+async def save_blanks_instruction_media(message: Message, state: FSMContext):
+    """Сохраняет медиа-инструкцию для бланков (video/gif)."""
+    if message.text == "🔙 Отмена":
+        await message.answer(
+            "Операция отменена.",
+            reply_markup=get_stoplist_management_kb(),
+        )
+        await state.set_state(StoplistStates.menu)
+        return
+
+    file_id, media_type = _extract_media_file_id_and_type(message)
+    if not file_id or not media_type:
+        await message.answer("❌ Пожалуйста, отправьте видео (MP4) или GIF.")
+        return
+
+    success = await db.set_instruction_media(
+        media_key="instruction_blanks",
+        file_id=file_id,
+        media_type=media_type,
+    )
+
+    if success:
+        await message.answer(
+            "✅ Видео-инструкция для бланков сохранена!",
+            reply_markup=get_stoplist_management_kb(),
+        )
+    else:
+        await message.answer(
+            "❌ Ошибка при сохранении видео-инструкции.",
+            reply_markup=get_stoplist_management_kb(),
+        )
+
+    await state.set_state(StoplistStates.menu)
+
 @news_router.message(StoplistStates.uploading_suspended)
 async def handle_invalid_file_suspended(message: Message, state: FSMContext):
     """Обработка отмены или неверного формата для suspended"""
@@ -208,6 +335,14 @@ async def show_current_stoplist_files(message: Message):
     
     text += "❌ <b>Тесты выведенные:</b>\n"
     text += "   " + ("✅ Загружен" if removed_file else "❌ Не загружен")
+
+    # Видео-инструкции
+    stoplist_instruction = await db.get_instruction_media('instruction_stoplist')
+    blanks_instruction = await db.get_instruction_media('instruction_blanks')
+
+    text += "\n\n🎥 <b>Видео-инструкции:</b>\n"
+    text += "• Стоп-лист: " + ("✅ Загружено" if stoplist_instruction else "❌ Не загружено") + "\n"
+    text += "• Бланки: " + ("✅ Загружено" if blanks_instruction else "❌ Не загружено")
     
     await message.answer(
         text,
@@ -380,4 +515,3 @@ async def close_stoplist(callback: CallbackQuery):
         await callback.message.delete()
     except:
         pass
-    

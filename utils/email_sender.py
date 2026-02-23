@@ -28,7 +28,7 @@ async def send_feedback_email(user_data: dict, feedback_type: str, message: str)
               <li><strong>Специализация:</strong> {user_data.get('specialization', 'Не указана')}</li>
             """
         elif user_data.get('user_type') == 'employee':
-            user_type = "Сотрудник VET UNION"
+            user_type = "Сотрудник X-LAB VET"
             dept_map = {'laboratory': 'Лаборатория', 'sales': 'Продажи', 'support': 'Поддержка'}
             dept = dept_map.get(user_data.get('department_function', ''), user_data.get('department_function', ''))
             additional_info = f"""
@@ -124,7 +124,7 @@ async def send_callback_email(user_data: dict, phone: str, message: str):
         - Код клиента: {user_data.get('client_code', 'Не указан')}
         - Специализация: {user_data.get('specialization', 'Не указана')}"""
         elif user_data.get('user_type') == 'employee':
-            user_type = "Сотрудник VET UNION"
+            user_type = "Сотрудник X-LAB VET"
             dept_map = {'laboratory': 'Лаборатория', 'sales': 'Продажи', 'support': 'Поддержка'}
             dept = dept_map.get(user_data.get('department_function', ''), user_data.get('department_function', ''))
             additional_info = f"""
@@ -168,7 +168,7 @@ async def send_callback_email(user_data: dict, phone: str, message: str):
             
             <hr>
             <p style="color: #666; font-size: 12px;">
-              Это автоматическое сообщение от бота лаборатории VET UNION
+              Это автоматическое сообщение от бота лаборатории X-LAB VET
             </p>
           </body>
         </html>
@@ -191,7 +191,7 @@ async def send_callback_email(user_data: dict, phone: str, message: str):
         {message}
         
         ---
-        Это автоматическое сообщение от бота лаборатории VET UNION
+        Это автоматическое сообщение от бота лаборатории X-LAB VET
         """
         
         part1 = MIMEText(text, 'plain', 'utf-8')
@@ -238,7 +238,7 @@ async def send_monthly_metrics_email(excel_data: bytes, month_name: str, metrics
         recipient = metrics_recipient or EMAIL_TO
         
         msg = MIMEMultipart('mixed')
-       msg['Subject'] = f'Ежемесячный отчет по метрикам X-LAB VET - {month_name}'
+        msg['Subject'] = f'Ежемесячный отчет по метрикам X-LAB - {month_name}'
         msg['From'] = EMAIL_LOGIN
         msg['To'] = recipient
         msg['Reply-To'] = EMAIL_LOGIN

@@ -2,7 +2,7 @@ import random
 import string
 import html
 from aiogram import Router, F
-from aiogram.types import Message, BufferedInputFile, ReplyKeyboardMarkup, KeyboardButton, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, BufferedInputFile, ReplyKeyboardMarkup, KeyboardButton, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, InputMediaDocument
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from bot.keyboards import (
@@ -31,6 +31,9 @@ class BroadcastStates(StatesGroup):
     waiting_for_message = State()
     waiting_for_media = State()
     waiting_for_caption = State()
+    collecting_photos = State()  # Новое состояние для сбора нескольких фото
+    collecting_documents = State()  # Новое состояние для сбора документов
+    confirming_media_group = State()  # Подтверждение перед отправкой
 
 class SystemStates(StatesGroup):
     in_system_menu = State()
@@ -96,7 +99,6 @@ def get_system_management_kb():
         [KeyboardButton(text="🔙 Назад")]
     ]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
-
 
 @admin_router.message(SystemStates.in_system_menu, F.text == "🧪 Управление фото контейнеров")
 async def manage_container_photos(message: Message, state: FSMContext):
@@ -853,41 +855,6 @@ async def export_poll_results(message: Message, state: FSMContext):
         reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
     )
     await state.set_state(PollStates.viewing_results)
-    
-@admin_router.message(PollStates.poll_menu, F.text == "📥 Выгрузить результаты")
-async def export_poll_results(message: Message, state: FSMContext):
-    # Получаем список опросов с результатами
-    polls_data = await db.get_full_poll_results()
-    
-    if not polls_data:
-        await message.answer(
-            "Нет опросов с результатами для выгрузки.",
-            reply_markup=get_poll_management_kb()
-        )
-        return
-    
-    # Создаем клавиатуру с выбором опроса
-    keyboard = []
-    for poll in polls_data:
-        button_text = f"📊 {poll['title']} ({poll['total_responses']} ответов)"
-        if len(button_text) > 60:
-            button_text = button_text[:57] + "..."
-        keyboard.append([InlineKeyboardButton(
-            text=button_text,
-            callback_data=f"export_poll:{poll['id']}"
-        )])
-    
-    # Добавляем кнопку "Все опросы"
-    keyboard.append([InlineKeyboardButton(
-        text="📥 Выгрузить все опросы",
-        callback_data="export_poll:all"
-    )])
-    
-    await message.answer(
-        "📊 Выберите опрос для выгрузки:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
-    )
-    await state.set_state(PollStates.viewing_results)
 
 @admin_router.callback_query(F.data.startswith("export_poll:"))
 async def handle_poll_export(callback: CallbackQuery, state: FSMContext):
@@ -963,9 +930,29 @@ def get_broadcast_content_type_kb():
     from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
     keyboard = [
         [KeyboardButton(text="📝 Текстовое сообщение")],
-        [KeyboardButton(text="🖼️ Изображение")],
+        [KeyboardButton(text="🖼️ Одно изображение")],
+        [KeyboardButton(text="📸 Несколько изображений")],
+        [KeyboardButton(text="📄 Документы")],
         [KeyboardButton(text="🎬 Видео")],
         [KeyboardButton(text="🎭 GIF")],
+        [KeyboardButton(text="🔙 Вернуться в главное меню")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+
+def get_media_collection_kb():
+    """Клавиатура для сбора множественных файлов"""
+    from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+    keyboard = [
+        [KeyboardButton(text="✅ Завершить сбор")],
+        [KeyboardButton(text="🔙 Вернуться в главное меню")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+
+def get_caption_kb():
+    """Клавиатура для подписи"""
+    from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+    keyboard = [
+        [KeyboardButton(text="➡️ Без подписи")],
         [KeyboardButton(text="🔙 Вернуться в главное меню")]
     ]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
@@ -1248,9 +1235,37 @@ async def process_content_type(message: Message, state: FSMContext):
         )
         await state.set_state(BroadcastStates.waiting_for_message)
     
-    elif message.text in ["🖼️ Изображение", "🎬 Видео", "🎭 GIF"]:
+    elif message.text == "🖼️ Одно изображение":
+        await state.update_data(content_type="photo")
+        await message.answer(
+            "📎 Отправьте изображение для рассылки:",
+            reply_markup=get_back_to_menu_kb()
+        )
+        await state.set_state(BroadcastStates.waiting_for_media)
+    
+    elif message.text == "📸 Несколько изображений":
+        await state.update_data(content_type="photo_group", media_group=[])
+        await message.answer(
+            "📸 Отправляйте изображения для рассылки (до 10 штук).\n\n"
+            "После того как отправите все нужные изображения, "
+            "нажмите 'Завершить сбор'",
+            reply_markup=get_media_collection_kb()
+        )
+        await state.set_state(BroadcastStates.collecting_photos)
+    
+    elif message.text == "📄 Документы":
+        await state.update_data(content_type="documents", media_group=[])
+        await message.answer(
+            "📄 Отправляйте документы для рассылки (до 10 штук).\n\n"
+            "Поддерживаются форматы: PDF, DOC, DOCX, XLS, XLSX и др.\n\n"
+            "После того как отправите все документы, "
+            "нажмите 'Завершить сбор'",
+            reply_markup=get_media_collection_kb()
+        )
+        await state.set_state(BroadcastStates.collecting_documents)
+    
+    elif message.text in ["🎬 Видео", "🎭 GIF"]:
         content_types = {
-            "🖼️ Изображение": "photo",
             "🎬 Видео": "video",
             "🎭 GIF": "animation"
         }
@@ -1314,7 +1329,7 @@ async def process_caption(message: Message, state: FSMContext):
         await message.answer("Операция отменена.", reply_markup=get_admin_menu_kb())
         return
     
-    caption = None if message.text == "-" else message.text
+    caption = None if message.text in ["-", "➡️ Без подписи"] else message.text
     await state.update_data(caption=caption)
     
     # Переходим к отправке
@@ -1350,6 +1365,16 @@ async def send_broadcast(message: Message, state: FSMContext):
     
     if content_type == "text":
         preview_text += f"Текст сообщения:\n{data.get('text')}\n\n"
+    elif content_type == "photo_group":
+        media_group = data.get('media_group', [])
+        preview_text += f"Тип контента: Несколько изображений ({len(media_group)} шт.)\n"
+        if data.get('caption'):
+            preview_text += f"Подпись: {data.get('caption')}\n\n"
+    elif content_type == "documents":
+        media_group = data.get('media_group', [])
+        preview_text += f"Тип контента: Документы ({len(media_group)} шт.)\n"
+        if data.get('caption'):
+            preview_text += f"Сообщение: {data.get('caption')}\n\n"
     else:
         media_types = {"photo": "Изображение", "video": "Видео", "animation": "GIF"}
         preview_text += f"Тип контента: {media_types.get(content_type)}\n"
@@ -1381,6 +1406,45 @@ async def send_broadcast(message: Message, state: FSMContext):
                     caption=caption,
                     parse_mode="HTML"
                 )
+            elif content_type == "photo_group":
+                # Отправка группы изображений
+                media_group = data.get('media_group', [])
+                if media_group:
+                    media_list = []
+                    caption = f"📢 <b>Сообщение от группы техподдержки</b>\n\n{data.get('caption')}" if data.get('caption') else "📢 <b>Сообщение от группы техподдержки</b>"
+                    
+                    # Первое фото с подписью
+                    media_list.append(InputMediaPhoto(
+                        media=media_group[0]['file_id'],
+                        caption=caption,
+                        parse_mode="HTML"
+                    ))
+                    
+                    # Остальные фото без подписи
+                    for item in media_group[1:]:
+                        media_list.append(InputMediaPhoto(media=item['file_id']))
+                    
+                    await bot.send_media_group(recipient_id, media=media_list)
+            elif content_type == "documents":
+                # Отправка документов
+                media_group = data.get('media_group', [])
+                caption_text = f"📢 <b>Сообщение от группы техподдержки</b>\n\n{data.get('caption')}" if data.get('caption') else "📢 <b>Сообщение от группы техподдержки</b>"
+                
+                # Отправляем сначала сообщение, если есть
+                if data.get('caption'):
+                    await bot.send_message(
+                        recipient_id,
+                        caption_text,
+                        parse_mode="HTML"
+                    )
+                
+                # Затем отправляем каждый документ по отдельности
+                for doc in media_group:
+                    await bot.send_document(
+                        recipient_id,
+                        document=doc['file_id']
+                    )
+                    await asyncio.sleep(0.05)  # Маленькая задержка между документами
             elif content_type == "video":
                 caption = f"📢 <b>Сообщение от группы техподдержки</b>\n\n{data.get('caption')}" if data.get('caption') else "📢 <b>Сообщение от группы техподдержки</b>"
                 await bot.send_video(
@@ -1412,7 +1476,138 @@ async def send_broadcast(message: Message, state: FSMContext):
     )
     await state.clear()
 
-@admin_router.message(F.text == "👥 Пользователи")
+# Обработчики для сбора множественных изображений
+@admin_router.message(BroadcastStates.collecting_photos, F.photo)
+async def collect_photo(message: Message, state: FSMContext):
+    """Сбор изображений в группу"""
+    data = await state.get_data()
+    media_group = data.get('media_group', [])
+    
+    # Ограничение в 10 фото
+    if len(media_group) >= 10:
+        await message.answer(
+            "❌ Достигнут лимит в 10 изображений.\n"
+            "Нажмите 'Завершить сбор' для продолжения.",
+            reply_markup=get_media_collection_kb()
+        )
+        return
+    
+    photo = message.photo[-1]
+    media_group.append({
+        'type': 'photo',
+        'file_id': photo.file_id
+    })
+    
+    await state.update_data(media_group=media_group)
+    await message.answer(
+        f"✅ Изображение {len(media_group)} добавлено!\n\n"
+        f"Можете отправить еще (максимум {10 - len(media_group)}) "
+        f"или нажмите 'Завершить сбор'",
+        reply_markup=get_media_collection_kb()
+    )
+
+@admin_router.message(BroadcastStates.collecting_photos, F.text == "✅ Завершить сбор")
+async def finish_collecting_photos(message: Message, state: FSMContext):
+    """Завершение сбора изображений"""
+    data = await state.get_data()
+    media_group = data.get('media_group', [])
+    
+    if not media_group:
+        await message.answer(
+            "❌ Вы не отправили ни одного изображения!\n"
+            "Отправьте хотя бы одно изображение.",
+            reply_markup=get_media_collection_kb()
+        )
+        return
+    
+    await message.answer(
+        f"📝 Введите общую подпись для {len(media_group)} изображений:\n\n"
+        "Поддерживается HTML-форматирование.\n"
+        "Или нажмите 'Без подписи'",
+        reply_markup=get_caption_kb()
+    )
+    await state.set_state(BroadcastStates.waiting_for_caption)
+
+@admin_router.message(BroadcastStates.collecting_photos)
+async def invalid_photo_input(message: Message, state: FSMContext):
+    """Обработка неверного ввода при сборе фото"""
+    if message.text == "🔙 Вернуться в главное меню":
+        await state.clear()
+        await message.answer("Операция отменена.", reply_markup=get_admin_menu_kb())
+        return
+    
+    await message.answer(
+        "❌ Пожалуйста, отправьте изображение или нажмите 'Завершить сбор'",
+        reply_markup=get_media_collection_kb()
+    )
+
+# Обработчики для сбора документов
+@admin_router.message(BroadcastStates.collecting_documents, F.document)
+async def collect_document(message: Message, state: FSMContext):
+    """Сбор документов в группу"""
+    data = await state.get_data()
+    media_group = data.get('media_group', [])
+    
+    # Ограничение в 10 документов
+    if len(media_group) >= 10:
+        await message.answer(
+            "❌ Достигнут лимит в 10 документов.\n"
+            "Нажмите 'Завершить сбор' для продолжения.",
+            reply_markup=get_media_collection_kb()
+        )
+        return
+    
+    document = message.document
+    media_group.append({
+        'type': 'document',
+        'file_id': document.file_id,
+        'file_name': document.file_name
+    })
+    
+    await state.update_data(media_group=media_group)
+    await message.answer(
+        f"✅ Документ {len(media_group)} '{document.file_name}' добавлен!\n\n"
+        f"Можете отправить еще (максимум {10 - len(media_group)}) "
+        f"или нажмите 'Завершить сбор'",
+        reply_markup=get_media_collection_kb()
+    )
+
+@admin_router.message(BroadcastStates.collecting_documents, F.text == "✅ Завершить сбор")
+async def finish_collecting_documents(message: Message, state: FSMContext):
+    """Завершение сбора документов"""
+    data = await state.get_data()
+    media_group = data.get('media_group', [])
+    
+    if not media_group:
+        await message.answer(
+            "❌ Вы не отправили ни одного документа!\n"
+            "Отправьте хотя бы один документ.",
+            reply_markup=get_media_collection_kb()
+        )
+        return
+    
+    await message.answer(
+        f"📝 Введите общее сообщение для {len(media_group)} документов:\n\n"
+        "Поддерживается HTML-форматирование.\n"
+        "Или нажмите 'Без подписи'",
+        reply_markup=get_caption_kb()
+    )
+    await state.set_state(BroadcastStates.waiting_for_caption)
+
+@admin_router.message(BroadcastStates.collecting_documents)
+async def invalid_document_input(message: Message, state: FSMContext):
+    """Обработка неверного ввода при сборе документов"""
+    if message.text == "🔙 Вернуться в главное меню":
+        await state.clear()
+        await message.answer("Операция отменена.", reply_markup=get_admin_menu_kb())
+        return
+    
+    await message.answer(
+        "❌ Пожалуйста, отправьте документ или нажмите 'Завершить сбор'",
+        reply_markup=get_media_collection_kb()
+    )
+
+@admin_router.message(F.text == " Пользователи")
 async def show_users(message: Message):
     user_id = message.from_user.id
     
@@ -2256,6 +2451,7 @@ async def export_metrics(message: Message):
             f"❌ Ошибка при экспорте метрик: {str(e)}",
             reply_markup=get_admin_menu_kb()
         )
+
 @admin_router.message(F.text == "📃 Отчет")
 async def export_session_activity_report(message: Message):
     """Экспорт детального отчета по времени активности пользователей"""

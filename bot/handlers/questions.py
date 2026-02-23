@@ -62,6 +62,7 @@ from bot.keyboards import (
 from bot.handlers.utils import normalize_container_name, deduplicate_container_names
 from bot.handlers.feedback import validate_phone_number, get_phone_kb, format_phone_number, send_callback_email
 from bot.handlers.response_ratings import ResponseRatingManager
+from bot.handlers.rating_feedback import feedback_system  # ✅ НОВОЕ: Система оценки ответов
 
 
 rating_manager = ResponseRatingManager(db)
@@ -88,6 +89,18 @@ LLM_TIMEOUT_SECONDS = 30
 # Пороги уверенности классификатора
 CONFIDENCE_HIGH = 0.85
 CONFIDENCE_MEDIUM = 0.70
+
+
+# Ключевые слова для видео-инструкций
+STOPLIST_INSTRUCTION_KEYWORDS = [
+    'стоп-лист', 'стоплист', 'стоп лист'
+]
+
+BLANKS_INSTRUCTION_KEYWORDS = [
+    'бланк', 'бланки', 'форма', 'формы', 'заполнение', 'скачать бланк', 'бланк направления',
+    # часто пользователи говорят «документ/документы», имея в виду бланки
+    'документ', 'документы'
+]
 
 # Настройки логирования
 logger = logging.getLogger(__name__)
@@ -220,6 +233,66 @@ def sanitize_test_code_for_display(test_code: str) -> str:
         return test_code[:17] + "..."
     
     return test_code
+
+def _detect_instruction_media_key(text_lower: str) -> str | None:
+    """Определяет, какую видео-инструкцию показать пользователю."""
+    if any(k in text_lower for k in STOPLIST_INSTRUCTION_KEYWORDS):
+        return "instruction_stoplist"
+    if any(k in text_lower for k in BLANKS_INSTRUCTION_KEYWORDS):
+        return "instruction_blanks"
+    return None
+
+
+async def _send_instruction_media_or_placeholder(
+    message: Message,
+    instruction_key: str,
+    user_question_text: str,
+):
+    """Отправляет видео/GIF-инструкцию (если загружена), иначе — текстовую заглушку."""
+    media = await db.get_instruction_media(instruction_key)
+    title_map = {
+        "instruction_stoplist": "стоп-лист",
+        "instruction_blanks": "бланки/формы",
+    }
+    title = title_map.get(instruction_key, "инструкцию")
+
+    caption = (
+        f"🎥 <b>Видео-инструкция: {html.escape(title)}</b>\n\n"
+        f"❓ <i>Ваш запрос:</i> \"{html.escape(user_question_text[:200])}{'...' if len(user_question_text) > 200 else ''}\"\n\n"
+        "Если останутся вопросы — можно заказать звонок специалиста ниже."
+    )
+
+    if media and media.get('file_id'):
+        try:
+            if media.get('media_type') == 'video':
+                await message.answer_video(
+                    video=media['file_id'],
+                    caption=caption,
+                    parse_mode="HTML",
+                    reply_markup=_get_callback_support_keyboard(user_question_text),
+                )
+                return
+            if media.get('media_type') == 'animation':
+                await message.answer_animation(
+                    animation=media['file_id'],
+                    caption=caption,
+                    parse_mode="HTML",
+                    reply_markup=_get_callback_support_keyboard(user_question_text),
+                )
+                return
+        except Exception as e:
+            logger.error(f"[INSTRUCTION_MEDIA] Failed to send media {instruction_key}: {e}")
+
+    # Fallback: старое поведение, если видео не загружено/не отправилось
+    await message.answer(
+        f"📋 <b>Запрос про {html.escape(title)}</b>\n\n"
+        f"❓ <i>Ваш вопрос:</i> \"{html.escape(user_question_text[:200])}{'...' if len(user_question_text) > 200 else ''}\"\n\n"
+        "🎥 <b>Видео-инструкция пока не загружена администратором.</b>\n\n"
+        "💡 <b>Или обратитесь к специалисту для консультации:</b>",
+        parse_mode="HTML",
+        reply_markup=_get_callback_support_keyboard(user_question_text),
+    )
+
 
 
 def _rerank_hits_by_query(hits: List[Tuple[Document, float]], query: str) -> List[Tuple[Document, float]]:
@@ -818,10 +891,32 @@ async def handle_universal_search(message: Message, state: FSMContext):
     )
 
     # ============================================================
-    # ПРИОРИТЕТ 1: Проверка на явный общий вопрос
+    # ПРИОРИТЕТ 1: Проверка на стоп-лист/бланки/документы
     # ============================================================
     
     text_lower = text.lower()
+    
+    instruction_key = _detect_instruction_media_key(text_lower)
+
+    if instruction_key:
+        logger.info(f"[PRE-CHECK] Instruction request detected: key={instruction_key}, text={text}")
+
+        await db.add_request_stat(
+            user_id=user_id,
+            request_type="instruction_request",
+            request_text=text,
+        )
+
+        await _send_instruction_media_or_placeholder(
+            message=message,
+            instruction_key=instruction_key,
+            user_question_text=text,
+        )
+        return
+    
+    # ============================================================
+    # ПРИОРИТЕТ 2: Проверка на явный общий вопрос
+    # ============================================================
     
     # Проверяем, является ли это явным вопросом
     is_obvious_question = (
@@ -847,7 +942,7 @@ async def handle_universal_search(message: Message, state: FSMContext):
         return
     
     # ============================================================
-    # ПРИОРИТЕТ 2: Проверка на код теста (ТОЛЬКО если нет вопросительного контекста)
+    # ПРИОРИТЕТ 3: Проверка на код теста (ТОЛЬКО если нет вопросительного контекста)
     # ============================================================
     
     if is_test_code_pattern(text):
@@ -872,7 +967,7 @@ async def handle_universal_search(message: Message, state: FSMContext):
         return
 
     # ============================================================
-    # ПРИОРИТЕТ 3: Классификация через ML
+    # ПРИОРИТЕТ 4: Классификация через ML
     # ============================================================
 
     expanded_query = expand_query_with_abbreviations(text)
@@ -1097,8 +1192,14 @@ async def handle_clarify_search_callback(callback: CallbackQuery, state: FSMCont
         requires_clarification=False
     )
 
-    await callback.message.edit_reply_markup(reply_markup=None)
-    search_mapping = {'name': 'название', 'code': 'код теста', 'general': 'общий вопрос'}
+    # Безопасное удаление клавиатуры (игнорируем ошибку если клавиатура уже удалена)
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception as e:
+        # Игнорируем ошибку "message is not modified" - это нормально
+        if "message is not modified" not in str(e).lower():
+            logger.warning(f"[CLARIFY_SEARCH] Failed to edit reply markup: {e}")
+    search_mapping = {'name': 'название', 'code': 'код теста', 'profile': 'профиль', 'general': 'общий вопрос'}
     await callback.message.answer(
         f"✅ Ищу как {search_mapping[search_type]}...", 
         reply_markup=get_dialog_kb()
@@ -2212,12 +2313,27 @@ async def _handle_code_search_internal(
                     if total_pages > 1:
                         response += f"\n📄 <i>Используйте навигацию для просмотра всех результатов</i>"
                     
-                    await message.answer(
+                    bot_response_msg = await message.answer(
                         response,
                         parse_mode="HTML",
                         disable_web_page_preview=True,
                         reply_markup=keyboard
                     )
+                      
+                    # ✅ Запрашиваем оценку для fuzzy search results
+                    if bot_response_msg:
+                        try:
+                            await state.update_data(
+                                last_question=original_query,
+                                last_bot_response=response
+                            )
+                            await feedback_system.send_feedback_request(
+                                message=message,
+                                bot_response_message_id=bot_response_msg.message_id,
+                                state=state
+                            )
+                        except Exception as feedback_error:
+                            logger.error(f"[FEEDBACK] Failed to send feedback request for fuzzy results: {feedback_error}")
                 else:
                     # Ничего не найдено
                     error_msg = f"❌ Код '<code>{html.escape(normalized_input)}</code>' не найден в базе данных.\n"
@@ -2267,7 +2383,7 @@ async def _handle_code_search_internal(
             await safe_delete_message(gif_msg)
 
             # Отправляем информацию
-            await send_test_info_with_photo(message, test_data, response)
+            bot_response_msg = await send_test_info_with_photo(message, test_data, response)
             
             # Логируем метрику запроса
             response_time = time.time() - start_time
@@ -2283,6 +2399,27 @@ async def _handle_code_search_internal(
                 logger.info(f"[METRICS] Logged code_search metric for user {user_id}")
             except Exception as e:
                 logger.error(f"[METRICS] Failed to log code_search metric: {e}")
+                
+            # ✅ НОВАЯ СИСТЕМА ОЦЕНКИ ОТВЕТОВ - Поиск по коду
+            if bot_response_msg:
+                logger.info(f"[FEEDBACK] Checking if should ask for feedback from user {user_id} (code_search)")
+                
+                # Сохраняем данные в state
+                await state.update_data(
+                    last_question=original_query,
+                    last_bot_response=response
+                )
+                
+                # Запрашиваем оценку
+                try:
+                    await feedback_system.send_feedback_request(
+                        message=message,
+                        bot_response_message_id=bot_response_msg.message_id,
+                        state=state
+                    )
+                except Exception as feedback_error:
+                    logger.error(f"[FEEDBACK] Failed to send feedback request: {feedback_error}")
+            
             
             try:
                 # Формируем текст ответа для логирования в chat_history
@@ -2577,7 +2714,7 @@ async def _handle_name_search_internal(
             if total_pages > 1:
                 response += f"\n📄 <i>Используйте кнопки навигации для просмотра всех результатов</i>"
             
-            await message.answer(
+            bot_response = await message.answer(
                 response,
                 parse_mode="HTML",
                 disable_web_page_preview=True,
@@ -2599,30 +2736,24 @@ async def _handle_name_search_internal(
             except Exception as e:
                 logger.error(f"[METRICS] Failed to log name_search metric: {e}")
             
-            should_ask, rating_id = await rating_manager.should_ask_for_rating(
-                user_id=message.from_user.id,
-                response_type="name_search"
-            )
-
-            if should_ask:
-                # Сохраняем информацию о запросе и результатах
-                rating_response = response
+            # ✅ НОВАЯ СИСТЕМА ОЦЕНКИ ОТВЕТОВ (ПРОСТАЯ)
+            logger.info(f"[FEEDBACK] Checking if should ask for feedback from user {message.from_user.id}")
             
-                await state.update_data({
-                    f"last_question_{rating_id}": text,
-                    f"last_response_{rating_id}": rating_response
-                })
-                
-                # Запрашиваем оценку через 1 секунду
-                await asyncio.sleep(1)
-                rating_keyboard = rating_manager.create_rating_keyboard(rating_id)
-                
-                await message.answer(
-                    "📊 <b>Оцените, пожалуйста, результаты поиска:</b>",
-                    parse_mode="HTML",
-                    reply_markup=rating_keyboard
+            # Сохраняем данные ответа в state
+            await state.update_data(
+                last_question=text,
+                last_bot_response=response
+            )
+            
+            # Запрашиваем оценку (система автоматически проверит все условия)
+            try:
+                await feedback_system.send_feedback_request(
+                    message=message,
+                    bot_response_message_id=bot_response.message_id,
+                    state=state
                 )
-
+            except Exception as feedback_error:
+                logger.error(f"[FEEDBACK] Failed to send feedback request: {feedback_error}")
 
             # Сохраняем последний тест
             await state.set_state(QuestionStates.waiting_for_search_type)
@@ -2708,18 +2839,27 @@ async def handle_general_question(
             except Exception as e:
                 logger.error(f"[METRICS] Failed to log off-topic metric: {e}")
             
-            await message.answer(
-                f"🔍 <b>Этот вопрос не относится к лабораторной диагностике</b>\n\n"
-                f"❓ <i>Ваш вопрос:</i> \"{html.escape(question_text[:200])}{'...' if len(question_text) > 200 else ''}\"\n\n"
-                "🩺 <b>Я специализируюсь на:</b>\n"
-                "• Лабораторных тестах и анализах\n"
-                "• Преаналитических требованиях\n"
-                "• Контейнерах для биоматериалов\n"
-                "• Подготовке пациентов к исследованиям\n\n"
-                "💡 <b>Для других вопросов обратитесь к специалисту:</b>",
-                parse_mode="HTML",
-                reply_markup=_get_callback_support_keyboard(question_text)
-            )
+            instruction_key = _detect_instruction_media_key(question_text.lower())
+            if instruction_key:
+                await _send_instruction_media_or_placeholder(
+                    message=message,
+                    instruction_key=instruction_key,
+                    user_question_text=question_text,
+                )
+            else:
+                # Обычный off-topic ответ
+                await message.answer(
+                    f"🔍 <b>Этот вопрос не относится к лабораторной диагностике</b>\n\n"
+                    f"❓ <i>Ваш вопрос:</i> \"{html.escape(question_text[:200])}{'...' if len(question_text) > 200 else ''}\"\n\n"
+                    "🩺 <b>Я специализируюсь на:</b>\n"
+                    "• Лабораторных тестах и анализах\n"
+                    "• Преаналитических требованиях\n"
+                    "• Контейнерах для биоматериалов\n"
+                    "• Подготовке пациентов к исследованиям\n\n"
+                    "💡 <b>Для других вопросов обратитесь к специалисту:</b>",
+                    parse_mode="HTML",
+                    reply_markup=_get_callback_support_keyboard(question_text)
+                )
             return
 
         processor = DataProcessor()
@@ -2894,17 +3034,26 @@ async def handle_general_question(
             except Exception as e:
                 logger.error(f"[METRICS] Failed to log unhelpful metric: {e}")
             
-            await message.answer(
-                f"🔍 <b>Не удалось найти точный ответ в доступных источниках</b>\n\n"
-                f"❓ <i>Ваш вопрос:</i> \"{html.escape(question_text[:200])}{'...' if len(question_text) > 200 else ''}\"\n\n"
-                "💡 <b>Рекомендую:</b>\n"
-                "• Позвонить специалисту для детальной консультации\n"
-                "• Уточнить формулировку вопроса\n"
-                "• Использовать коды тестов (например: <code>AN116</code>)\n\n"
-                "📞 <b>Для получения точного ответа обратитесь к специалисту:</b>",
-                parse_mode="HTML",
-                reply_markup=_get_callback_support_keyboard(question_text)
-            )
+            instruction_key = _detect_instruction_media_key(question_text.lower())
+            if instruction_key:
+                await _send_instruction_media_or_placeholder(
+                    message=message,
+                    instruction_key=instruction_key,
+                    user_question_text=question_text,
+                )
+            else:
+                # Обычный ответ о том, что информация не найдена
+                await message.answer(
+                    f"🔍 <b>Не удалось найти точный ответ в доступных источниках</b>\n\n"
+                    f"❓ <i>Ваш вопрос:</i> \"{html.escape(question_text[:200])}{'...' if len(question_text) > 200 else ''}\"\n\n"
+                    "💡 <b>Рекомендую:</b>\n"
+                    "• Позвонить специалисту для детальной консультации\n"
+                    "• Уточнить формулировку вопроса\n"
+                    "• Использовать коды тестов (например: <code>AN116</code>)\n\n"
+                    "📞 <b>Для получения точного ответа обратитесь к специалисту:</b>",
+                    parse_mode="HTML",
+                    reply_markup=_get_callback_support_keyboard(question_text)
+                )
             return
 
         # 8. Обработка успешного ответа
@@ -2964,22 +3113,52 @@ async def handle_general_question(
             if current:
                 parts.append(current.rstrip())
             
+            last_message = None
             for i, part in enumerate(parts):
                 try:
-                    await message.answer(
+                    sent_msg = await message.answer(
                         part,
                         parse_mode="HTML",
                         disable_web_page_preview=True
                     )
+                    last_message = sent_msg  # Запоминаем последнее сообщение
                     if i < len(parts) - 1:
                         await asyncio.sleep(0.5)
                 except Exception as e:
                     logger.error(f"[GENERAL_Q] Failed to send part {i+1}: {e}")
                     clean_part = re.sub(r'<[^>]+>', '', part)
-                    await message.answer(clean_part)
+                    sent_msg = await message.answer(clean_part)
+                    last_message = sent_msg
+            
+            # ✅ Запрашиваем оценку для разбитого сообщения
+            if last_message:
+                try:
+                    response_time = time.time() - start_time
+                    # Логируем метрику
+                    await db.log_request_metric(
+                        user_id=user_id,
+                        request_type="general",
+                        query_text=question_text[:500],
+                        response_time=response_time,
+                        success=True,
+                        has_answer=True
+                    )
+                    
+                    await state.update_data(
+                        last_question=question_text,
+                        last_bot_response=answer
+                    )
+                    
+                    await feedback_system.send_feedback_request(
+                        message=message,
+                        bot_response_message_id=last_message.message_id,
+                        state=state
+                    )
+                except Exception as feedback_error:
+                    logger.error(f"[FEEDBACK] Failed to send feedback request for split message: {feedback_error}")
         else:
             try:
-                await message.answer(
+                bot_response = await message.answer(
                     processed_text,
                     parse_mode="HTML",
                     disable_web_page_preview=True
@@ -3000,32 +3179,24 @@ async def handle_general_question(
                 except Exception as e:
                     logger.error(f"[METRICS] Failed to log general metric: {e}")
 
-                logger.info(f"[RATING] Checking if should ask for rating for user {message.from_user.id}")
-
-                should_ask, rating_id = await rating_manager.should_ask_for_rating(
-                    user_id=message.from_user.id,
-                    response_type="general"
+                # ✅ НОВАЯ СИСТЕМА ОЦЕНКИ ОТВЕТОВ (ПРОСТАЯ)
+                logger.info(f"[FEEDBACK] Checking if should ask for feedback from user {message.from_user.id}")
+                
+                # Сохраняем данные ответа в state
+                await state.update_data(
+                    last_question=question_text,
+                    last_bot_response=answer
                 )
-
-                logger.info(f"[RATING] Should ask: {should_ask}, rating_id: {rating_id}")
-
-                if should_ask:
-                    # Сохраняем информацию о вопросе и ответе
-                    await state.update_data({
-                        f"last_question_{rating_id}": question_text,
-                        f"last_response_{rating_id}": answer[:1000]  # сохраняем часть ответа
-                    })
-                    
-                    # Запрашиваем оценку через 1 секунду (не сразу)
-                    await asyncio.sleep(1)
-                    rating_keyboard = rating_manager.create_rating_keyboard(rating_id)
-                    
-                    await message.answer(
-                        "📊 <b>Оцените, пожалуйста, насколько полезным был ответ:</b>",
-                        parse_mode="HTML",
-                        reply_markup=rating_keyboard
+                
+                # Запрашиваем оценку (система автоматически проверит все условия)
+                try:
+                    await feedback_system.send_feedback_request(
+                        message=message,
+                        bot_response_message_id=bot_response.message_id,
+                        state=state
                     )
-                    logger.info(f"[RATING] Rating requested for user {message.from_user.id}")
+                except Exception as feedback_error:
+                    logger.error(f"[FEEDBACK] Failed to send feedback request: {feedback_error}")
 
             except Exception as e:
                 logger.error(f"[GENERAL_Q] Failed to send HTML: {e}")
@@ -3427,6 +3598,9 @@ async def send_test_info_with_photo(
                     reply_markup=part_keyboard,
                 )
                 
+                # Запоминаем последнее сообщение
+                sent_message = msg
+                
                 # Небольшая задержка между частями
                 if i < len(parts) - 1:
                     await asyncio.sleep(0.3)
@@ -3437,12 +3611,13 @@ async def send_test_info_with_photo(
                 try:
                     clean_part = re.sub(r'<[^>]+>', '', part)
                     part_keyboard = keyboard if (i == len(parts) - 1) else None
-                    await message.answer(clean_part, reply_markup=part_keyboard)
+                    msg = await message.answer(clean_part, reply_markup=part_keyboard)
+                    sent_message = msg
                 except Exception as e2:
                     logger.error(f"[SEND_TEST] Failed to send clean part {i+1}: {e2}")
                     continue
     
-    return True
+    return sent_message
 
 @questions_router.callback_query(F.data.startswith("show_blanks:"))
 async def handle_show_blanks_callback(callback: CallbackQuery, state: FSMContext):

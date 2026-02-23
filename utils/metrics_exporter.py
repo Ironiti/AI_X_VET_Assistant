@@ -100,6 +100,7 @@ class MetricsExporter:
         
         # Значение метрики
         formats['metric_value'] = workbook.add_format({
+            'bold': True,
             'font_size': 11,
             'font_color': '#1F2937',
             'align': 'right',
@@ -110,6 +111,7 @@ class MetricsExporter:
         
         # Значение метрики (процент) - текстовый формат
         formats['metric_percent'] = workbook.add_format({
+            'bold': True,
             'font_size': 11,
             'font_color': '#1F2937',
             'align': 'right',
@@ -119,6 +121,7 @@ class MetricsExporter:
         
         # Значение метрики (десятичное)
         formats['metric_decimal'] = workbook.add_format({
+            'bold': True,
             'font_size': 11,
             'font_color': '#1F2937',
             'align': 'right',
@@ -189,7 +192,7 @@ class MetricsExporter:
             'font_size': 14,
             'font_color': SUCCESS_GREEN,
             'bg_color': '#ECFDF5',
-            'align': 'center',
+            'align': 'right',
             'valign': 'vcenter',
             'border': 2,
             'border_color': SUCCESS_GREEN,
@@ -202,7 +205,7 @@ class MetricsExporter:
             'font_size': 14,
             'font_color': WARNING_YELLOW,
             'bg_color': '#FFFBEB',
-            'align': 'center',
+            'align': 'right',
             'valign': 'vcenter',
             'border': 2,
             'border_color': WARNING_YELLOW,
@@ -215,7 +218,7 @@ class MetricsExporter:
             'font_size': 14,
             'font_color': ERROR_RED,
             'bg_color': '#FEF2F2',
-            'align': 'center',
+            'align': 'right',
             'valign': 'vcenter',
             'border': 2,
             'border_color': ERROR_RED,
@@ -290,7 +293,7 @@ class MetricsExporter:
         
         # Получаем данные
         metrics = await self.db.get_comprehensive_metrics(days)
-        avg_rating = await self.db.get_average_user_rating(days)
+        binary_feedback = await self.db.get_binary_feedback_metrics(days)
         
         if not metrics:
             worksheet.write(row, 0, 'Нет данных за указанный период', formats['metric_label'])
@@ -310,63 +313,146 @@ class MetricsExporter:
         if dau_list and len(dau_list) > 0:
             avg_dau = sum(d.get('dau', 0) for d in dau_list) / len(dau_list)
             worksheet.write(row, 0, '👥 Средний DAU (активных пользователей в день)', formats['metric_label'])
-            kpi_format = formats['kpi_high'] if avg_dau >= 15 else formats['kpi_medium'] if avg_dau >= 5 else formats['kpi_low']
-            worksheet.write(row, 1, avg_dau, kpi_format)
+            # Норма задана как DAU/MAU = 5–15% (аналогичные продукты РФ).
+            # В отчёте MAU сейчас не рассчитывается, поэтому НЕ оцениваем DAU по норме,
+            # а показываем абсолютное значение и пояснение.
+            worksheet.write(row, 1, avg_dau, formats['metric_decimal'])
             worksheet.write(row, 2, 'пользователей', formats['metric_value'])
-            # Интерпретация
-            if avg_dau >= 15:
-                interpretation = '🟢 >15 — высокая интеграция (норма: 5-15% от МАВ)'
-            elif avg_dau >= 5:
-                interpretation = '🟢 5–15 — норма (норма: 5-15% от МАВ)'
-            else:
-                interpretation = '🔴 < 5 — низкая вовлечённость (норма: 5-15% от МАВ)'
-            worksheet.write(row, 3, interpretation, formats['cell_data'])
+            # По требованию: нормы для среднего DAU не выводим, так как в отчёте нет MAU.
+            worksheet.write(row, 3, '', formats['cell_data'])
             row += 1
         
-        # Коэффициент точности
+        # Успешность решения (conversion rate)
+        # По требованию: «вне специализации» (🔵) НЕ должно влиять на проценты.
+        # Поэтому считаем только по релевантным запросам: correct + no_answer (таймаут/нет информации).
         quality = metrics.get('quality_metrics', {})
-        total_queries = quality.get('total', 0)
         correct_answers = quality.get('correct', 0)
-        accuracy = (correct_answers / total_queries * 100) if total_queries > 0 else 0
+        timeout_or_no_info = quality.get('no_answer', 0)
+        relevant_total = correct_answers + timeout_or_no_info
+        accuracy = (correct_answers / relevant_total * 100) if relevant_total > 0 else 0
         
-        worksheet.write(row, 0, '✅ Коэффициент точности ответов', formats['metric_label'])
+        worksheet.write(row, 0, '✅ Успешность решения (доля запросов с результатом)', formats['metric_label'])
         
         # Создаем специальный формат с соответствующим цветом без процента в num_format
+        # Цвета под «Успешность решения (conversion rate)».
+        # Норма (аналогичные продукты РФ): 60–80%.
+        # Логика цветов:
+        # - < 60%  : 🔴 ниже нормы
+        # - 60–80% : 🟡 в норме
+        # - ≥ 80%  : 🟢 выше нормы
         acc_format = workbook.add_format({
             'bold': True,
             'font_size': 14,
-            'font_color': '#10B981' if accuracy >= 95 else '#F59E0B' if accuracy >= 90 else '#EF4444',
-            'bg_color': '#ECFDF5' if accuracy >= 95 else '#FFFBEB' if accuracy >= 90 else '#FEF2F2',
-            'align': 'center',
+            'font_color': '#10B981' if accuracy >= 80 else '#F59E0B' if accuracy >= 60 else '#EF4444',
+            'bg_color': '#ECFDF5' if accuracy >= 80 else '#FFFBEB' if accuracy >= 60 else '#FEF2F2',
+            'align': 'right',
             'valign': 'vcenter',
             'border': 2,
-            'border_color': '#10B981' if accuracy >= 95 else '#F59E0B' if accuracy >= 90 else '#EF4444'
+            'border_color': '#10B981' if accuracy >= 80 else '#F59E0B' if accuracy >= 60 else '#EF4444'
         })
         
         worksheet.write(row, 1, f'{accuracy:.1f}%', acc_format)
-        worksheet.write(row, 2, f'{correct_answers}/{total_queries} вопросов', formats['metric_value'])
+        worksheet.write(row, 2, f'{correct_answers}/{relevant_total} вопросов', formats['metric_value'])
         # Интерпретация
-        if accuracy >= 95:
-            interpretation = '🟢 ≥ 95% — высокий показатель понимания сути (норма: ≥95%)'
-        elif accuracy >= 90:
-            interpretation = '🟡 90-95% — требует внимания (норма: ≥95%)'
+        # Норма по успешности решения (conversion rate) для аналогичных продуктов РФ: 60–80%.
+        if accuracy >= 80:
+            interpretation = '🟢 ≥ 80% — высокий уровень успешных решений (ориентир: 60–80%)'
+        elif accuracy >= 60:
+            interpretation = '🟡 60–80% — соответствует ориентиру (ориентир: 60–80%)'
         else:
-            interpretation = '🔴 < 90% — проблемы с контентом (норма: ≥95%)'
+            interpretation = '🔴 < 60% — ниже ориентира, требуется улучшение базы знаний/логики (ориентир: 60–80%)'
         worksheet.write(row, 3, interpretation, formats['cell_data'])
         row += 1
         
-        # Средний рейтинг
-        worksheet.write(row, 0, '⭐ Средняя оценка пользователей', formats['metric_label'])
-        kpi_format = formats['kpi_high'] if avg_rating >= 4.0 else formats['kpi_medium'] if avg_rating >= 3.5 else formats['kpi_low']
-        worksheet.write(row, 1, avg_rating, kpi_format)
-        worksheet.write(row, 2, 'из 5,00', formats['metric_value'])
+        # Оценки пользователей (бинарная система)
+        # Процент положительных оценок (Satisfaction Rate)
+        satisfaction_rate = binary_feedback.get('satisfaction_rate', 0)
+        worksheet.write(row, 0, '👍 Процент положительных оценок', formats['metric_label'])
+        
+        # Создаем формат с цветом в зависимости от значения
+        satisfaction_format = workbook.add_format({
+            'bold': True,
+            'font_size': 14,
+            'font_color': '#10B981' if satisfaction_rate >= 80 else '#F59E0B' if satisfaction_rate >= 60 else '#EF4444',
+            'bg_color': '#ECFDF5' if satisfaction_rate >= 80 else '#FFFBEB' if satisfaction_rate >= 60 else '#FEF2F2',
+            'align': 'right',
+            'valign': 'vcenter',
+            'border': 2,
+            'border_color': '#10B981' if satisfaction_rate >= 80 else '#F59E0B' if satisfaction_rate >= 60 else '#EF4444'
+        })
+        
+        positive_count = binary_feedback.get('positive_count', 0)
+        total_ratings = binary_feedback.get('total_ratings', 0)
+        
+        worksheet.write(row, 1, f'{satisfaction_rate:.1f}%', satisfaction_format)
+        worksheet.write(row, 2, f'{positive_count}/{total_ratings} оценок', formats['metric_value'])
         # Интерпретация
-        if avg_rating >= 4.0:
-            interpretation = '🟢 ≥ 4.0 — пользователи довольны (норма: ≥4.0)'
-        elif avg_rating >= 3.5:
-            interpretation = '🟡 3.5-4.0 — удовлетворительно (норма: ≥4.0)'
+        if satisfaction_rate >= 80:
+            interpretation = '🟢 ≥ 80% — высокая удовлетворенность (норма: ≥80%)'
+        elif satisfaction_rate >= 60:
+            interpretation = '🟡 60-80% — требует внимания (норма: ≥80%)'
         else:
-            interpretation = '🔴 < 3.5 — низкое восприятив (норма: ≥4.0)'
+            interpretation = '🔴 < 60% — низкая удовлетворенность (норма: ≥80%)'
+        worksheet.write(row, 3, interpretation, formats['cell_data'])
+        row += 1
+        
+        # Процент отрицательных оценок
+        dissatisfaction_rate = binary_feedback.get('dissatisfaction_rate', 0)
+        negative_count = binary_feedback.get('negative_count', 0)
+        
+        worksheet.write(row, 0, '👎 Процент отрицательных оценок', formats['metric_label'])
+        
+        dissatisfaction_format = workbook.add_format({
+            'bold': True,
+            'font_color': '#10B981' if dissatisfaction_rate < 10 else '#F59E0B' if dissatisfaction_rate < 20 else '#EF4444',
+            'bg_color': '#D1FAE5' if dissatisfaction_rate < 10 else '#FEF3C7' if dissatisfaction_rate < 20 else '#FEE2E2',
+            'align': 'right',
+            'valign': 'vcenter',
+            'border': 1
+        })
+        
+        worksheet.write(row, 1, f'{dissatisfaction_rate:.1f}%', dissatisfaction_format)
+        worksheet.write(row, 2, f'{negative_count}/{total_ratings} оценок', formats['metric_value'])
+        # Интерпретация
+        if dissatisfaction_rate < 10:
+            interpretation = '🟢 < 10% — отличный показатель (норма: <10%)'
+        elif dissatisfaction_rate < 20:
+            interpretation = '🟡 10-20% — требует улучшений (норма: <10%)'
+        else:
+            interpretation = '🔴 ≥ 20% — критический уровень недовольства (норма: <10%)'
+        worksheet.write(row, 3, interpretation, formats['cell_data'])
+        row += 1
+        
+        # Общее количество оценок
+        worksheet.write(row, 0, '📊 Всего получено оценок', formats['metric_label'])
+        worksheet.write(row, 1, total_ratings, formats['metric_value'])
+        worksheet.write(row, 2, 'оценок за период', formats['cell_data'])
+        row += 1
+        
+        # Коэффициент отклика (Response Rate)
+        response_rate = binary_feedback.get('response_rate', 0)
+        total_interactions = binary_feedback.get('total_interactions', 0)
+        
+        worksheet.write(row, 0, '📈 Коэффициент отклика', formats['metric_label'])
+        
+        response_rate_format = workbook.add_format({
+            'bold': True,
+            'font_color': '#10B981' if response_rate >= 20 else '#F59E0B' if response_rate >= 10 else '#EF4444',
+            'bg_color': '#D1FAE5' if response_rate >= 20 else '#FEF3C7' if response_rate >= 10 else '#FEE2E2',
+            'align': 'right',
+            'valign': 'vcenter',
+            'border': 1
+        })
+        
+        worksheet.write(row, 1, f'{response_rate:.1f}%', response_rate_format)
+        worksheet.write(row, 2, f'{total_ratings}/{total_interactions} взаимодействий', formats['metric_value'])
+        # Интерпретация
+        if response_rate >= 20:
+            interpretation = '🟢 ≥ 20% — высокая вовлеченность (норма: ≥20%)'
+        elif response_rate >= 10:
+            interpretation = '🟡 10-20% — средняя вовлеченность (норма: ≥20%)'
+        else:
+            interpretation = '🔴 < 10% — низкая вовлеченность (норма: ≥20%)'
         worksheet.write(row, 3, interpretation, formats['cell_data'])
         row += 2
         
@@ -398,12 +484,13 @@ class MetricsExporter:
             worksheet.write(row, 1, f'{ret_1d:.1f}%', ret_1d_format)
             worksheet.write(row, 2, self._get_retention_status_1d(ret_1d), formats['cell_data'])
             # Интерпретация
-            if ret_1d >= 35:
-                interpretation = '🟢 >35% — отличный показатель (норма: 20-35%)'
+            # Норма (аналогичные продукты РФ): 20–35%
+            if ret_1d > 35:
+                interpretation = '🟢 > 35% — выше нормы (норма: 20–35%)'
             elif ret_1d >= 20:
-                interpretation = '🟢 20–35% — норма (норма: 20-35%)'
+                interpretation = '🟢 20–35% — норма (норма: 20–35%)'
             else:
-                interpretation = '🔴 < 20% — первый опыт не мотивирует вернуться (норма: 20-35%)'
+                interpretation = '🔴 < 20% — ниже нормы (норма: 20–35%)'
             worksheet.write(row, 3, interpretation, formats['cell_data'])
             row += 1
             
@@ -421,12 +508,13 @@ class MetricsExporter:
             worksheet.write(row, 1, f'{ret_7d:.1f}%', ret_7d_format)
             worksheet.write(row, 2, self._get_retention_status_7d(ret_7d), formats['cell_data'])
             # Интерпретация
-            if ret_7d >= 20:
-                interpretation = '🟢 ≥20% — отлично (норма: 10-20%)'
+            # Норма (аналогичные продукты РФ): 10–20%
+            if ret_7d > 20:
+                interpretation = '🟢 > 20% — выше нормы (норма: 10–20%)'
             elif ret_7d >= 10:
-                interpretation = '🟢 10–20% — хороший показатель (норма: 10-20%)'
+                interpretation = '🟢 10–20% — норма (норма: 10–20%)'
             else:
-                interpretation = '🔴 < 10% — низкая ценность для повторного использования (норма: 10-20%)'
+                interpretation = '🔴 < 10% — ниже нормы (норма: 10–20%)'
             worksheet.write(row, 3, interpretation, formats['cell_data'])
             row += 1
             
@@ -444,12 +532,8 @@ class MetricsExporter:
             worksheet.write(row, 1, f'{ret_30d:.1f}%', ret_30d_format)
             worksheet.write(row, 2, self._get_retention_status_30d(ret_30d), formats['cell_data'])
             # Интерпретация
-            if ret_30d >= 15:
-                interpretation = '🟢 ≥15% — отлично (норма: 8-15%)'
-            elif ret_30d >= 8:
-                interpretation = '🟢 8–15% — норма (норма: 8-15%)'
-            else:
-                interpretation = '🔴 < 8% — низкий показатель (норма: 8-15%)'
+            # Для Retention 30 дней норма в текущем списке KPI не задана → не указываем.
+            interpretation = 'Норма для Retention 30 дней не задана (в этом отчёте показываем фактическое значение)'
             worksheet.write(row, 3, interpretation, formats['cell_data'])
             row += 1
         
@@ -522,6 +606,9 @@ class MetricsExporter:
             worksheet.merge_range(row, 0, row, 3, 'Объем обращений', formats['subsection_header'])
             row += 1
             
+            # NOTE: dau_list приходит отсортированным по убыванию даты (ORDER BY activity_date DESC)
+            # dau_list[0] = самая свежая дата (сегодня или последний день с данными)
+            # dau_list[:7] = последние 7 дней
             today_req = dau_list[0].get('total_requests', 0) if dau_list else 0
             week_req = sum(d.get('total_requests', 0) for d in dau_list[:7])
             month_req = sum(d.get('total_requests', 0) for d in dau_list)
@@ -551,97 +638,138 @@ class MetricsExporter:
         overall = perf.get('overall', {}) if perf else {}
         
         if overall:
-            total_requests = overall.get('total_requests', 0)
-            
-            # Подсчет запросов по времени ответа
+            # Метрика: распределение времени ответа.
+            # По просьбе: интервалы возвращены к прежней схеме (≤3 / 3–6 / 6–10 / >10 секунд).
+            #
+            # Интервалы взаимно-исключающие (без пересечений),
+            # проценты считаем от количества ЗАМЕРЕННЫХ ответов (response_time IS NOT NULL),
+            # чтобы распределение корректно суммировалось в ~100%.
             import aiosqlite
             start_date = datetime.now() - timedelta(days=days)
+
             async with aiosqlite.connect(self.db.db_path) as db:
-                # До 3 секунд
                 cursor = await db.execute('''
-                    SELECT COUNT(*) FROM request_metrics
-                    WHERE timestamp >= ? AND response_time < 3
+                    SELECT
+                        COUNT(*) as total_requests,
+                        SUM(CASE WHEN rm.response_time IS NULL THEN 1 ELSE 0 END) as no_response_time,
+                        SUM(CASE WHEN rm.response_time IS NOT NULL THEN 1 ELSE 0 END) as measured_requests,
+                        -- ≤ 3 сек
+                        SUM(CASE WHEN rm.response_time IS NOT NULL AND rm.response_time <= 3 THEN 1 ELSE 0 END) as le_3_sec,
+                        -- (3; 6] сек
+                        SUM(CASE WHEN rm.response_time IS NOT NULL AND rm.response_time > 3 AND rm.response_time <= 6 THEN 1 ELSE 0 END) as between_3_6_sec,
+                        -- (6; 10] сек
+                        SUM(CASE WHEN rm.response_time IS NOT NULL AND rm.response_time > 6 AND rm.response_time <= 10 THEN 1 ELSE 0 END) as between_6_10_sec,
+                        -- > 10 сек
+                        SUM(CASE WHEN rm.response_time IS NOT NULL AND rm.response_time > 10 THEN 1 ELSE 0 END) as gt_10_sec
+                    FROM request_metrics rm
+                    JOIN users u ON rm.user_id = u.telegram_id
+                    WHERE rm.timestamp >= ?
+                      AND rm.request_type IN ('general', 'code_search', 'name_search')
+                      AND u.role != 'admin'
                 ''', (start_date,))
-                under_3_sec = (await cursor.fetchone())[0]
-                
-                # До 6 секунд
-                cursor = await db.execute('''
-                    SELECT COUNT(*) FROM request_metrics
-                    WHERE timestamp >= ? AND response_time < 6
-                ''', (start_date,))
-                under_6_sec = (await cursor.fetchone())[0]
-                
-                # После 10 секунд
-                cursor = await db.execute('''
-                    SELECT COUNT(*) FROM request_metrics
-                    WHERE timestamp >= ? AND response_time > 10
-                ''', (start_date,))
-                over_10_sec = (await cursor.fetchone())[0]
-            
-            # Скорость ответа до 3 секунд
-            pct_3_sec = (under_3_sec / total_requests * 100) if total_requests > 0 else 0
-            worksheet.write(row, 0, '⚡ Скорость ответа до 3 секунд (%)', formats['metric_label'])
-            
+                stats = await cursor.fetchone()
+
+            total_requests = (stats[0] or 0) if stats else 0
+            no_response_time = (stats[1] or 0) if stats else 0
+            measured_requests = (stats[2] or 0) if stats else 0
+            le_3_sec = (stats[3] or 0) if stats else 0
+            between_3_6_sec = (stats[4] or 0) if stats else 0
+            between_6_10_sec = (stats[5] or 0) if stats else 0
+            gt_10_sec = (stats[6] or 0) if stats else 0
+
+            # Проценты считаем от ЗАМЕРЕННЫХ (measured_requests)
+            pct_le_3 = (le_3_sec / measured_requests * 100) if measured_requests > 0 else 0
+            pct_3_6 = (between_3_6_sec / measured_requests * 100) if measured_requests > 0 else 0
+            pct_6_10 = (between_6_10_sec / measured_requests * 100) if measured_requests > 0 else 0
+            pct_gt_10 = (gt_10_sec / measured_requests * 100) if measured_requests > 0 else 0
+
+            # Отдельно показываем долю "не измерено" (NULL response_time) от общего числа запросов
+            pct_no_rt = (no_response_time / total_requests * 100) if total_requests > 0 else 0
+
+            percent_num_format = '0.0%'
+
+            # 1) ≤ 3 секунд
+            worksheet.write(row, 0, '⚡ Время ответа ≤ 3 секунд', formats['metric_label'])
             pct_3sec_format = workbook.add_format({
                 'bold': True,
-                'font_color': '#10B981' if pct_3_sec >= 80 else '#F59E0B' if pct_3_sec >= 60 else '#EF4444',
-                'bg_color': '#D1FAE5' if pct_3_sec >= 80 else '#FEF3C7' if pct_3_sec >= 60 else '#FEE2E2',
+                'font_color': '#10B981',
+                'bg_color': '#D1FAE5',
                 'align': 'right',
                 'valign': 'vcenter',
-                'border': 1
+                'border': 1,
+                'num_format': percent_num_format
             })
-            worksheet.write(row, 1, f'{pct_3_sec:.1f}%', pct_3sec_format)
-            worksheet.write_blank(row, 2, formats['metric_value'])  # Пустая ячейка
-            worksheet.write(row, 3, 'Быстрый отклик системы (рекомендуется)', formats['cell_data'])
+            worksheet.write(row, 1, (pct_le_3 / 100), pct_3sec_format)
+            worksheet.write(row, 2, f'{le_3_sec}/{measured_requests}', formats['metric_value'])
+            worksheet.write(row, 3, 'Доля быстрых ответов среди замеренных', formats['cell_data'])
             row += 1
-            
-            # Скорость ответа до 6 секунд
-            pct_6_sec = (under_6_sec / total_requests * 100) if total_requests > 0 else 0
-            worksheet.write(row, 0, '⚡ Скорость ответа до 6 секунд (%)', formats['metric_label'])
-            
-            pct_6sec_format = workbook.add_format({
+
+            # 2) 3–6 секунд
+            worksheet.write(row, 0, '⚡ Время ответа 3–6 секунд', formats['metric_label'])
+            # 30–60 сек находится в пределах нормы → зелёный
+            pct_3_6_format = workbook.add_format({
                 'bold': True,
-                'font_color': '#10B981' if pct_6_sec >= 95 else '#F59E0B' if pct_6_sec >= 90 else '#EF4444',
-                'bg_color': '#D1FAE5' if pct_6_sec >= 95 else '#FEF3C7' if pct_6_sec >= 90 else '#FEE2E2',
+                'font_color': '#10B981',
+                'bg_color': '#D1FAE5',
                 'align': 'right',
                 'valign': 'vcenter',
-                'border': 1
+                'border': 1,
+                'num_format': percent_num_format
             })
-            worksheet.write(row, 1, f'{pct_6_sec:.1f}%', pct_6sec_format)
-            worksheet.write_blank(row, 2, formats['metric_value'])  # Пустая ячейка
-            # Интерпретация
-            if pct_6_sec >= 95:
-                interpretation = '🟢 ≥ 95% — отличная производительность (норма: ≥95%)'
-            elif pct_6_sec >= 90:
-                interpretation = '🟡 90-95% — требует внимания (норма: ≥95%)'
-            else:
-                interpretation = '🔴 < 90% — проблемы с производительностью (норма: ≥95%)'
-            worksheet.write(row, 3, interpretation, formats['cell_data'])
+            worksheet.write(row, 1, (pct_3_6 / 100), pct_3_6_format)
+            worksheet.write(row, 2, f'{between_3_6_sec}/{measured_requests}', formats['metric_value'])
+            worksheet.write(row, 3, 'Доля ответов, укладывающихся в 3–6 секунд', formats['cell_data'])
             row += 1
-            
-            # Скорость ответа после 10 секунд
-            pct_10_sec = (over_10_sec / total_requests * 100) if total_requests > 0 else 0
-            worksheet.write(row, 0, '🔴 Скорость ответа после 10 секунд (%)', formats['metric_label'])
-            
+
+            # 3) 6–10 секунд
+            worksheet.write(row, 0, '🟡 Время ответа 6–10 секунд', formats['metric_label'])
+            # 60–120 сек = верхняя часть нормы → жёлтый (требует наблюдения)
+            pct_6_10_format = workbook.add_format({
+                'bold': True,
+                'font_color': '#F59E0B',
+                'bg_color': '#FEF3C7',
+                'align': 'right',
+                'valign': 'vcenter',
+                'border': 1,
+                'num_format': percent_num_format
+            })
+            worksheet.write(row, 1, (pct_6_10 / 100), pct_6_10_format)
+            worksheet.write(row, 2, f'{between_6_10_sec}/{measured_requests}', formats['metric_value'])
+            worksheet.write(row, 3, 'Пограничная зона: ответы заметно медленнее быстрых', formats['cell_data'])
+            row += 1
+
+            # 4) > 10 секунд
+            worksheet.write(row, 0, '🔴 Время ответа > 10 секунд', formats['metric_label'])
             pct_10sec_format = workbook.add_format({
                 'bold': True,
-                'font_color': '#10B981' if pct_10_sec < 2 else '#F59E0B' if pct_10_sec < 5 else '#EF4444',
-                'bg_color': '#D1FAE5' if pct_10_sec < 2 else '#FEF3C7' if pct_10_sec < 5 else '#FEE2E2',
+                'font_color': '#EF4444',
+                'bg_color': '#FEE2E2',
                 'align': 'right',
                 'valign': 'vcenter',
-                'border': 1
+                'border': 1,
+                'num_format': percent_num_format
             })
-            worksheet.write(row, 1, f'{pct_10_sec:.1f}%', pct_10sec_format)
-            worksheet.write_blank(row, 2, formats['metric_value'])  # Пустая ячейка
-            # Интерпретация
-            if pct_10_sec < 2:
-                interpretation = '🟢 < 2% — отличная стабильность (норма: ≤2%)'
-            elif pct_10_sec < 5:
-                interpretation = '🟡 2-5% — требует контроля (норма: ≤2%)'
-            else:
-                interpretation = '🔴 ≥ 5% — серьёзные проблемы (норма: ≤2%)'
-            worksheet.write(row, 3, interpretation, formats['cell_data'])
+            worksheet.write(row, 1, (pct_gt_10 / 100), pct_10sec_format)
+            worksheet.write(row, 2, f'{gt_10_sec}/{measured_requests}', formats['metric_value'])
+            worksheet.write(row, 3, 'Доля очень медленных ответов (>10 секунд)', formats['cell_data'])
             row += 1
+
+            # 5) Не измерено (response_time IS NULL) — отдельно, чтобы было понятно, почему распределение не даёт 100% от total_requests
+            if total_requests > 0 and no_response_time > 0:
+                worksheet.write(row, 0, '⚪ Ответы без метрики времени (NULL)', formats['metric_label'])
+                pct_no_rt_format = workbook.add_format({
+                    'bold': True,
+                    'font_color': '#6B7280',
+                    'bg_color': '#F3F4F6',
+                    'align': 'right',
+                    'valign': 'vcenter',
+                    'border': 1,
+                    'num_format': percent_num_format
+                })
+                worksheet.write(row, 1, (pct_no_rt / 100), pct_no_rt_format)
+                worksheet.write(row, 2, f'{no_response_time}/{total_requests}', formats['metric_value'])
+                worksheet.write(row, 3, 'Эти запросы НЕ вошли в распределение по времени ответа', formats['cell_data'])
+                row += 1
             
             # Среднее время ответа
             avg_response = overall.get('avg_response_time', 0)
@@ -675,7 +803,7 @@ class MetricsExporter:
         if quality:
             total = quality.get('total', 0)
             correct = quality.get('correct', 0)
-            incorrect = quality.get('incorrect', 0)
+            out_of_scope = quality.get('out_of_scope', 0)  # ПЕРЕИМЕНОВАНО из 'incorrect'
             no_answer = quality.get('no_answer', 0)
             
             worksheet.write(row, 0, '📊 Всего запросов обработано', formats['metric_label'])
@@ -683,7 +811,7 @@ class MetricsExporter:
             row += 1
             
             correct_pct = quality.get('correct_percentage', 0)
-            worksheet.write(row, 0, '✅ Корректных ответов', formats['metric_label'])
+            worksheet.write(row, 0, '✅ Корректных ответов (с данными)', formats['metric_label'])
             
             correct_format = workbook.add_format({
                 'bold': True,
@@ -705,29 +833,30 @@ class MetricsExporter:
             worksheet.write(row, 3, interpretation, formats['cell_data'])
             row += 1
             
-            incorrect_pct = quality.get('incorrect_percentage', 0)
-            worksheet.write(row, 0, '❌ Некорректных ответов', formats['metric_label'])
+            # По требованию: «Вопросы вне специализации» считаем как
+            # ✅ Обработано (нет результата) из листа «📋 Детали»
+            worksheet.write(row, 0, '🔵 Вопросы вне специализации бота', formats['metric_label'])
             
-            incorrect_format = workbook.add_format({
+            out_of_scope_format = workbook.add_format({
                 'bold': True,
-                'font_color': '#10B981' if incorrect_pct == 0 else '#EF4444',
-                'bg_color': '#D1FAE5' if incorrect_pct == 0 else '#FEE2E2',
+                'font_color': '#3B82F6',  # Синий цвет (нейтральный)
+                'bg_color': '#DBEAFE',
                 'align': 'right',
                 'valign': 'vcenter',
                 'border': 1
             })
-            worksheet.write(row, 1, f'{incorrect_pct:.1f}%', incorrect_format)
-            worksheet.write(row, 2, f'{incorrect} запросов', formats['metric_value'])
+            # По требованию: для «вне специализации» показываем только количество, без процента.
+            worksheet.write(row, 1, '', out_of_scope_format)
+            worksheet.write(row, 2, f'{out_of_scope} запросов', formats['metric_value'])
             # Интерпретация
-            if incorrect_pct == 0:
-                interpretation = '🟢 Ошибок нет (норма: 0%)'
-            else:
-                interpretation = '🔴 Любое значение > 0 — недопустимо/риск ошибок (норма: 0%)'
+            interpretation = '🔵 Бот корректно определил вопрос вне специализации (не влияет на точность)'
             worksheet.write(row, 3, interpretation, formats['cell_data'])
             row += 1
             
-            no_answer_pct = quality.get('no_answer_percentage', 0)
-            worksheet.write(row, 0, '⚠️ Без ответа', formats['metric_label'])
+            # По требованию: «Без ответа» = пользователь не получил ответ в течение 60 секунд
+            # (см. расчёт в get_quality_metrics_summary)
+            no_answer_pct = quality.get('timeout_no_answer_percentage', quality.get('no_answer_percentage', 0))
+            worksheet.write(row, 0, '⚠️ Без ответа (нет информации)', formats['metric_label'])
             
             no_answer_format = workbook.add_format({
                 'bold': True,
@@ -788,6 +917,11 @@ class MetricsExporter:
         
         # DAU по дням
         dau_data = await self.db.get_dau_metrics(days)
+        # ВАЖНО:
+        # - dau берём из user_activity (активность пользователей)
+        # - «Всего запросов» в этом листе должно совпадать с прежней семантикой
+        #   (валидные запросы из request_metrics: general/code_search/name_search)
+        valid_requests_by_day = await self.db.get_valid_requests_by_day(days)
         
         if dau_data:
             row = 2
@@ -807,9 +941,11 @@ class MetricsExporter:
             
             row += 1
             for data in dau_data:
-                worksheet.write(row, 0, str(data.get('activity_date', '')), formats['cell_data'])
+                activity_date = str(data.get('activity_date', ''))
+                worksheet.write(row, 0, activity_date, formats['cell_data'])
                 worksheet.write(row, 1, data.get('dau', 0), formats['cell_number'])
-                worksheet.write(row, 2, data.get('total_requests', 0), formats['cell_number'])
+                # «Всего запросов» = валидные запросы (как раньше)
+                worksheet.write(row, 2, valid_requests_by_day.get(activity_date, 0), formats['cell_number'])
                 avg_req = data.get('avg_requests_per_user') or 0
                 worksheet.write(row, 3, avg_req, formats['cell_decimal'])
                 row += 1
@@ -931,9 +1067,9 @@ class MetricsExporter:
             
             metrics_data = [
                 ('📊 Всего запросов обработано', total, 100.0),
-                ('✅ Корректных ответов', quality.get('correct', 0), quality.get('correct_percentage', 0)),
-                ('❌ Некорректных ответов', quality.get('incorrect', 0), quality.get('incorrect_percentage', 0)),
-                ('⚠️ Без ответа', quality.get('no_answer', 0), quality.get('no_answer_percentage', 0)),
+                ('✅ Корректных ответов (с данными)', quality.get('correct', 0), quality.get('correct_percentage', 0)),
+                ('🔵 Вопросы вне специализации', quality.get('out_of_scope', 0), quality.get('out_of_scope_percentage', 0)),
+                ('⚠️ Без ответа (нет информации)', quality.get('no_answer', 0), quality.get('no_answer_percentage', 0)),
             ]
             
             for metric_name, value, percent in metrics_data:
@@ -1142,9 +1278,9 @@ class MetricsExporter:
              '≥ 95%',
              '🔴 < 90% — проблемы с контентом\n🟢 ≥ 95% — высокий показатель понимания сути'),
             
-            ('Средняя оценка пользователей', 'Удовлетворенность по шкале 1–5',
-             '≥ 4.0',
-             '🔴 < 3.5 — низкое восприятие\n🟢 ≥ 4.0 — пользователи довольны'),
+            ('Процент положительных оценок', 'Доля положительных оценок в бинарной системе (да/нет)',
+             '≥ 80%',
+             '🔴 < 60% — низкая удовлетворенность\n🟡 60-80% — требует внимания\n🟢 ≥ 80% — высокая удовлетворенность'),
         ]
         
         for metric, meaning, norm, interpretation in kpi_data:
@@ -1305,20 +1441,63 @@ class MetricsExporter:
         
         # Данные по качеству
         quality_data = [
-            ('Корректных ответов', 'Доля запросов с точной и полезной информацией',
+            ('Корректных ответов (с данными)', 'Доля запросов с точной и полезной информацией',
              '≥ 95%',
-             '🟢 Высокий уровень надёжности\n < 90% — база знаний требует расширения или коррекции'),
+             '🟢 Высокий уровень надёжности\n🔴 < 90% — база знаний требует расширения или коррекции'),
             
-            ('Некорректных ответов', 'Доля ошибочных или вводящих в заблуждение ответов',
-             '0%',
-             '🔴 Любое значение > 0 — недопустимо в контексте (риск ошибок)'),
+            ('Вопросы вне специализации', 'Вопросы не относящиеся к лабораторной диагностике (цены, лечение, диагнозы и т.д.)',
+             'Не нормируется',
+             '🔵 Бот корректно определил вопрос вне специализации и сообщил об этом пользователю.\nНЕ влияет на коэффициент точности, т.к. это корректная работа бота'),
             
-            ('Без ответа', 'Доля запросов, по которым система не выдала информацию',
+            ('Без ответа (нет информации)', 'Доля запросов в рамках специализации, по которым не найдена информация в базе знаний',
              '≤ 5%',
-             '🟢 Допустимо для редких или нестандартных формулировок, которых нет в предоставленном материале\n🔴 > 5% — указывает на пробелы в базе знаний или проблемы с обработкой свободной речи'),
+             '🟢 ≤ 5% — допустимо для редких формулировок\n🔴 > 5% — указывает на пробелы в базе знаний'),
         ]
         
         for metric, meaning, norm, interpretation in quality_data:
+            worksheet.write(row, 0, metric, formats['cell_data'])
+            worksheet.write(row, 1, meaning, formats['cell_data'])
+            worksheet.write(row, 2, norm, formats['cell_data'])
+            worksheet.write(row, 3, interpretation, formats['cell_data'])
+            row += 1
+        
+        row += 1
+        
+        # === ОЦЕНКИ ПОЛЬЗОВАТЕЛЕЙ (БИНАРНАЯ СИСТЕМА) ===
+        worksheet.merge_range(row, 0, row, 3,
+                            '👍👎 ОЦЕНКИ ПОЛЬЗОВАТЕЛЕЙ (БИНАРНАЯ СИСТЕМА)',
+                            formats['section_header'])
+        row += 1
+        
+        # Заголовки таблицы
+        for col, header in enumerate(headers):
+            worksheet.write(row, col, header, formats['table_header'])
+        row += 1
+        
+        # Данные по оценкам пользователей
+        user_feedback_data = [
+            ('Процент положительных оценок (Satisfaction Rate)', 
+             'Доля ответов "Да" из всех полученных оценок',
+             '≥ 80%',
+             '🔴 < 60% — низкая удовлетворенность, требуется анализ проблем\n🟡 60-80% — требует внимания и улучшений\n🟢 ≥ 80% — высокая удовлетворенность пользователей'),
+            
+            ('Процент отрицательных оценок (Dissatisfaction Rate)', 
+             'Доля ответов "Нет" из всех полученных оценок',
+             '< 10%',
+             '🟢 < 10% — отличный показатель качества\n🟡 10-20% — требует улучшений и анализа причин\n🔴 ≥ 20% — критический уровень недовольства, нужны срочные меры'),
+            
+            ('Общее количество оценок', 
+             'Суммарное количество оценок (Да + Нет + Отказы от оценки) за период',
+             'Не нормируется',
+             'Используется для оценки статистической значимости и вовлеченности пользователей'),
+            
+            ('Коэффициент отклика (Response Rate)', 
+             'Соотношение полученных оценок к общему количеству валидных взаимодействий (general/code_search/name_search)',
+             '≥ 20%',
+             '🔴 < 10% — низкая вовлеченность, пользователи не оставляют обратную связь\n🟡 10-20% — средняя вовлеченность, можно улучшить\n🟢 ≥ 20% — высокая вовлеченность, пользователи активно оценивают'),
+        ]
+        
+        for metric, meaning, norm, interpretation in user_feedback_data:
             worksheet.write(row, 0, metric, formats['cell_data'])
             worksheet.write(row, 1, meaning, formats['cell_data'])
             worksheet.write(row, 2, norm, formats['cell_data'])

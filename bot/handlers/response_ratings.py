@@ -121,6 +121,8 @@ class ResponseRatingManager:
     async def should_ask_for_rating(self, user_id: int, response_type: str, state: FSMContext = None) -> Tuple[bool, str]:
         """Определяет, нужно ли запрашивать оценку"""
         
+        return False, ""
+        
         # Только для общих вопросов и поиска по названию
         valid_types = {'general', 'name_search'}
         if response_type not in valid_types:

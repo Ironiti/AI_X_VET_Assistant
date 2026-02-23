@@ -16,7 +16,7 @@ morph = pymorphy3.MorphAnalyzer()
 
 
 def calculate_fuzzy_score(query: str, test_code: str, test_name: str = "") -> float:
-    """Улучшенная функция для точного поиска по коду теста."""
+    """Улучшенная функция для точного поиска по коду теста с учетом взаимозаменяемости 0 и О."""
     # Нормализуем оба значения
     query = normalize_test_code(query)
     test_code = test_code.upper().strip()
@@ -24,6 +24,13 @@ def calculate_fuzzy_score(query: str, test_code: str, test_name: str = "") -> fl
     # Точное совпадение
     if query == test_code:
         return 100.0
+    
+    # Проверяем совпадение с учетом замены 0 <-> О (латинская) <-> О (кириллическая)
+    # Нормализуем все варианты О и 0 к одному символу для сравнения
+    query_normalized = query.replace('0', 'X').replace('O', 'X').replace('О', 'X')
+    test_code_normalized = test_code.replace('0', 'X').replace('O', 'X').replace('О', 'X')
+    if query_normalized == test_code_normalized:
+        return 95.0  # Высокий приоритет для совпадения с учетом 0/О
 
     # Извлекаем числа из запроса и кода
     query_digits = "".join(c for c in query if c.isdigit())
@@ -577,7 +584,7 @@ async def original_select_best_match(
         ]
     )
    
-
+    print("ДЛИНА ПРОМПТА:", len(options))
     print(cleaned_query)
     prompt = f"""
         # РОЛЬ: Эксперт по лабораторной диагностике животных
@@ -629,7 +636,7 @@ async def original_select_best_match(
         """
         
     try:
-            response = await llm.agenerate([[SystemMessage(content=prompt)]])
+            response = await llm.agenerate([[SystemMessage(content=prompt)]], seed = 42)
             selected = response.generations[0][0].text.strip()
 
             if not selected:
@@ -651,10 +658,54 @@ async def original_select_best_match(
         return [filtered_docs[0][0]]
 
 def generate_test_code_variants(text: str) -> list[str]:
-    """Генерирует различные варианты написания кода теста."""
+    """Генерирует различные варианты написания кода теста с учетом взаимозаменяемости 0 и О."""
     # Нормализуем входной текст
     text = normalize_test_code(text)
-    variants = [text]  # Оригинал
+    
+    # Генерируем все возможные комбинации замен 0/О/О для каждой позиции
+    def generate_zero_o_combinations(s: str) -> list[str]:
+        """Генерирует все комбинации замен 0, O (латинская), О (кириллическая)"""
+        if not s:
+            return ['']
+        
+        # Берем первый символ
+        first_char = s[0]
+        rest = s[1:]
+        
+        # Рекурсивно генерируем варианты для остальной части
+        rest_variants = generate_zero_o_combinations(rest)
+        
+        result = []
+        # Определяем возможные замены для первого символа
+        if first_char == '0':
+            replacements = ['0', 'O', 'О']  # цифра 0 -> латинская O -> кириллическая О
+        elif first_char == 'O':
+            replacements = ['O', '0', 'О']  # латинская O -> цифра 0 -> кириллическая О
+        elif first_char == 'О':
+            replacements = ['О', '0', 'O']  # кириллическая О -> цифра 0 -> латинская O
+        else:
+            replacements = [first_char]  # остальные символы не меняем
+        
+        # Комбинируем замены первого символа с вариантами остальной части
+        for replacement in replacements:
+            for rest_variant in rest_variants:
+                result.append(replacement + rest_variant)
+        
+        return result
+    
+    # Генерируем все комбинации
+    all_combinations = generate_zero_o_combinations(text)
+    
+    # Ограничиваем количество вариантов для производительности
+    # Берем первые 50 уникальных вариантов
+    variants = []
+    seen = set()
+    for combo in all_combinations:
+        if combo not in seen:
+            seen.add(combo)
+            variants.append(combo)
+            if len(variants) >= 50:
+                break
 
     cyrillic_to_latin = {
         "А": "A",
@@ -672,7 +723,7 @@ def generate_test_code_variants(text: str) -> list[str]:
         "Л": "L",
         "М": "M",
         "Н": ["N", "H"],
-        "О": "O",
+        "О": ["O", "0"],  # Добавляем взаимозаменяемость О и 0
         "П": "P",
         "Р": ["R", "P"],
         "С": ["S", "C"],
@@ -706,7 +757,7 @@ def generate_test_code_variants(text: str) -> list[str]:
         "L": "Л",
         "M": "М",
         "N": "Н",
-        "O": "О",
+        "O": ["О", "0"],  # Добавляем взаимозаменяемость О и 0
         "P": ["П", "Р"],
         "Q": "К",
         "R": "Р",

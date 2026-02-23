@@ -14,8 +14,11 @@ from bot.handlers.content import content_router
 from bot.handlers.news import news_router
 from bot.handlers.utils import gif_router, file_router
 from bot.handlers.faq_handler import faq_router
+from bot.handlers.rating_feedback import rating_feedback_router  # Система оценки ответов
+from bot.handlers.error_callbacks import error_callbacks_router  # ✅ НОВОЕ: Обработка ошибок - callback'и
 from bot.middleware.metrics_middleware import MetricsMiddleware
 from bot.middleware.state_recovery_middleware import StateRecoveryMiddleware
+from bot.middleware.error_middleware import ErrorHandlingMiddleware  # ✅ НОВОЕ: Обработка ошибок
 # from .questions import questions_router, questions_callbacks_router
 from config import BOT_API_KEY
 
@@ -29,13 +32,22 @@ bot = Bot(
 dp = Dispatcher(storage=MemoryStorage())
 
 # Регистрация middleware (порядок важен!)
-# 1. StateRecoveryMiddleware - восстанавливает состояние после перезагрузки
+# 1. ErrorHandlingMiddleware - глобальная обработка ошибок (первым!)
+dp.message.middleware(ErrorHandlingMiddleware())
+dp.callback_query.middleware(ErrorHandlingMiddleware())
+
+# 2. StateRecoveryMiddleware - восстанавливает состояние после перезагрузки
 dp.message.middleware(StateRecoveryMiddleware())
 dp.callback_query.middleware(StateRecoveryMiddleware())
 
-# 2. MetricsMiddleware - записывает метрики
+# 3. MetricsMiddleware - записывает метрики
 dp.message.middleware(MetricsMiddleware())
 dp.callback_query.middleware(MetricsMiddleware())
+
+# Регистрация роутеров (порядок важен!)
+# rating_feedback_router должен быть ПЕРВЫМ для обработки callback'ов оценки
+dp.include_router(rating_feedback_router)  # ✅ НОВОЕ: Система оценки ответов
+dp.include_router(error_callbacks_router)  # ✅ НОВОЕ: Обработка ошибок - callback'и
 
 dp.include_router(registration_router)
 # dp.include_router(questions_callbacks_router)
