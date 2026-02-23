@@ -1,6 +1,8 @@
 import io
 import xlsxwriter
-from datetime import datetime
+from datetime import datetime, timedelta
+
+MSK_OFFSET = timedelta(hours=3)  # Смещение МСК (UTC+3)
 
 class PollExporter:
     async def export_polls_to_excel(self, polls_data):
@@ -35,6 +37,12 @@ class PollExporter:
             'valign': 'top'
         })
         
+        datetime_format = workbook.add_format({
+            'border': 1,
+            'num_format': 'DD.MM.YYYY HH:MM',
+            'valign': 'top'
+        })
+        
         # Лист со сводкой
         summary_sheet = workbook.add_worksheet('Сводка')
         summary_headers = ['Название опроса', 'Всего участников', 'Дата создания', 'Статус']
@@ -61,17 +69,20 @@ class PollExporter:
             sheet_name = f"Опрос_{poll['id']}"[:31]
             worksheet = workbook.add_worksheet(sheet_name)
             
-            # Заголовок опроса
-            worksheet.merge_range(0, 0, 0, len(poll['questions']) + 2, poll['title'], header_format)
+            # Заголовок опроса (охватывает все колонки: ID+Имя+Роль+Код клиента+Начало теста+Вопросы)
+            worksheet.merge_range(0, 0, 0, len(poll['questions']) + 4, poll['title'], header_format)
             if poll.get('description'):
-                worksheet.merge_range(1, 0, 1, len(poll['questions']) + 2, poll['description'], subheader_format)
+                worksheet.merge_range(1, 0, 1, len(poll['questions']) + 4, poll['description'], subheader_format)
                 current_row = 3
             else:
                 current_row = 2
             
             # НОВАЯ СТРУКТУРА: По человеку (горизонтально)
             # Собираем уникальных пользователей
-            users_dict = {}  # user_id -> {name, client_code, user_type, answers}
+            users_dict = {}  # user_id -> {name, client_code, user_type, start_time, answers}
+            
+            # Словарь: user_id -> время начала теста (MIN answered_at)
+            user_start_times = poll.get('user_start_times', {})
             
             for q_idx, question in enumerate(poll['questions'], 1):
                 question_key = f"q_{q_idx}"
@@ -95,6 +106,7 @@ class PollExporter:
                                 'user_id': user_id,
                                 'client_code': detail.get('client_code', '-'),
                                 'user_type': role_display,
+                                'start_time': user_start_times.get(user_id, '-'),
                                 'answers': {}
                             }
                         users_dict[user_id]['answers'][question_key] = detail.get('answer', '')
@@ -117,6 +129,7 @@ class PollExporter:
                                 'user_id': user_id,
                                 'client_code': detail.get('client_code', '-'),
                                 'user_type': role_display,
+                                'start_time': user_start_times.get(user_id, '-'),
                                 'answers': {}
                             }
                         users_dict[user_id]['answers'][question_key] = detail.get('answer', '')
@@ -126,10 +139,11 @@ class PollExporter:
             worksheet.write(current_row, 1, 'Имя', header_format)
             worksheet.write(current_row, 2, 'Роль', header_format)
             worksheet.write(current_row, 3, 'Код клиента', header_format)
+            worksheet.write(current_row, 4, 'Начало теста', header_format)
             
             # Заголовки вопросов
             for q_idx, question in enumerate(poll['questions'], 1):
-                col = 3 + q_idx
+                col = 4 + q_idx
                 question_text = f"Вопрос {q_idx}"
                 worksheet.write(current_row, col, question_text, header_format)
             
@@ -140,9 +154,10 @@ class PollExporter:
             worksheet.write(current_row, 1, '', subheader_format)
             worksheet.write(current_row, 2, '', subheader_format)
             worksheet.write(current_row, 3, '', subheader_format)
+            worksheet.write(current_row, 4, '', subheader_format)
             
             for q_idx, question in enumerate(poll['questions'], 1):
-                col = 3 + q_idx
+                col = 4 + q_idx
                 question_text = question['text']
                 if len(question_text) > 50:
                     question_text = question_text[:47] + "..."
@@ -156,10 +171,21 @@ class PollExporter:
                 worksheet.write(current_row, 1, user_data['name'], text_format)
                 worksheet.write(current_row, 2, user_data['user_type'], text_format)
                 worksheet.write(current_row, 3, user_data['client_code'], text_format)
+                start_time_raw = user_data.get('start_time', '-')
+                if start_time_raw and start_time_raw != '-':
+                    try:
+                        # SQLite хранит UTC, конвертируем в МСК (UTC+3)
+                        start_dt_utc = datetime.strptime(str(start_time_raw)[:19], '%Y-%m-%d %H:%M:%S')
+                        start_dt_msk = start_dt_utc + MSK_OFFSET
+                        worksheet.write_datetime(current_row, 4, start_dt_msk, datetime_format)
+                    except (ValueError, TypeError):
+                        worksheet.write(current_row, 4, str(start_time_raw), text_format)
+                else:
+                    worksheet.write(current_row, 4, '-', text_format)
                 
                 # Ответы на каждый вопрос
                 for q_idx, question in enumerate(poll['questions'], 1):
-                    col = 3 + q_idx
+                    col = 4 + q_idx
                     question_key = f"q_{q_idx}"
                     answer = user_data['answers'].get(question_key, '-')
                     
@@ -187,9 +213,10 @@ class PollExporter:
             worksheet.write(current_row, 1, 'Средние значения', header_format)
             worksheet.write(current_row, 2, '', header_format)
             worksheet.write(current_row, 3, '', header_format)
+            worksheet.write(current_row, 4, '', header_format)
             
             for q_idx, question in enumerate(poll['questions'], 1):
-                col = 3 + q_idx
+                col = 4 + q_idx
                 if question['type'] == 'rating':
                     # Формула для расчета среднего
                     start_row = current_row - len(users_dict)
@@ -214,9 +241,10 @@ class PollExporter:
             worksheet.set_column(1, 1, 25)  # Имя
             worksheet.set_column(2, 2, 15)  # Роль
             worksheet.set_column(3, 3, 15)  # Код клиента
+            worksheet.set_column(4, 4, 20)  # Начало теста
             # Вопросы
             for q_idx in range(len(poll['questions'])):
-                col = 4 + q_idx
+                col = 5 + q_idx
                 worksheet.set_column(col, col, 20)
         
         workbook.close()

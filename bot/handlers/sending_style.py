@@ -7,7 +7,7 @@ import re
 from typing import Dict, List, Tuple
 from datetime import datetime
 from src.database.db_init import db
-from bot.handlers.utils import create_test_link, is_profile_test, format_i_pattern_numbered
+from bot.handlers.utils import create_test_link, is_profile_test, format_i_pattern_numbered, format_i_pattern_comma
 import os
 from aiogram.types import FSInputFile
 from typing import List
@@ -253,6 +253,7 @@ def format_test_data(metadata: Dict) -> Dict:
         "test_code": metadata.get("test_code"),
         "test_name": metadata.get("test_name"),
         "department": metadata.get("department"),
+        "term_of_execution": metadata.get("term_of_execution"),
         "important_information": metadata.get("important_information"),
         "patient_preparation": metadata.get("patient_preparation") + bool(metadata.get("additional_information_name"))*(' (Название файла:' + metadata.get("additional_information_name") + ')'),
         "biomaterial_type": metadata.get("biomaterial_type"),
@@ -264,7 +265,7 @@ def format_test_data(metadata: Dict) -> Dict:
         # Форматированные данные для отображения
         "primary_container_type": format_i_pattern_numbered(metadata.get("primary_container_type")),
         "container_type": format_i_pattern_numbered(metadata.get("container_type")),
-        "container_number": format_i_pattern_numbered(metadata.get("container_number")),
+        "container_number": format_i_pattern_comma(metadata.get("container_number")),
         "preanalytics": '\n' + re.sub(
             r'\s*\*I\*\s*', ' ', 
             re.sub(
@@ -300,6 +301,7 @@ def format_test_info(test_data: Dict) -> str:
     field_templates = {
         "department": ("🧬department", "Вид исследования"),
         "important_information": ("❗️important_information", "Важная информация"),
+        "term_of_execution": ("⏱️term_of_execution", "Сроки исполнения (БЕЗ учёта логистики)"),
         "patient_preparation": (
             "📝patient_preparation",
             "Важная информация для подготовки животного",
@@ -384,7 +386,7 @@ async def animate_loading(loading_msg: Message):
     """Animate loading message (edit text, not caption)."""
     animations = [
         "Обрабатываю ваш запрос...\n⏳ Анализирую данные...",
-        "Обрабатываю ваш запрос...\n🔍 Поиск в базе X-LAB VET...",
+        "Обрабатываю ваш запрос...\n🔍 Поиск в базе VetUnion...",
         "Обрабатываю ваш запрос...\n🧠 Формирую ответ...",
     ]
     i = 0
@@ -402,6 +404,7 @@ class CustomEmojiManager:
         self.emoji_ids = {
             "test_name": "5328315072840234225",
             "department": "5328315072840234225",
+            "term_of_execution": "5328315072840234225",
             "important_information": "5328315072840234225",
             "patient_preparation": "5328176289562004639",
             "biomaterial_type": "5327846616462291750",

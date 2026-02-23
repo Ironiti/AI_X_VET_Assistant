@@ -200,6 +200,13 @@ def get_dialog_kb():
         resize_keyboard=True
     )
 
+def get_poll_in_progress_kb():
+    """Клавиатура для режима прохождения опроса"""
+    kb = [
+        [KeyboardButton(text="❌ Выйти из опроса")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
 def get_excel_export_kb():
     """Клавиатура для выбора типа выгрузки"""
     kb = [

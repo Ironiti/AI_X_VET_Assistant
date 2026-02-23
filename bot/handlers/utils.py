@@ -436,3 +436,26 @@ def format_i_pattern_numbered(text: str | int | float | None, indent: str = "\t\
         formatted_lines.append(f"{indent}{i}. {part}")
     
     return '\n' + '\n'.join(formatted_lines)
+
+def format_i_pattern_comma(text: str | int | float | None) -> str:
+    """
+    Форматирует текст, удаляя разделители *I* и + и выводя все части через запятую.
+    Обрабатывает числа и None значения.
+    """
+    if not text:
+        return ""
+    
+    # Преобразуем в строку, если это не строка
+    if not isinstance(text, str):
+        text = str(text)
+    
+    # Заменяем оба разделителя на единый для разделения
+    text = text.replace('+', '*I*')
+    
+    # Разделяем по *I*
+    parts = [part.strip() for part in text.split('*I*') if part.strip()]
+    
+    if not parts:
+        return ""
+    
+    return ", ".join(parts)

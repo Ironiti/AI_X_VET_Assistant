@@ -1,45 +1,1096 @@
+import json
+import time
+import asyncio
+from typing import Optional
 import aiosqlite
-from datetime import datetime
+from datetime import datetime, timedelta
+import re
+
+from src.data_vectorization import DataProcessor
 
 class Database:
     def __init__(self, db_path: str):
         self.db_path = db_path
-    
-    async def create_tables(self):
+        self.test_processor = DataProcessor()
+        self._user_cache = {}  # Кэш пользователей
+        self._cache_ttl = 300  # 5 минут
+        
+    async def get_unique_container_types(self) -> list[str]:
+        """Получает уникальные типы контейнеров из базы тестов (из обоих полей)"""
+        try:
+            if not self.test_processor.vector_store:
+                self.test_processor.load_vector_store()
+            
+            all_tests = self.test_processor.search_test(query="", top_k=2000)
+            
+            container_types = set()
+            
+            for doc, _ in all_tests:
+                # Получаем типы контейнеров из ОБОИХ полей
+                container_fields = [
+                    doc.metadata.get('primary_container_type', '').strip(),  # ПРИОРИТЕТ
+                    doc.metadata.get('container_type', '').strip()
+                ]
+                
+                for container_type_raw in container_fields:
+                    if not container_type_raw or container_type_raw.lower() in ['не указан', 'нет', '-', '', 'none', 'null']:
+                        continue
+                    
+                    # Убираем переносы строк, лишние пробелы и кавычки
+                    container_type_raw = container_type_raw.replace('"', '').replace('\n', ' ')
+                    container_type_raw = ' '.join(container_type_raw.split())
+                    
+                    # Разбиваем по *I* если есть несколько контейнеров
+                    if '*I*' in container_type_raw:
+                        parts = container_type_raw.split('*I*')
+                    else:
+                        parts = [container_type_raw]
+                    
+                    for part in parts:
+                        container_type = part.strip()
+                        if container_type:
+                            # ВАЖНО: Нормализуем - первая буква каждого слова заглавная
+                            normalized = ' '.join(word.capitalize() for word in container_type.split())
+                            container_types.add(normalized)
+            
+            # Возвращаем отсортированный список уникальных типов
+            return sorted(list(container_types))
+            
+        except Exception as e:
+            print(f"[ERROR] Failed to get container types: {e}")
+            return []
+        
+    async def log_chat_interaction(
+        self, 
+        user_id: int, 
+        user_name: str, 
+        question: str, 
+        bot_response: str, 
+        request_type: str = 'question',
+        search_success: bool = True,
+        found_test_code: str = None
+    ):
+        """
+        Сохраняет взаимодействие пользователя с ботом
+        
+        Args:
+            user_id: Telegram ID пользователя
+            user_name: Имя пользователя
+            question: Вопрос пользователя
+            bot_response: Ответ бота
+            request_type: Тип запроса (question/code_search/name_search/general)
+            search_success: Успешность поиска
+            found_test_code: Найденный код теста (если применимо)
+        """
+        try:
+            # Обрезаем слишком длинные ответы
+            if len(bot_response) > 5000:
+                bot_response = bot_response[:4997] + "..."
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    INSERT INTO chat_history 
+                    (user_id, user_name, question, bot_response, request_type, 
+                    search_success, found_test_code, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    user_id, 
+                    user_name, 
+                    question, 
+                    bot_response, 
+                    request_type,
+                    search_success,
+                    found_test_code,
+                    datetime.now()
+                ))
+                
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"[ERROR] Failed to log chat interaction: {e}")
+            return False
+        
+    async def update_poll_media(self, poll_id, media_file_id, media_type):
+        """Добавление благодарственного медиа к опросу"""
         async with aiosqlite.connect(self.db_path) as db:
-            # Таблица пользователей
+            # Проверяем, существует ли колонка, если нет - создаем
+            cursor = await db.execute("PRAGMA table_info(polls)")
+            columns = await cursor.fetchall()
+            column_names = [col[1] for col in columns]
+            
+            if 'thank_you_media' not in column_names:
+                await db.execute('ALTER TABLE polls ADD COLUMN thank_you_media TEXT')
+            if 'thank_you_media_type' not in column_names:
+                await db.execute('ALTER TABLE polls ADD COLUMN thank_you_media_type TEXT')
+            if 'welcome_image' not in column_names:
+                await db.execute('ALTER TABLE polls ADD COLUMN welcome_image TEXT')
+            
+            await db.execute(
+                "UPDATE polls SET thank_you_media = ?, thank_you_media_type = ? WHERE id = ?",
+                (media_file_id, media_type, poll_id)
+            )
+            await db.commit()
+    
+    async def update_poll_welcome_image(self, poll_id, image_file_id, welcome_format='image_with_text'):
+        """Добавление приветственного изображения к опросу"""
+        async with aiosqlite.connect(self.db_path) as db:
+            # Проверяем, существует ли колонка, если нет - создаем
+            cursor = await db.execute("PRAGMA table_info(polls)")
+            columns = await cursor.fetchall()
+            column_names = [col[1] for col in columns]
+            
+            if 'welcome_image' not in column_names:
+                await db.execute('ALTER TABLE polls ADD COLUMN welcome_image TEXT')
+            if 'welcome_format' not in column_names:
+                await db.execute('ALTER TABLE polls ADD COLUMN welcome_format TEXT DEFAULT "text_only"')
+            
+            await db.execute(
+                "UPDATE polls SET welcome_image = ?, welcome_format = ? WHERE id = ?",
+                (image_file_id, welcome_format, poll_id)
+            )
+            await db.commit()
+
+    async def get_poll_info(self, poll_id):
+        """Получение информации об опросе"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM polls WHERE id = ?",
+                (poll_id,)
+            )
+            row = await cursor.fetchone()
+            if row:
+                result = dict(row)
+                # Для обратной совместимости
+                if result.get('thank_you_media'):
+                    result['thank_you_video'] = result['thank_you_media']
+                return result
+            return None
+        
+    async def update_poll_video(self, poll_id, video_file_id):
+        """Добавление благодарственного видео к опросу"""
+        async with aiosqlite.connect(self.db_path) as db:
+            # Добавляем колонку если её нет
             await db.execute('''
-                CREATE TABLE IF NOT EXISTS users (
-                    telegram_id INTEGER PRIMARY KEY,
-                    username TEXT,
-                    client_code TEXT UNIQUE,
-                    pet_name TEXT,
-                    pet_type TEXT,
-                    country TEXT DEFAULT 'RU',
-                    registration_date TIMESTAMP,
-                    role TEXT DEFAULT 'client',
-                    is_active BOOLEAN DEFAULT TRUE
+                ALTER TABLE polls ADD COLUMN thank_you_video TEXT
+            ''')
+            
+            await db.execute(
+                "UPDATE polls SET thank_you_video = ? WHERE id = ?",
+                (video_file_id, poll_id)
+            )
+            await db.commit()
+        
+    async def create_poll(self, title, description, questions, created_by):
+        """Создание нового опроса"""
+        async with aiosqlite.connect(self.db_path) as db:
+
+            
+            # Создаем таблицы для опросов если их нет
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS polls (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    description TEXT,
+                    created_by INTEGER,
+                    is_active BOOLEAN DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
             
-            # Таблица для жалоб и предложений
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS poll_questions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    poll_id INTEGER,
+                    question_text TEXT NOT NULL,
+                    question_type TEXT NOT NULL,
+                    options TEXT,
+                    question_order INTEGER,
+                    FOREIGN KEY (poll_id) REFERENCES polls (id)
+                )
+            ''')
+            
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS poll_responses (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    poll_id INTEGER,
+                    question_id INTEGER,
+                    user_id INTEGER,
+                    answer TEXT,
+                    answered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (poll_id) REFERENCES polls (id),
+                    FOREIGN KEY (question_id) REFERENCES poll_questions (id)
+                )
+            ''')
+            
+            # Вставляем опрос
+            cursor = await db.execute(
+                "INSERT INTO polls (title, description, created_by) VALUES (?, ?, ?)",
+                (title, description, created_by)
+            )
+            poll_id = cursor.lastrowid
+            
+            # Вставляем вопросы
+            for idx, question in enumerate(questions):
+                options_json = json.dumps(question.get('options')) if question.get('options') else None
+                await db.execute(
+                    "INSERT INTO poll_questions (poll_id, question_text, question_type, options, question_order) VALUES (?, ?, ?, ?, ?)",
+                    (poll_id, question['text'], question['type'], options_json, idx + 1)
+                )
+            
+            await db.commit()
+            return poll_id
+
+    async def check_user_poll_participation(self, user_id, poll_id):
+        """Проверка участия пользователя в опросе"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM poll_responses WHERE user_id = ? AND poll_id = ?",
+                (user_id, poll_id)
+            )
+            count = await cursor.fetchone()
+            return count[0] > 0
+
+    async def get_poll_questions(self, poll_id):
+        """Получение вопросов опроса"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                SELECT id, question_text, question_type, options
+                FROM poll_questions
+                WHERE poll_id = ?
+                ORDER BY question_order
+            ''', (poll_id,))
+            
+            rows = await cursor.fetchall()
+            questions = []
+            for row in rows:
+                questions.append({
+                    'id': row[0],
+                    'text': row[1],
+                    'type': row[2],
+                    'options': json.loads(row[3]) if row[3] else None
+                })
+            return questions
+        
+    async def get_container_photo(self, container_type: str):
+        """Получает фото контейнера по типу"""
+        try:
+            await self.ensure_container_photos_table()
+            # Нормализуем тип контейнера при поиске
+            normalized_type = ' '.join(word.capitalize() for word in container_type.split())
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute(
+                    'SELECT file_id, description FROM container_photos WHERE container_type = ?',
+                    (normalized_type,)
+                )
+                row = await cursor.fetchone()
+                
+                # Если не нашли точное совпадение, пробуем без учета регистра
+                if not row:
+                    cursor = await db.execute(
+                        'SELECT file_id, description FROM container_photos WHERE LOWER(container_type) = LOWER(?)',
+                        (container_type.strip(),)
+                    )
+                    row = await cursor.fetchone()
+                
+                if row:
+                    return {'file_id': row[0], 'description': row[1]}
+                
+                # Для отладки
+                print(f"[DEBUG] No photo found for container type: '{normalized_type}'")
+                return None
+        except Exception as e:
+            print(f"[ERROR] Failed to get container photo: {e}")
+            return None
+
+    async def delete_container_photo(self, container_type: str):
+        """Удаляет фото контейнера по типу"""
+        try:
+            await self.ensure_container_photos_table()
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute(
+                    'DELETE FROM container_photos WHERE container_type = ?', 
+                    (container_type,)
+                )
+                deleted = cursor.rowcount > 0
+                await db.commit()
+                return deleted
+        except Exception as e:
+            print(f"[ERROR] Failed to delete container photo: {e}")
+            return False
+
+    async def save_poll_response(self, poll_id, question_id, user_id, answer):
+        """Сохранение ответа пользователя на вопрос опроса"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT INTO poll_responses (poll_id, question_id, user_id, answer) VALUES (?, ?, ?, ?)",
+                (poll_id, question_id, user_id, answer)
+            )
+            await db.commit()
+
+    async def get_active_polls(self):
+        """Получение активных опросов"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                SELECT 
+                    p.id,
+                    p.title,
+                    p.description,
+                    p.created_at,
+                    COUNT(DISTINCT pq.id) as questions_count,
+                    COUNT(DISTINCT pr.user_id) as responses_count
+                FROM polls p
+                LEFT JOIN poll_questions pq ON p.id = pq.poll_id
+                LEFT JOIN poll_responses pr ON p.id = pr.poll_id
+                WHERE p.is_active = 1
+                GROUP BY p.id
+                ORDER BY p.created_at DESC
+            ''')
+            
+            rows = await cursor.fetchall()
+            polls = []
+            for row in rows:
+                polls.append({
+                    'id': row[0],
+                    'title': row[1],
+                    'description': row[2],
+                    'created_at': row[3],
+                    'questions_count': row[4],
+                    'responses_count': row[5]
+                })
+            return polls
+
+    async def get_polls_with_results(self):
+        """Получение опросов с результатами"""
+        async with aiosqlite.connect(self.db_path) as db:
+            # Получаем все опросы
+            cursor = await db.execute('''
+                SELECT 
+                    p.id,
+                    p.title,
+                    COUNT(DISTINCT pr.user_id) as total_responses
+                FROM polls p
+                LEFT JOIN poll_responses pr ON p.id = pr.poll_id
+                GROUP BY p.id
+                HAVING total_responses > 0
+                ORDER BY p.created_at DESC
+            ''')
+            
+            polls_data = await cursor.fetchall()
+            polls = []
+            
+            for poll_row in polls_data:
+                poll_id = poll_row[0]
+                
+                # Получаем вопросы для каждого опроса
+                q_cursor = await db.execute('''
+                    SELECT id, question_text, question_type, options
+                    FROM poll_questions
+                    WHERE poll_id = ?
+                    ORDER BY question_order
+                ''', (poll_id,))
+                
+                questions_data = await q_cursor.fetchall()
+                questions = []
+                
+                for q_row in questions_data:
+                    question_id = q_row[0]
+                    question = {
+                        'text': q_row[1],
+                        'type': q_row[2]
+                    }
+                    
+                    if q_row[2] == 'rating':
+                        # Для рейтинга считаем среднее
+                        avg_cursor = await db.execute('''
+                            SELECT AVG(CAST(answer as REAL))
+                            FROM poll_responses
+                            WHERE question_id = ? AND answer IS NOT NULL
+                        ''', (question_id,))
+                        avg_row = await avg_cursor.fetchone()
+                        question['avg_rating'] = avg_row[0] if avg_row[0] else 0
+                        
+                    elif q_row[2] in ['single', 'multiple']:
+                        # Для вариантов считаем самый популярный
+                        top_cursor = await db.execute('''
+                            SELECT answer, COUNT(*) as cnt
+                            FROM poll_responses
+                            WHERE question_id = ?
+                            GROUP BY answer
+                            ORDER BY cnt DESC
+                            LIMIT 1
+                        ''', (question_id,))
+                        top_row = await top_cursor.fetchone()
+                        question['top_answer'] = top_row[0] if top_row else 'Нет ответов'
+                        
+                    else:  # text
+                        # Для текстовых просто считаем количество
+                        count_cursor = await db.execute('''
+                            SELECT COUNT(*)
+                            FROM poll_responses
+                            WHERE question_id = ?
+                        ''', (question_id,))
+                        count_row = await count_cursor.fetchone()
+                        question['answer_count'] = count_row[0]
+                    
+                    questions.append(question)
+                
+                polls.append({
+                    'title': poll_row[1],
+                    'total_responses': poll_row[2],
+                    'questions': questions
+                })
+            
+            return polls
+
+    async def get_full_poll_results(self):
+        """Получение полных результатов опросов для выгрузки"""
+        async with aiosqlite.connect(self.db_path) as db:
+            # Получаем все опросы
+            cursor = await db.execute('''
+                SELECT 
+                    p.id,
+                    p.title,
+                    p.description,
+                    p.is_active,
+                    p.created_at,
+                    COUNT(DISTINCT pr.user_id) as total_responses
+                FROM polls p
+                LEFT JOIN poll_responses pr ON p.id = pr.poll_id
+                GROUP BY p.id
+                ORDER BY p.created_at DESC
+            ''')
+            
+            polls_data = await cursor.fetchall()
+            polls = []
+            
+            for poll_row in polls_data:
+                poll_id = poll_row[0]
+                
+                # Получаем вопросы
+                q_cursor = await db.execute('''
+                    SELECT id, question_text, question_type, options
+                    FROM poll_questions
+                    WHERE poll_id = ?
+                    ORDER BY question_order
+                ''', (poll_id,))
+                
+                questions_data = await q_cursor.fetchall()
+                questions = []
+                
+                for q_row in questions_data:
+                    question_id = q_row[0]
+                    question_type = q_row[2]
+                    options = json.loads(q_row[3]) if q_row[3] else None
+                    
+                    question = {
+                        'text': q_row[1],
+                        'type': question_type
+                    }
+                    
+                    if question_type == 'rating':
+                        # Получаем все оценки с информацией о пользователях
+                        rating_cursor = await db.execute('''
+                            SELECT pr.answer, COUNT(*) as cnt
+                            FROM poll_responses pr
+                            WHERE pr.question_id = ?
+                            GROUP BY pr.answer
+                        ''', (question_id,))
+                        ratings = await rating_cursor.fetchall()
+                        
+                        total = sum(r[1] for r in ratings)
+                        sum_rating = sum(int(r[0]) * r[1] for r in ratings if r[0])
+                        question['avg_rating'] = sum_rating / total if total > 0 else 0
+                        
+                        # Добавляем детальную информацию
+                        detail_cursor = await db.execute('''
+                            SELECT pr.answer, u.name, pr.user_id, u.user_type
+                            FROM poll_responses pr
+                            LEFT JOIN users u ON pr.user_id = u.telegram_id
+                            WHERE pr.question_id = ?
+                        ''', (question_id,))
+                        details = await detail_cursor.fetchall()
+                        question['detailed_answers'] = [
+                            {
+                                'answer': d[0],
+                                'user_name': d[1] or f'ID: {d[2]}',
+                                'user_id': d[2],
+                                'user_type': d[3]
+                            }
+                            for d in details
+                        ]
+                        
+                    elif question_type in ['single', 'multiple']:
+                        # Статистика по вариантам
+                        question['options_stats'] = []
+                        if options:
+                            for option in options:
+                                count_cursor = await db.execute('''
+                                    SELECT COUNT(*)
+                                    FROM poll_responses
+                                    WHERE question_id = ? AND answer LIKE ?
+                                ''', (question_id, f'%{option}%'))
+                                count = (await count_cursor.fetchone())[0]
+                                
+                                total_cursor = await db.execute('''
+                                    SELECT COUNT(DISTINCT user_id)
+                                    FROM poll_responses
+                                    WHERE question_id = ?
+                                ''', (question_id,))
+                                total = (await total_cursor.fetchone())[0]
+                                
+                                percentage = (count / total * 100) if total > 0 else 0
+                                question['options_stats'].append({
+                                    'text': option,
+                                    'count': count,
+                                    'percentage': percentage
+                                })
+                        
+                        # Добавляем детальную информацию
+                        detail_cursor = await db.execute('''
+                            SELECT pr.answer, u.name, pr.user_id, u.client_code, u.user_type
+                            FROM poll_responses pr
+                            LEFT JOIN users u ON pr.user_id = u.telegram_id
+                            WHERE pr.question_id = ?
+                        ''', (question_id,))
+                        details = await detail_cursor.fetchall()
+                        question['detailed_answers'] = [
+                            {
+                                'answer': d[0],
+                                'user_name': d[1] or f'ID: {d[2]}',
+                                'user_id': d[2],
+                                'client_code': d[3],
+                                'user_type': d[4]
+                            }
+                            for d in details
+                        ]
+                        
+                    else:  # text
+                        # Получаем все текстовые ответы с информацией о пользователях
+                        text_cursor = await db.execute('''
+                            SELECT
+                                pr.answer,
+                                u.name,
+                                pr.user_id,
+                                u.client_code,
+                                u.user_type,
+                                pr.answered_at
+                            FROM poll_responses pr
+                            LEFT JOIN users u ON pr.user_id = u.telegram_id
+                            WHERE pr.question_id = ? AND pr.answer IS NOT NULL
+                            ORDER BY pr.answered_at DESC
+                        ''', (question_id,))
+                        text_answers = await text_cursor.fetchall()
+                        
+                        question['text_answers'] = [a[0] for a in text_answers]
+                        question['text_answers_detailed'] = [
+                            {
+                                'answer': a[0],
+                                'user_name': a[1] or f'ID: {a[2]}',
+                                'user_id': a[2],
+                                'client_code': a[3],
+                                'user_type': a[4],
+                                'answered_at': a[5]
+                            }
+                            for a in text_answers
+                        ]
+                    
+                    questions.append(question)
+                
+                # Получаем время начала теста для каждого пользователя (MIN answered_at)
+                start_times_cursor = await db.execute('''
+                    SELECT user_id, MIN(answered_at) as start_time
+                    FROM poll_responses
+                    WHERE poll_id = ?
+                    GROUP BY user_id
+                ''', (poll_id,))
+                start_times_data = await start_times_cursor.fetchall()
+                user_start_times = {row[0]: row[1] for row in start_times_data}
+                
+                polls.append({
+                    'id': poll_row[0],
+                    'title': poll_row[1],
+                    'description': poll_row[2],
+                    'is_active': poll_row[3],
+                    'created_at': poll_row[4],
+                    'total_responses': poll_row[5],
+                    'questions': questions,
+                    'user_start_times': user_start_times
+                })
+            
+            return polls       
+        
+    async def add_search_history(self, user_id: int, search_query: str, 
+                           found_test_code: str = None, search_type: str = 'text', 
+                           success: bool = True):
+        """Добавляет запись в историю поиска"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                INSERT INTO search_history (user_id, search_query, found_test_code, 
+                                        search_type, success, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (user_id, search_query, found_test_code, search_type, success, datetime.now()))
+            await db.commit()
+
+    async def update_user_frequent_test(self, user_id: int, test_code: str, test_name: str):
+        """Обновляет частоту использования теста пользователем"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                INSERT INTO user_frequent_tests (user_id, test_code, test_name, frequency, last_accessed)
+                VALUES (?, ?, ?, 1, ?)
+                ON CONFLICT(user_id, test_code) DO UPDATE SET
+                    frequency = frequency + 1,
+                    test_name = excluded.test_name,
+                    last_accessed = excluded.last_accessed
+            ''', (user_id, test_code, test_name, datetime.now()))
+            await db.commit()
+
+    async def get_user_frequent_tests(self, user_id: int, limit: int = 10) -> list:
+        """Получает частые тесты пользователя"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute('''
+                SELECT test_code, test_name, frequency, last_accessed
+                FROM user_frequent_tests
+                WHERE user_id = ?
+                ORDER BY frequency DESC, last_accessed DESC
+                LIMIT ?
+            ''', (user_id, limit))
+            
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def get_recent_searches(self, user_id: int, limit: int = 10) -> list:
+        """Получает последние поиски пользователя"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute('''
+                SELECT search_query, found_test_code, search_type, success, created_at
+                FROM search_history
+                WHERE user_id = ? AND success = TRUE
+                ORDER BY created_at DESC
+                LIMIT ?
+            ''', (user_id, limit))
+            
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def update_related_tests(self, user_id: int, test_code_1: str, test_code_2: str):
+        """Обновляет корреляцию между тестами для пользователя"""
+        # Всегда сохраняем в алфавитном порядке для консистентности
+        if test_code_1 > test_code_2:
+            test_code_1, test_code_2 = test_code_2, test_code_1
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                INSERT INTO related_tests (user_id, test_code_1, test_code_2, 
+                                        correlation_count, last_correlation)
+                VALUES (?, ?, ?, 1, ?)
+                ON CONFLICT(user_id, test_code_1, test_code_2) DO UPDATE SET
+                    correlation_count = correlation_count + 1,
+                    last_correlation = excluded.last_correlation
+            ''', (user_id, test_code_1, test_code_2, datetime.now()))
+            await db.commit()
+
+    async def get_user_related_tests(self, user_id: int, test_code: str, limit: int = 5) -> list:
+        """Получает тесты, которые пользователь часто ищет вместе с данным"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute('''
+                SELECT 
+                    CASE 
+                        WHEN test_code_1 = ? THEN test_code_2 
+                        ELSE test_code_1 
+                    END as related_code,
+                    correlation_count
+                FROM related_tests
+                WHERE user_id = ? AND (test_code_1 = ? OR test_code_2 = ?)
+                ORDER BY correlation_count DESC, last_correlation DESC
+                LIMIT ?
+            ''', (test_code, user_id, test_code, test_code, limit))
+            
+            rows = await cursor.fetchall()
+            related_codes = [dict(row) for row in rows]
+            
+            # Получаем полную информацию о связанных тестах
+            result = []
+            for item in related_codes:
+                test_info = await self.get_test_by_code(item['related_code'])
+                if test_info:
+                    test_info['correlation_count'] = item['correlation_count']
+                    result.append(test_info)
+            
+            return result
+
+    async def get_search_suggestions(self, user_id: int, query: str = "") -> list:
+        """Получает персонализированные подсказки для поиска"""
+        suggestions = []
+        
+        # 1. Частые тесты пользователя
+        frequent_tests = await self.get_user_frequent_tests(user_id, limit=20)
+        
+        # 2. Недавние успешные поиски
+        recent_searches = await self.get_recent_searches(user_id, limit=10)
+        
+        # Фильтруем по запросу если он есть
+        if query:
+            query_upper = query.upper()
+            query_lower = query.lower()
+            
+            # Фильтруем частые тесты
+            for test in frequent_tests:
+                if (query_upper in test['test_code'] or 
+                    query_lower in test['test_name'].lower()):
+                    suggestions.append({
+                        'type': 'frequent',
+                        'code': test['test_code'],
+                        'name': test['test_name'],
+                        'frequency': test['frequency']
+                    })
+            
+            # Фильтруем недавние поиски
+            seen_codes = {s['code'] for s in suggestions}
+            for search in recent_searches:
+                if search['found_test_code'] and search['found_test_code'] not in seen_codes:
+                    if query_lower in search['search_query'].lower():
+                        # Получаем информацию о тесте
+                        test_info = await self.get_test_by_code(search['found_test_code'])
+                        if test_info:
+                            suggestions.append({
+                                'type': 'recent',
+                                'code': test_info['test_code'],
+                                'name': test_info['test_name'],
+                                'original_query': search['search_query']
+                            })
+        else:
+            # Без запроса показываем топ частых
+            for test in frequent_tests[:3]:
+                suggestions.append({
+                    'type': 'frequent',
+                    'code': test['test_code'],
+                    'name': test['test_name'],
+                    'frequency': test['frequency']
+                })
+            
+            # Добавляем недавние поиски
+            seen_codes = {s['code'] for s in suggestions}
+            for search in recent_searches[:2]:
+                if search['found_test_code'] and search['found_test_code'] not in seen_codes:
+                    # Получаем информацию о тесте
+                    test_info = await self.get_test_by_code(search['found_test_code'])
+                    if test_info:
+                        suggestions.append({
+                            'type': 'recent',
+                            'code': test_info['test_code'],
+                            'name': test_info['test_name'],
+                            'original_query': search['search_query']
+                        })
+                        seen_codes.add(test_info['test_code'])
+        
+        return suggestions[:10]  # Максимум 10 подсказок
+
+    async def get_user_search_stats(self, user_id: int) -> dict:
+        """Получает статистику поисков пользователя"""
+        async with aiosqlite.connect(self.db_path) as db:
+            # Общее количество поисков
+            cursor = await db.execute('''
+                SELECT COUNT(*) as total,
+                    SUM(CASE WHEN success = TRUE THEN 1 ELSE 0 END) as successful,
+                    COUNT(DISTINCT found_test_code) as unique_tests
+                FROM search_history
+                WHERE user_id = ?
+            ''', (user_id,))
+            
+            stats = await cursor.fetchone()
+            
+            # Самый частый тест
+            cursor = await db.execute('''
+                SELECT test_code, test_name, frequency
+                FROM user_frequent_tests
+                WHERE user_id = ?
+                ORDER BY frequency DESC
+                LIMIT 1
+            ''', (user_id,))
+            
+            most_frequent = await cursor.fetchone()
+            
+            return {
+                'total_searches': stats[0] or 0,
+                'successful_searches': stats[1] or 0,
+                'unique_tests': stats[2] or 0,
+                'success_rate': (stats[1] / stats[0] * 100) if stats[0] else 0,
+                'most_frequent_test': dict(most_frequent) if most_frequent else None
+            }
+
+    async def cleanup_old_search_history(self, days: int = 90):
+        """Удаляет старую историю поисков"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cutoff_date = datetime.now() - timedelta(days=days)
+            
+            cursor = await db.execute('''
+                DELETE FROM search_history
+                WHERE created_at < ?
+            ''', (cutoff_date,))
+            
+            deleted = cursor.rowcount
+            await db.commit()
+            
+            return deleted
+        
+    async def ensure_container_photos_table(self):
+        """Создает таблицу container_photos если её нет"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS container_photos (
+                    container_type TEXT PRIMARY KEY,
+                    file_id TEXT NOT NULL,
+                    description TEXT,
+                    uploaded_by INTEGER,
+                    upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (uploaded_by) REFERENCES users(telegram_id)
+                )
+            ''')
+            await db.commit()
+            
+    async def add_container_photo(self, container_type: str, file_id: str, uploaded_by: int, description: str = None):
+        """Добавляет или обновляет фото для типа контейнера"""
+        try:
+            await self.ensure_container_photos_table()
+            # Нормализуем тип контейнера при сохранении (каждое слово с заглавной буквы)
+            normalized_type = ' '.join(word.capitalize() for word in container_type.split())
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    INSERT OR REPLACE INTO container_photos 
+                    (container_type, file_id, uploaded_by, description, upload_date)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (normalized_type, file_id, uploaded_by, description, datetime.now()))
+                
+                await db.commit()
+                print(f"[INFO] Saved photo for container: '{normalized_type}'")
+                return True
+        except Exception as e:
+            print(f"[ERROR] Failed to add container photo: {e}")
+            return False
+
+    async def get_container_photo(self, container_type: str):
+        """Получает фото контейнера по типу"""
+        try:
+            await self.ensure_container_photos_table()
+            # Нормализуем тип контейнера при поиске
+            normalized_type = ' '.join(word.capitalize() for word in container_type.split())
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute(
+                    'SELECT file_id, description FROM container_photos WHERE container_type = ?',
+                    (normalized_type,)
+                )
+                row = await cursor.fetchone()
+                
+                # Если не нашли точное совпадение, пробуем без учета регистра
+                if not row:
+                    cursor = await db.execute(
+                        'SELECT file_id, description FROM container_photos WHERE LOWER(container_type) = LOWER(?)',
+                        (container_type.strip(),)
+                    )
+                    row = await cursor.fetchone()
+                
+                if row:
+                    return {'file_id': row[0], 'description': row[1]}
+                
+                # Для отладки
+                print(f"[DEBUG] No photo found for container type: '{normalized_type}'")
+                return None
+        except Exception as e:
+            print(f"[ERROR] Failed to get container photo: {e}")
+            return None
+
+    async def delete_container_photo(self, container_type: str):
+        """Удаляет фото контейнера по типу"""
+        try:
+            await self.ensure_container_photos_table()
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute(
+                    'DELETE FROM container_photos WHERE container_type = ?', 
+                    (container_type,)
+                )
+                deleted = cursor.rowcount > 0
+                await db.commit()
+                return deleted
+        except Exception as e:
+            print(f"[ERROR] Failed to delete container photo: {e}")
+            return False
+
+    async def get_test_by_code(self, code: str) -> Optional[dict]:
+        """
+        Find test by exact code match using ChromaDB.
+        """
+        try:
+            # Search in ChromaDB with test code filter
+            results = self.test_processor.search_test(
+                query="",
+                filter_dict={"test_code": code.upper()},
+                top_k=1
+            )
+            
+            if not results:
+                return None
+                
+            doc = results[0][0] if isinstance(results[0], tuple) else results[0]
+            return {
+                'test_code': doc.metadata['test_code'],
+                'test_name': doc.metadata['test_name'],
+                'container_type': doc.metadata.get('container_type', ''),
+                'primary_container_type': doc.metadata.get('primary_container_type', ''),  # ВАЖНО!
+                'preanalytics': doc.metadata.get('preanalytics', ''),
+                'storage_temp': doc.metadata.get('storage_temp', ''),
+                'department': doc.metadata.get('department', '')
+            }
+        except Exception as e:
+            print(f"[ERROR] Failed to search test by code: {e}")
+            return None 
+        
+    async def get_all_container_photos(self):
+        """Получает все фото контейнеров"""
+        try:
+            await self.ensure_container_photos_table()
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute('''
+                    SELECT container_type, file_id, upload_date, description, uploaded_by
+                    FROM container_photos 
+                    ORDER BY container_type
+                ''')
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
+        except Exception as e:
+            print(f"[ERROR] Failed to get all container photos: {e}")
+            return []
+        
+    async def initialize(self):
+        """Initialize database and vector store"""
+        await self.create_tables()
+        self.test_processor.load_vector_store()
+    
+    async def create_tables(self):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS blank_files (
+                    file_name TEXT PRIMARY KEY,
+                    file_id TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # Таблица для медиа-инструкций (видео/GIF) по ключам
+            # Пример keys:
+            # - instruction_stoplist
+            # - instruction_blanks
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS instruction_media (
+                    media_key TEXT PRIMARY KEY,
+                    file_id TEXT NOT NULL,
+                    media_type TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            # ПРАВИЛЬНАЯ версия таблицы container_photos
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS container_photos (
+                    container_type TEXT PRIMARY KEY,
+                    file_id TEXT NOT NULL,
+                    description TEXT,
+                    uploaded_by INTEGER,
+                    upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (uploaded_by) REFERENCES users(telegram_id)
+                )
+            ''')
+            
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS search_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    search_query TEXT,
+                    found_test_code TEXT,
+                    search_type TEXT CHECK(search_type IN ('code', 'text', 'voice')),
+                    success BOOLEAN DEFAULT TRUE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(telegram_id)
+                )
+            ''')
+            
+            # Таблица для частых тестов пользователей
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS user_frequent_tests (
+                    user_id INTEGER,
+                    test_code TEXT,
+                    test_name TEXT,
+                    frequency INTEGER DEFAULT 1,
+                    last_accessed TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (user_id, test_code),
+                    FOREIGN KEY (user_id) REFERENCES users(telegram_id)
+                )
+            ''')
+            
+            # Таблица для связанных тестов (часто ищутся вместе)
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS related_tests (
+                    user_id INTEGER,
+                    test_code_1 TEXT,
+                    test_code_2 TEXT,
+                    correlation_count INTEGER DEFAULT 1,
+                    last_correlation TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (user_id, test_code_1, test_code_2),
+                    FOREIGN KEY (user_id) REFERENCES users(telegram_id)
+                )
+            ''')
+            
+            # Обновленная таблица пользователей
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    telegram_id INTEGER PRIMARY KEY,
+                    user_type TEXT CHECK(user_type IN ('client', 'employee')),
+                    
+                    -- Общие поля
+                    name TEXT,  -- Теперь используется и для клиентов, и для сотрудников
+                    country TEXT DEFAULT 'BY',
+                    registration_date TIMESTAMP,
+                    role TEXT DEFAULT 'user',
+                    is_active BOOLEAN DEFAULT TRUE,
+                    
+                    -- Поля для клиентов (ветеринарные клиники)
+                    client_code TEXT,
+                    specialization TEXT,
+                    
+                    -- Поля для сотрудников (оставляем для совместимости, но не заполняем)
+                    first_name TEXT,  -- Устарело, используется name
+                    last_name TEXT,   -- Устарело, используется name
+                    region TEXT,
+                    department_function TEXT CHECK(department_function IN ('laboratory', 'sales', 'support', NULL))
+                )
+            ''')
+        
+            # Таблица для жалоб и предложений с поддержкой медиа
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS feedback (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER,
                     feedback_type TEXT,
                     message TEXT,
+                    media_type TEXT,
+                    media_file_id TEXT,
                     timestamp TIMESTAMP,
                     status TEXT DEFAULT 'new',
                     FOREIGN KEY (user_id) REFERENCES users (telegram_id)
                 )
             ''')
             
-            # Упрощенная таблица для кодов активации (без срока действия)
+            # Упрощенная таблица для кодов активации (только для админов)
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS activation_codes (
                     code TEXT PRIMARY KEY,
-                    role TEXT,
+                    role TEXT DEFAULT 'admin',
                     is_used BOOLEAN DEFAULT FALSE,
                     used_by INTEGER,
                     used_at TIMESTAMP,
@@ -59,67 +1110,511 @@ class Database:
                 )
             ''')
             
-            await db.commit()
-            await self._migrate_database(db)
-    
-    async def _migrate_database(self, db):
-        """Проверка и обновление структуры БД"""
-        cursor = await db.execute("PRAGMA table_info(users)")
-        columns = await cursor.fetchall()
-        column_names = [col[1] for col in columns]
-        
-        # Миграция старых ролей на новые
-        if 'role' in column_names:
-            await db.execute("UPDATE users SET role = 'client' WHERE role = 'user'")
-            await db.execute("UPDATE users SET role = 'staff' WHERE role IN ('moderator', 'vip')")
-        
-        if 'country' not in column_names:
-            await db.execute("ALTER TABLE users ADD COLUMN country TEXT DEFAULT 'RU'")
+            # Таблица для памяти разговоров
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS conversation_memory (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    type TEXT CHECK(type IN ('buffer','summary')),
+                    content TEXT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
             
-        await db.commit()
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS chat_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    user_name TEXT,
+                    question TEXT NOT NULL,
+                    bot_response TEXT,
+                    request_type TEXT DEFAULT 'question',
+                    search_success BOOLEAN DEFAULT TRUE,
+                    found_test_code TEXT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users (telegram_id)
+                )
+            ''')
+            
+            # Индекс для ускорения запросов к истории
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_chat_history_user_time 
+                ON chat_history(user_id, timestamp DESC)
+            ''')
+            # ============================================================
+            # МЕТРИКИ СИСТЕМЫ
+            # ============================================================
+            
+            # Таблица для метрик производительности бота
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS bot_metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    metric_date DATE NOT NULL,
+                    total_requests INTEGER DEFAULT 0,
+                    successful_requests INTEGER DEFAULT 0,
+                    failed_requests INTEGER DEFAULT 0,
+                    avg_response_time REAL DEFAULT 0,
+                    max_response_time REAL DEFAULT 0,
+                    min_response_time REAL DEFAULT 0,
+                    unique_users INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(metric_date)
+                )
+            ''')
+            
+            # Таблица для детальных метрик запросов
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS request_metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    request_type TEXT,
+                    query_text TEXT,
+                    response_time REAL,
+                    success BOOLEAN DEFAULT TRUE,
+                    relevance_score REAL,
+                    has_answer BOOLEAN DEFAULT TRUE,
+                    error_message TEXT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(telegram_id)
+                )
+            ''')
+            
+            # Индексы для ускорения запросов метрик
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_bot_metrics_date
+                ON bot_metrics(metric_date DESC)
+            ''')
+            
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_request_metrics_timestamp
+                ON request_metrics(timestamp DESC)
+            ''')
+            
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_request_metrics_user
+                ON request_metrics(user_id, timestamp DESC)
+            ''')
+            
+            # ============================================================
+            # РАСШИРЕННЫЕ МЕТРИКИ
+            # ============================================================
+            
+            # Таблица для отслеживания активных пользователей (DAU)
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS user_activity (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    activity_date DATE NOT NULL,
+                    request_count INTEGER DEFAULT 0,
+                    session_count INTEGER DEFAULT 0,
+                    total_time_spent REAL DEFAULT 0,
+                    last_activity TIMESTAMP,
+                    UNIQUE(user_id, activity_date),
+                    FOREIGN KEY (user_id) REFERENCES users(telegram_id)
+                )
+            ''')
+            
+            # Таблица для сессий пользователей
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS user_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    session_start TIMESTAMP NOT NULL,
+                    session_end TIMESTAMP,
+                    request_count INTEGER DEFAULT 0,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    FOREIGN KEY (user_id) REFERENCES users(telegram_id)
+                )
+            ''')
+            
+            # Таблица для системных метрик
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS system_metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    metric_date DATE NOT NULL,
+                    uptime_seconds INTEGER DEFAULT 0,
+                    cpu_usage REAL DEFAULT 0,
+                    memory_usage REAL DEFAULT 0,
+                    disk_usage REAL DEFAULT 0,
+                    active_sessions INTEGER DEFAULT 0,
+                    error_count INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(metric_date)
+                )
+            ''')
+            
+            # Таблица для метрик качества ответов
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS quality_metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    metric_date DATE NOT NULL,
+                    total_queries INTEGER DEFAULT 0,
+                    correct_answers INTEGER DEFAULT 0,
+                    incorrect_answers INTEGER DEFAULT 0,
+                    no_answer INTEGER DEFAULT 0,
+                    code_search_count INTEGER DEFAULT 0,
+                    name_search_count INTEGER DEFAULT 0,
+                    general_question_count INTEGER DEFAULT 0,
+                    avg_user_satisfaction REAL DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(metric_date)
+                )
+            ''')
+            
+            # Индексы для новых таблиц
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_user_activity_date
+                ON user_activity(activity_date DESC, user_id)
+            ''')
+            
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_user_sessions_user
+                ON user_sessions(user_id, session_start DESC)
+            ''')
+            
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_system_metrics_date
+                ON system_metrics(metric_date DESC)
+            ''')
+            
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_quality_metrics_date
+                ON quality_metrics(metric_date DESC)
+            ''')
+
+            # Таблица для оценок ответов бота (новая структура)
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS bot_response_ratings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    rating_type TEXT CHECK(rating_type IN ('positive', 'negative', 'declined')) NOT NULL,
+                    question TEXT,
+                    bot_response TEXT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(telegram_id)
+                )
+            ''')
+
+            # Таблица для фиксации ПОКАЗОВ запроса оценки (denominator для response_rate)
+            # Важно: это именно факт отправки сообщения с кнопками оценки пользователю.
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS bot_feedback_prompts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    bot_response_message_id INTEGER NOT NULL,
+                    prompt_message_id INTEGER,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(user_id, bot_response_message_id),
+                    FOREIGN KEY (user_id) REFERENCES users(telegram_id)
+                )
+            ''')
+
+            # Таблица для настроек запроса оценок пользователей
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS user_rating_preferences (
+                    user_id INTEGER PRIMARY KEY,
+                    is_rating_enabled BOOLEAN DEFAULT TRUE,
+                    disabled_at TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(telegram_id)
+                )
+            ''')
+
+            # Индексы для быстрого поиска
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_bot_response_ratings_user_time
+                ON bot_response_ratings(user_id, timestamp DESC)
+            ''')
+            
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_bot_response_ratings_type
+                ON bot_response_ratings(rating_type, timestamp DESC)
+            ''')
+
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_bot_feedback_prompts_user_time
+                ON bot_feedback_prompts(user_id, timestamp DESC)
+            ''')
+
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_bot_feedback_prompts_time
+                ON bot_feedback_prompts(timestamp DESC)
+            ''')
+            
+            # Оставляем старую таблицу для обратной совместимости
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS response_ratings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    chat_history_id TEXT NOT NULL,
+                    rating INTEGER CHECK(rating >= 1 AND rating <= 5),
+                    question TEXT,
+                    response TEXT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(telegram_id)
+                )
+            ''')
+
+            # Индекс для быстрого поиска
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_response_ratings_user_time
+                ON response_ratings(user_id, timestamp DESC)
+            ''')
+            
+            # ============================================================
+            # КОНЕЦ ДОБАВЛЕНИЯ
+            # ============================================================
+            
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_user_activity_user_date
+                ON user_activity(user_id, activity_date DESC)
+            ''')
+            
+            # ИСПРАВЛЕНО: Индекс БЕЗ функции DATE() для лучшей производительности
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_request_metrics_type_timestamp
+                ON request_metrics(request_type, timestamp DESC)
+            ''')
+            
+            # Дополнительный индекс для activity_date для быстрого поиска по датам
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_user_activity_date_user
+                ON user_activity(activity_date, user_id)
+            ''')
+            
+            # Индекс для быстрой фильтрации по роли (админ/не админ)
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_users_role
+                ON users(role)
+            ''')
+            
+            # Индекс для поиска активных сессий
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_sessions_active
+                ON user_sessions(is_active, user_id) WHERE is_active = TRUE
+            ''')
+            
+            # Индекс для поиска по user_id и role (составной)
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_users_telegram_role
+                ON users(telegram_id, role)
+            ''')
+            
+            # Индекс для быстрого подсчета DAU
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_request_metrics_user_date
+                ON request_metrics(user_id, DATE(timestamp) DESC)
+            ''')
+            
+            print("[INFO] Database indexes created successfully")
+            
+            # Теперь коммитим все изменения
+            await db.commit()
+
+    # ============================================================
+    # МЕДИА-ИНСТРУКЦИИ (ВИДЕО/GIF)
+    # ============================================================
+
+    async def ensure_instruction_media_table(self):
+        """Создает таблицу instruction_media если её нет"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS instruction_media (
+                    media_key TEXT PRIMARY KEY,
+                    file_id TEXT NOT NULL,
+                    media_type TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            await db.commit()
+
+    async def set_instruction_media(self, media_key: str, file_id: str, media_type: str) -> bool:
+        """Сохраняет/обновляет медиа-инструкцию по ключу"""
+        try:
+            if not media_key or not file_id or not media_type:
+                return False
+
+            await self.ensure_instruction_media_table()
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    INSERT OR REPLACE INTO instruction_media (media_key, file_id, media_type, created_at)
+                    VALUES (?, ?, ?, ?)
+                ''', (media_key, file_id, media_type, datetime.now()))
+                await db.commit()
+            return True
+        except Exception as e:
+            print(f"[ERROR] Failed to set instruction media: {e}")
+            return False
+
+    async def get_instruction_media(self, media_key: str) -> dict | None:
+        """Возвращает медиа-инструкцию: {file_id, media_type}"""
+        try:
+            await self.ensure_instruction_media_table()
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute(
+                    'SELECT file_id, media_type FROM instruction_media WHERE media_key = ?',
+                    (media_key,)
+                )
+                row = await cursor.fetchone()
+                if not row:
+                    return None
+                return {'file_id': row[0], 'media_type': row[1]}
+        except Exception as e:
+            print(f"[ERROR] Failed to get instruction media: {e}")
+            return None
+
+    async def log_feedback_prompt(
+        self,
+        user_id: int,
+        bot_response_message_id: int,
+        prompt_message_id: int | None = None,
+        timestamp=None
+    ) -> bool:
+        """
+        Логирует факт ПОКАЗА формы оценки пользователю.
+
+        Это используется как знаменатель для метрики "Коэффициент отклика":
+        сколько раз мы показали кнопки оценки.
+        """
+        try:
+            if timestamp is None:
+                timestamp = datetime.now()
+
+            async with aiosqlite.connect(self.db_path, timeout=10.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                await db.execute('''
+                    INSERT OR IGNORE INTO bot_feedback_prompts
+                    (user_id, bot_response_message_id, prompt_message_id, timestamp)
+                    VALUES (?, ?, ?, ?)
+                ''', (user_id, bot_response_message_id, prompt_message_id, timestamp))
+                await db.commit()
+            return True
+        except Exception as e:
+            print(f"[ERROR] Failed to log feedback prompt: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
     
-    async def add_user(self, telegram_id: int, username: str, 
-                      client_code: str, pet_name: str, pet_type: str, country: str = 'RU'):
+    async def add_client(self, telegram_id: int, name: str, client_code: str, 
+                        specialization: str, country: str = 'BY'):
+        """Добавление клиента (ветеринарной клиники)"""
         async with aiosqlite.connect(self.db_path) as db:
             try:
                 await db.execute('''
-                    INSERT INTO users (telegram_id, username, client_code, 
-                                     pet_name, pet_type, country, registration_date, role)
+                    INSERT INTO users (telegram_id, user_type, name, client_code, 
+                                     specialization, country, registration_date, role)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (telegram_id, username, client_code, pet_name, 
-                     pet_type, country, datetime.now(), 'client'))
+                ''', (telegram_id, 'client', name, client_code, specialization, 
+                     country, datetime.now(), 'user'))
                 await db.commit()
+                
+                # ВАЖНО: Очищаем кеш после успешной регистрации
+                self.clear_user_cache(telegram_id)
+                print(f"[REGISTRATION] ✓ Client registered: {telegram_id}")
+                
                 return True
             except aiosqlite.IntegrityError:
                 return False
-            except Exception as e:
-                print(f"Error adding user: {e}")
+    
+    async def add_employee(self, telegram_id: int, name: str, region: str, department_function: str, country: str = 'BY'):
+        """Добавление сотрудника только с именем (без фамилии)"""
+        async with aiosqlite.connect(self.db_path) as db:
+            try:
+                await db.execute('''
+                    INSERT INTO users (telegram_id, user_type, name,
+                                    region, department_function, country, registration_date, role)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (telegram_id, 'employee', name, 
+                    region, department_function, country, datetime.now(), 'user'))
+                await db.commit()
+                
+                # ВАЖНО: Очищаем кеш после успешной регистрации
+                self.clear_user_cache(telegram_id)
+                print(f"[REGISTRATION] ✓ Employee registered: {telegram_id}")
+                
+                return True
+            except aiosqlite.IntegrityError:
                 return False
     
     async def get_user(self, telegram_id: int):
+        """Получает пользователя с кэшированием"""
+        # Проверяем кэш
+        cache_key = f"user_{telegram_id}"
+        if cache_key in self._user_cache:
+            cached_data, cached_time = self._user_cache[cache_key]
+            if time.time() - cached_time < self._cache_ttl:
+                return cached_data
+        
+        # Загружаем из БД
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 'SELECT * FROM users WHERE telegram_id = ?', 
                 (telegram_id,)
             )
-            return await cursor.fetchone()
+            row = await cursor.fetchone()
+            user_data = dict(row) if row else None
+            
+            # Сохраняем в кэш
+            self._user_cache[cache_key] = (user_data, time.time())
+            
+            return user_data
+        
+    def clear_user_cache(self, telegram_id: int = None):
+        """Очищает кэш пользователей"""
+        if telegram_id:
+            cache_key = f"user_{telegram_id}"
+            self._user_cache.pop(cache_key, None)
+        else:
+            self._user_cache.clear()
+            
+    async def get_dau_metrics_optimized(self, days: int = 30):
+        """Оптимизированная версия получения DAU метрик"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                start_date = datetime.now() - timedelta(days=days)
+                
+                # Используем агрегированные данные из user_activity вместо request_metrics
+                cursor = await db.execute('''
+                    SELECT
+                        ua.activity_date,
+                        COUNT(DISTINCT ua.user_id) as dau,
+                        SUM(ua.request_count) as total_requests,
+                        AVG(ua.request_count) as avg_requests_per_user
+                    FROM user_activity ua
+                    JOIN users u ON ua.user_id = u.telegram_id
+                    WHERE ua.activity_date >= DATE(?)
+                    AND u.role != 'admin'
+                    GROUP BY ua.activity_date
+                    ORDER BY ua.activity_date DESC
+                ''', (start_date,))
+                
+                return [dict(row) for row in await cursor.fetchall()]
+        except Exception as e:
+            print(f"[ERROR] Failed to get DAU metrics: {e}")
+            return []
     
     async def get_user_role(self, telegram_id: int):
         user = await self.get_user(telegram_id)
         return user['role'] if user else None
     
     async def update_user_role(self, telegram_id: int, role: str):
-        """Обновление роли пользователя (навсегда)"""
+        """Обновление роли пользователя (только для админа)"""
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 'UPDATE users SET role = ? WHERE telegram_id = ?',
                 (role, telegram_id)
             )
             await db.commit()
+        
+        # КРИТИЧНО: Очищаем кеш пользователя после изменения роли
+        self.clear_user_cache(telegram_id)
+        print(f"[ROLE_UPDATE] ✓ Updated role to '{role}' for user {telegram_id}, cache cleared")
     
     async def check_activation_code(self, code: str):
-        """Проверка кода активации"""
+        """Проверка кода активации администратора"""
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute('''
@@ -127,6 +1622,20 @@ class Database:
                 WHERE code = ? AND is_used = FALSE
             ''', (code.upper(),))
             return await cursor.fetchone()
+    
+    async def get_user_greeting_name(self, telegram_id: int) -> str:
+        """Получает имя пользователя для обращения"""
+        user = await self.get_user(telegram_id)
+        if not user:
+            return "пользователь"
+        
+        if user.get('name'):
+            # Для всех пользователей используем поле name
+            # Берем только первое слово (если это составное имя)
+            name_parts = user['name'].split()
+            return name_parts[0] if name_parts else user['name']
+        
+        return "пользователь"
     
     async def use_activation_code(self, code: str, user_id: int):
         """Использование кода активации"""
@@ -138,14 +1647,14 @@ class Database:
             ''', (user_id, datetime.now(), code.upper()))
             await db.commit()
     
-    async def create_activation_code(self, code: str, role: str):
-        """Создание одноразового кода активации"""
+    async def create_admin_code(self, code: str):
+        """Создание одноразового кода активации администратора"""
         async with aiosqlite.connect(self.db_path) as db:
             try:
                 await db.execute('''
                     INSERT INTO activation_codes (code, role, created_at)
-                    VALUES (?, ?, ?)
-                ''', (code.upper(), role, datetime.now()))
+                    VALUES (?, 'admin', ?)
+                ''', (code.upper(), datetime.now()))
                 await db.commit()
                 return True
             except aiosqlite.IntegrityError:
@@ -155,17 +1664,17 @@ class Database:
         user = await self.get_user(telegram_id)
         return user is not None
     
-    async def check_client_code_exists(self, client_code: str):
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute(
-                'SELECT telegram_id FROM users WHERE client_code = ?', 
-                (client_code,)
-            )
-            result = await cursor.fetchone()
-            return result is not None
-    
-    async def add_request_stat(self, user_id: int, request_type: str, 
-                              request_text: str):
+    async def add_faq_history(self, user_id: int, faq_id: int, question: str):
+            try:
+                query = """
+                    INSERT INTO faq_history (user_id, faq_id, question, viewed_at)
+                    VALUES ($1, $2, $3, NOW())
+                """
+                await self.pool.execute(query, user_id, faq_id, question)
+            except Exception as e:
+                print(f"Ошибка сохранения истории FAQ: {e}")
+
+    async def add_request_stat(self, user_id: int, request_type: str, request_text: str):
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute('''
                 INSERT INTO request_statistics (user_id, request_type, 
@@ -174,10 +1683,2196 @@ class Database:
             ''', (user_id, request_type, request_text, datetime.now()))
             await db.commit()
     
-    async def add_feedback(self, user_id: int, feedback_type: str, message: str):
+    async def add_feedback(self, user_id: int, feedback_type: str, message: str, 
+                          media_type: str = None, media_file_id: str = None):
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute('''
-                INSERT INTO feedback (user_id, feedback_type, message, timestamp)
-                VALUES (?, ?, ?, ?)
-            ''', (user_id, feedback_type, message, datetime.now()))
+                INSERT INTO feedback (user_id, feedback_type, message, 
+                                    media_type, media_file_id, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (user_id, feedback_type, message, media_type, 
+                 media_file_id, datetime.now()))
             await db.commit()
+
+    async def get_statistics(self):
+        """Получение статистики для администратора"""
+        async with aiosqlite.connect(self.db_path) as db:
+            # Статистика пользователей (ИСКЛЮЧАЯ админов)
+            cursor = await db.execute("""
+                SELECT user_type, COUNT(*) 
+                FROM users 
+                WHERE role != 'admin'
+                GROUP BY user_type
+            """)
+            type_stats = await cursor.fetchall()
+
+            stats = {'total_users': 0, 'clients': 0, 'employees': 0, 'admins': 0}
+            for user_type, count in type_stats:
+                stats['total_users'] += count
+                if user_type == 'client':
+                    stats['clients'] = count
+                elif user_type == 'employee':
+                    stats['employees'] = count
+
+            # Считаем админов отдельно
+            cursor = await db.execute("SELECT COUNT(*) FROM users WHERE role = 'admin'")
+            admin_count = await cursor.fetchone()
+            stats['admins'] = admin_count[0] if admin_count else 0
+
+            # Статистика запросов (ИСКЛЮЧАЯ запросы администраторов)
+            cursor = await db.execute("""
+                SELECT rs.request_type, COUNT(*)
+                FROM request_statistics rs
+                JOIN users u ON rs.user_id = u.telegram_id
+                WHERE u.role != 'admin'
+                GROUP BY rs.request_type
+            """)
+            request_stats = await cursor.fetchall()
+
+            stats['total_requests'] = 0
+            stats['questions'] = 0
+            stats['callbacks'] = 0
+            for req_type, count in request_stats:
+                stats['total_requests'] += count
+                # Считаем все типы поисков как вопросы
+                if req_type in ('question', 'code_search', 'name_search'):
+                    stats['questions'] += count
+                elif req_type == 'callback_request':
+                    stats['callbacks'] = count
+
+            # Статистика обратной связи (ИСКЛЮЧАЯ обратную связь от администраторов)
+            cursor = await db.execute("""
+                SELECT f.feedback_type, COUNT(*)
+                FROM feedback f
+                JOIN users u ON f.user_id = u.telegram_id
+                WHERE u.role != 'admin'
+                GROUP BY f.feedback_type
+            """)
+            feedback_stats = await cursor.fetchall()
+
+            stats['suggestions'] = 0
+            stats['complaints'] = 0
+            for fb_type, count in feedback_stats:
+                if fb_type == 'suggestion':
+                    stats['suggestions'] = count
+                elif fb_type == 'complaint':
+                    stats['complaints'] = count
+
+            return stats
+        
+    async def add_memory(self, user_id: int, type: str, content: str):
+        """Сохранение памяти разговора"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                INSERT INTO conversation_memory (user_id, type, content)
+                VALUES (?, ?, ?)
+            ''', (user_id, type, content))
+            await db.commit()
+
+    async def get_buffer(self, user_id: int) -> list[str]:
+        """Получение буфера сообщений"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                SELECT content FROM conversation_memory
+                WHERE user_id = ? AND type = 'buffer'
+                ORDER BY timestamp
+            ''', (user_id,))
+            rows = await cursor.fetchall()
+            return [r[0] for r in rows]
+
+    async def clear_buffer(self, user_id: int):
+        """Очистка буфера сообщений"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                DELETE FROM conversation_memory
+                WHERE user_id = ? AND type = 'buffer'
+            ''', (user_id,))
+            await db.commit()
+
+    async def get_latest_summary(self, user_id: int) -> str | None:
+        """Получение последней сводки разговора"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                SELECT content FROM conversation_memory
+                WHERE user_id = ? AND type = 'summary'
+                ORDER BY timestamp DESC
+                LIMIT 1
+            ''', (user_id,))
+            row = await cursor.fetchone()
+            return row[0] if row else None
+
+    # Новые методы для администраторов
+    async def get_broadcast_recipients(self, broadcast_type: str) -> list:
+        """Получить список ID получателей для рассылки"""
+        async with aiosqlite.connect(self.db_path) as db:
+            if broadcast_type == 'all':
+                query = "SELECT telegram_id FROM users WHERE is_active = TRUE"
+            elif broadcast_type == 'clients':
+                query = "SELECT telegram_id FROM users WHERE user_type = 'client' AND is_active = TRUE"
+            elif broadcast_type == 'employees':
+                query = "SELECT telegram_id FROM users WHERE user_type = 'employee' AND is_active = TRUE"
+            else:
+                return []
+            
+            cursor = await db.execute(query)
+            rows = await cursor.fetchall()
+            return [row[0] for row in rows]
+
+    async def get_recent_users(self, limit: int = 10) -> list:
+        """Получить последних зарегистрированных пользователей"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute('''
+                SELECT * FROM users 
+                ORDER BY registration_date DESC 
+                LIMIT ?
+            ''', (limit,))
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def get_recent_feedback(self, limit: int = 5) -> list:
+        """Получить последние обращения"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute('''
+                SELECT f.*, u.name as user_name 
+                FROM feedback f
+                LEFT JOIN users u ON f.user_id = u.telegram_id
+                ORDER BY f.timestamp DESC 
+                LIMIT ?
+            ''', (limit,))
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def clear_old_logs(self, days: int = 30) -> int:
+        """Очистить старые записи логов"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cutoff_date = datetime.now() - timedelta(days=days)
+            
+            cursor = await db.execute('''
+                DELETE FROM conversation_memory 
+                WHERE timestamp < ?
+            ''', (cutoff_date,))
+            
+            deleted_count = cursor.rowcount
+            
+            cursor = await db.execute('''
+                DELETE FROM request_statistics 
+                WHERE timestamp < ?
+            ''', (cutoff_date,))
+            
+            deleted_count += cursor.rowcount
+            
+            await db.commit()
+            return deleted_count
+
+    async def get_uptime(self) -> str:
+        """Получить время работы системы"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                SELECT MIN(registration_date) FROM users
+            ''')
+            first_registration = await cursor.fetchone()
+            
+            if first_registration and first_registration[0]:
+                first_date = datetime.fromisoformat(first_registration[0])
+                uptime = datetime.now() - first_date
+                
+                days = uptime.days
+                hours = uptime.seconds // 3600
+                minutes = (uptime.seconds % 3600) // 60
+                
+                return f"{days} дней, {hours} часов, {minutes} минут"
+            
+            return "Нет данных"
+        
+    async def get_test_by_code(self, code: str) -> Optional[dict]:
+        """
+        Find test by exact code match using ChromaDB.
+        
+        Args:
+            code: Test code to search for (case insensitive)
+            
+        Returns:
+            Dictionary with test data or None if not found
+        """
+        try:
+            # Search in ChromaDB with test code filter
+            results = self.test_processor.search_test(
+                query="",
+                filter_dict={"test_code": code.upper()},
+                top_k=1
+            )
+            
+            if not results:
+                return None
+                
+            doc = results[0][0]
+            return {
+                'test_code': doc.metadata['test_code'],
+                'test_name': doc.metadata['test_name'],
+                'container_type': doc.metadata['container_type'],
+                'primary_container_type': doc.metadata.get('primary_container_type', ''),
+                'preanalytics': doc.metadata['preanalytics'],
+                'storage_temp': doc.metadata['storage_temp'],
+                'department': doc.metadata['department']
+            }
+        except Exception as e:
+            print(f"[ERROR] Failed to search test by code: {e}")
+            return None
+    # ============================================================
+    # МЕТОДЫ ДЛЯ РАБОТЫ С МЕТРИКАМИ
+    # ============================================================
+    
+    async def log_request_metric(
+        self,
+        user_id: int,
+        request_type: str,
+        query_text: str,
+        response_time: float,
+        success: bool = True,
+        relevance_score: float = None,
+        has_answer: bool = True,
+        error_message: str = None
+    ):
+        """
+        Логирует метрику запроса (ИСКЛЮЧАЯ админов и навигацию).
+        ИСПРАВЛЕНО: улучшена обработка ошибок и предотвращение блокировок БД
+        """
+        try:
+            # Логируем только валидные типы запросов
+            valid_types = ['code_search', 'name_search', 'general']
+            if request_type not in valid_types:
+                print(f"[METRICS] Skipping invalid request type: {request_type}")
+                return
+            
+            # Проверяем, не админ ли это (с очисткой кеша при ошибке)
+            try:
+                user = await self.get_user(user_id)
+                if user and user.get('role') == 'admin':
+                    print(f"[METRICS] Skipping admin user: {user_id}")
+                    return
+            except Exception as cache_error:
+                # Если ошибка с кешем - очищаем его и пробуем снова
+                print(f"[METRICS] Cache error, clearing and retrying: {cache_error}")
+                self.clear_user_cache(user_id)
+                user = await self.get_user(user_id)
+                if user and user.get('role') == 'admin':
+                    return
+            
+            # Используем timeout для предотвращения блокировки
+            async with aiosqlite.connect(self.db_path, timeout=10.0) as db:
+                # Явно устанавливаем WAL mode для лучшей concurrent работы
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                await db.execute('''
+                    INSERT INTO request_metrics
+                    (user_id, request_type, query_text, response_time, success,
+                    relevance_score, has_answer, error_message, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    user_id, request_type, query_text[:500], response_time, success,
+                    relevance_score, has_answer, error_message, datetime.now()
+                ))
+                await db.commit()
+                
+                print(f"[METRICS] ✓ Logged request: type={request_type}, user={user_id}, success={success}, has_answer={has_answer}")
+        except aiosqlite.OperationalError as db_error:
+            # Ошибка БД (блокировка, timeout и т.д.)
+            print(f"[ERROR] Database operational error in log_request_metric: {db_error}")
+            import traceback
+            traceback.print_exc()
+        except Exception as e:
+            # Любая другая ошибка
+            print(f"[ERROR] Failed to log request metric: {e}")
+            import traceback
+            traceback.print_exc()
+
+    
+    async def update_daily_metrics(self):
+        """Обновляет ежедневные метрики"""
+        try:
+            today = datetime.now().date()
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                # Получаем статистику за сегодня
+                cursor = await db.execute('''
+                    SELECT 
+                        COUNT(*) as total,
+                        SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as successful,
+                        SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) as failed,
+                        AVG(response_time) as avg_time,
+                        MAX(response_time) as max_time,
+                        MIN(response_time) as min_time,
+                        COUNT(DISTINCT user_id) as unique_users
+                    FROM request_metrics
+                    WHERE DATE(timestamp) = ?
+                ''', (today,))
+                
+                stats = await cursor.fetchone()
+                
+                if stats and stats[0] > 0:
+                    await db.execute('''
+                        INSERT OR REPLACE INTO bot_metrics
+                        (metric_date, total_requests, successful_requests, failed_requests,
+                         avg_response_time, max_response_time, min_response_time, unique_users)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (today, stats[0], stats[1] or 0, stats[2] or 0, stats[3] or 0, 
+                          stats[4] or 0, stats[5] or 0, stats[6] or 0))
+                    
+                    await db.commit()
+        except Exception as e:
+            print(f"[ERROR] Failed to update daily metrics: {e}")
+    
+    async def get_metrics_summary(self, days: int = 7):
+        """Получает сводку метрик за период"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                start_date = datetime.now() - timedelta(days=days)
+                
+                # Общая статистика НАПРЯМУЮ из request_metrics (ИСКЛЮЧАЯ админов)
+                cursor = await db.execute('''
+                    SELECT
+                        COUNT(*) as total_requests,
+                        SUM(CASE WHEN rm.success = 1 THEN 1 ELSE 0 END) as successful_requests,
+                        SUM(CASE WHEN rm.success = 0 THEN 1 ELSE 0 END) as failed_requests,
+                        COALESCE(AVG(rm.response_time), 0) as avg_response_time,
+                        COALESCE(MAX(rm.response_time), 0) as max_response_time,
+                        COUNT(DISTINCT rm.user_id) as total_unique_users
+                    FROM request_metrics rm
+                    JOIN users u ON rm.user_id = u.telegram_id
+                    WHERE rm.timestamp >= ? AND u.role != 'admin'
+                ''', (start_date,))
+                
+                overall = await cursor.fetchone()
+                
+                # Средняя активность в день (уникальных пользователей) - ИСКЛЮЧАЯ админов
+                cursor_daily = await db.execute('''
+                    SELECT COUNT(DISTINCT rm.user_id) as daily_users, DATE(rm.timestamp) as metric_date
+                    FROM request_metrics rm
+                    JOIN users u ON rm.user_id = u.telegram_id
+                    WHERE rm.timestamp >= ? AND u.role != 'admin'
+                    GROUP BY DATE(rm.timestamp)
+                ''', (start_date,))
+                
+                daily_users = await cursor_daily.fetchall()
+                avg_daily_users = sum(row[0] for row in daily_users) / len(daily_users) if daily_users else 0
+                
+                # Добавляем avg_daily_users к overall
+                overall_dict = dict(overall) if overall else {}
+                overall_dict['avg_daily_users'] = avg_daily_users
+                
+                # Статистика по типам запросов (ИСКЛЮЧАЯ админов)
+                cursor = await db.execute('''
+                    SELECT
+                        rm.request_type,
+                        COUNT(*) as count,
+                        COALESCE(AVG(rm.response_time), 0) as avg_time,
+                        SUM(CASE WHEN rm.success = 1 THEN 1 ELSE 0 END) as successful,
+                        SUM(CASE WHEN rm.has_answer = 0 THEN 1 ELSE 0 END) as no_answer,
+                        COALESCE(AVG(CASE WHEN rm.relevance_score IS NOT NULL THEN rm.relevance_score ELSE 0 END), 0) as avg_relevance
+                    FROM request_metrics rm
+                    JOIN users u ON rm.user_id = u.telegram_id
+                    WHERE DATE(rm.timestamp) >= ? AND u.role != 'admin'
+                    GROUP BY rm.request_type
+                ''', (start_date,))
+                
+                by_type = await cursor.fetchall()
+                
+                # Топ пользователей (ИСКЛЮЧАЯ администраторов)
+                cursor = await db.execute('''
+                    SELECT
+                        u.name,
+                        u.user_type,
+                        u.client_code,
+                        COUNT(rm.id) as request_count,
+                        COALESCE(AVG(rm.response_time), 0) as avg_time,
+                        SUM(CASE WHEN rm.success = 1 THEN 1 ELSE 0 END) as successful
+                    FROM request_metrics rm
+                    JOIN users u ON rm.user_id = u.telegram_id
+                    WHERE DATE(rm.timestamp) >= ? AND u.role != 'admin'
+                    GROUP BY rm.user_id
+                    ORDER BY request_count DESC
+                    LIMIT 10
+                ''', (start_date,))
+                
+                top_users = await cursor.fetchall()
+                
+                return {
+                    'overall': overall_dict,
+                    'by_type': [dict(row) for row in by_type],
+                    'top_users': [dict(row) for row in top_users],
+                    'period_days': days
+                }
+        except Exception as e:
+            print(f"[ERROR] Failed to get metrics summary: {e}")
+            return None
+    
+    async def get_detailed_metrics(self, start_date: datetime = None, end_date: datetime = None):
+        """Получает детальные метрики для экспорта (ИСКЛЮЧАЯ администраторов)"""
+        try:
+            if not start_date:
+                start_date = datetime.now() - timedelta(days=30)
+            if not end_date:
+                end_date = datetime.now()
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                # Детальная информация по запросам (ИСКЛЮЧАЯ администраторов)
+                cursor = await db.execute('''
+                    SELECT
+                        rm.*,
+                        u.name as user_name,
+                        u.user_type,
+                        u.client_code
+                    FROM request_metrics rm
+                    JOIN users u ON rm.user_id = u.telegram_id
+                    WHERE rm.timestamp BETWEEN ? AND ?
+                      AND u.role != 'admin'
+                    ORDER BY rm.timestamp DESC
+                ''', (start_date, end_date))
+                
+                requests = await cursor.fetchall()
+                
+                # Дневная статистика
+                cursor = await db.execute('''
+                    SELECT * FROM bot_metrics
+                    WHERE metric_date BETWEEN DATE(?) AND DATE(?)
+                    ORDER BY metric_date DESC
+                ''', (start_date, end_date))
+                
+                daily_stats = await cursor.fetchall()
+                
+                return {
+                    'requests': [dict(row) for row in requests],
+                    'daily_stats': [dict(row) for row in daily_stats],
+                    'start_date': start_date,
+                    'end_date': end_date
+                }
+        except Exception as e:
+            print(f"[ERROR] Failed to get detailed metrics: {e}")
+            return None
+    
+    async def get_user_metrics(self, user_id: int, days: int = 30):
+        """Получает метрики конкретного пользователя"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                start_date = datetime.now() - timedelta(days=days)
+                
+                cursor = await db.execute('''
+                    SELECT 
+                        COUNT(*) as total_requests,
+                        SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as successful_requests,
+                        AVG(response_time) as avg_response_time,
+                        SUM(CASE WHEN has_answer = 0 THEN 1 ELSE 0 END) as no_answer_count,
+                        AVG(CASE WHEN relevance_score IS NOT NULL THEN relevance_score ELSE 0 END) as avg_relevance
+                    FROM request_metrics
+                    WHERE user_id = ? AND timestamp >= ?
+                ''', (user_id, start_date))
+                
+                stats = await cursor.fetchone()
+                
+                # Последние запросы
+                cursor = await db.execute('''
+                    SELECT 
+                        request_type,
+                        query_text,
+                        response_time,
+                        success,
+                        has_answer,
+                        timestamp
+                    FROM request_metrics
+                    WHERE user_id = ?
+                    ORDER BY timestamp DESC
+                    LIMIT 10
+                ''', (user_id,))
+                
+                recent = await cursor.fetchall()
+                
+                return {
+                    'stats': dict(stats) if stats else {},
+                    'recent_requests': [dict(row) for row in recent]
+                }
+        except Exception as e:
+            print(f"[ERROR] Failed to get user metrics: {e}")
+            return None
+
+    # ============================================================
+    # МЕТОДЫ ДЛЯ РАСШИРЕННЫХ МЕТРИК
+    # ============================================================
+    
+    async def track_user_activity(self, user_id: int):
+        """
+        Отслеживает активность пользователя за день (ИСКЛЮЧАЯ админов).
+        ИСПРАВЛЕНО: НЕ трекает незарегистрированных пользователей
+        """
+        try:
+            try:
+                user = await self.get_user(user_id)
+                if not user:
+                    print(f"[ACTIVITY] Skipping activity for unregistered user {user_id}")
+                    return
+                if user.get('role') == 'admin':
+                    return  # Не трекаем админов
+            except Exception as cache_error:
+                print(f"[ACTIVITY] Cache error, clearing: {cache_error}")
+                self.clear_user_cache(user_id)
+                user = await self.get_user(user_id)
+                if not user:
+                    print(f"[ACTIVITY] User {user_id} not found after cache clear")
+                    return
+                if user.get('role') == 'admin':
+                    return
+            
+            today = datetime.now().date()
+            current_time = datetime.now()
+            
+            # Используем timeout для предотвращения блокировки
+            async with aiosqlite.connect(self.db_path, timeout=10.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                await db.execute('''
+                    INSERT INTO user_activity
+                    (user_id, activity_date, request_count, last_activity)
+                    VALUES (?, ?, 1, ?)
+                    ON CONFLICT(user_id, activity_date) DO UPDATE SET
+                        request_count = request_count + 1,
+                        last_activity = excluded.last_activity
+                ''', (user_id, today, current_time))
+                
+                await db.commit()
+                print(f"[ACTIVITY] ✓ Tracked activity for user {user_id}")
+        except aiosqlite.OperationalError as db_error:
+            print(f"[ERROR] Database error in track_user_activity: {db_error}")
+        except Exception as e:
+            print(f"[ERROR] Failed to track user activity: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    async def start_user_session(self, user_id: int) -> int:
+        """Начинает новую сессию пользователя"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute('''
+                    INSERT INTO user_sessions 
+                    (user_id, session_start, is_active)
+                    VALUES (?, ?, TRUE)
+                ''', (user_id, datetime.now()))
+                
+                session_id = cursor.lastrowid
+                await db.commit()
+                return session_id
+        except Exception as e:
+            print(f"[ERROR] Failed to start session: {e}")
+            return None
+    
+    async def end_user_session(self, session_id: int):
+        """Завершает сессию пользователя"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    UPDATE user_sessions
+                    SET session_end = ?, is_active = FALSE
+                    WHERE id = ? AND is_active = TRUE
+                ''', (datetime.now(), session_id))
+                
+                await db.commit()
+        except Exception as e:
+            print(f"[ERROR] Failed to end session: {e}")
+    
+    async def close_inactive_sessions(self, inactivity_minutes: int = 3):
+        """
+        Закрывает сессии с неактивностью более указанного времени.
+        
+        ВАЖНО:
+        - Проверяет последнюю активность в request_metrics ИЛИ session_start если запросов нет
+        - session_end = последняя_активность + inactivity_minutes (время на чтение)
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                cutoff_time = datetime.now() - timedelta(minutes=inactivity_minutes)
+                
+                # Закрываем сессии, где последняя активность (или старт если нет запросов)
+                # была более N минут назад
+                cursor = await db.execute('''
+                    UPDATE user_sessions
+                    SET is_active = FALSE,
+                        session_end = datetime(
+                            COALESCE(
+                                (SELECT MAX(timestamp)
+                                 FROM request_metrics
+                                 WHERE user_id = user_sessions.user_id
+                                 AND timestamp >= user_sessions.session_start),
+                                user_sessions.session_start
+                            ),
+                            '+''' + str(inactivity_minutes) + ''' minutes'
+                        )
+                    WHERE is_active = TRUE
+                    AND COALESCE(
+                        (SELECT MAX(rm.timestamp)
+                         FROM request_metrics rm
+                         WHERE rm.user_id = user_sessions.user_id
+                         AND rm.timestamp >= user_sessions.session_start),
+                        user_sessions.session_start
+                    ) < ?
+                ''', (cutoff_time,))
+                
+                closed_count = cursor.rowcount
+                await db.commit()
+                
+                if closed_count > 0:
+                    print(f"[SESSIONS] Closed {closed_count} inactive sessions (added {inactivity_minutes} min for reading)")
+                
+                return closed_count
+        except Exception as e:
+            print(f"[ERROR] Failed to close inactive sessions: {e}")
+            return 0
+    
+    async def close_user_current_session(self, user_id: int):
+        """
+        Закрывает текущую активную сессию пользователя НЕМЕДЛЕННО.
+        Используется после успешной обработки валидного запроса.
+        """
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=10.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                current_time = datetime.now()
+                
+                # Находим активную сессию пользователя
+                cursor = await db.execute('''
+                    SELECT us.id, us.session_start,
+                           (SELECT MAX(rm.timestamp)
+                            FROM request_metrics rm
+                            WHERE rm.user_id = us.user_id
+                            AND rm.timestamp >= us.session_start) as last_request
+                    FROM user_sessions us
+                    WHERE us.user_id = ? AND us.is_active = TRUE
+                    ORDER BY us.session_start DESC
+                    LIMIT 1
+                ''', (user_id,))
+                
+                session = await cursor.fetchone()
+                
+                if session:
+                    session_id = session[0]
+                    last_request = session[2]
+                    
+                    # Закрываем сессию, устанавливая session_end = последний запрос + 3 минуты на чтение
+                    if last_request:
+                        session_end = datetime.fromisoformat(last_request) + timedelta(minutes=3)
+                    else:
+                        session_end = current_time
+                    
+                    await db.execute('''
+                        UPDATE user_sessions
+                        SET is_active = FALSE,
+                            session_end = ?
+                        WHERE id = ?
+                    ''', (session_end, session_id))
+                    
+                    await db.commit()
+                    print(f"[SESSION] ✓ Closed session {session_id} for user {user_id} (ended at {session_end})")
+                    return True
+                else:
+                    print(f"[SESSION] No active session found for user {user_id}")
+                    return False
+                    
+        except Exception as e:
+            print(f"[ERROR] Failed to close user session: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    async def update_session_activity(self, user_id: int):
+        """
+        Обновляет активность в текущей сессии или создает новую.
+        ИСПРАВЛЕНО: НЕ создает сессии для незарегистрированных пользователей
+        """
+        try:
+            # КРИТИЧНО: Проверяем, зарегистрирован ли пользователь
+            # Не создаем сессии во время регистрации!
+            user = await self.get_user(user_id)
+            if not user:
+                print(f"[SESSION] Skipping session for unregistered user {user_id}")
+                return
+            
+            # Не трекаем админов
+            if user.get('role') == 'admin':
+                return
+        except Exception as e:
+            print(f"[ERROR] Failed to check user in update_session_activity: {e}")
+            return
+        
+        try:
+            # Сначала закрываем все неактивные сессии (но не ждем долго)
+            try:
+                await asyncio.wait_for(
+                    self.close_inactive_sessions(inactivity_minutes=3),
+                    timeout=5.0
+                )
+            except asyncio.TimeoutError:
+                print(f"[SESSION] Timeout closing inactive sessions, proceeding anyway")
+            except Exception as e:
+                print(f"[SESSION] Error closing inactive sessions: {e}")
+            
+            # Используем timeout для предотвращения блокировки
+            async with aiosqlite.connect(self.db_path, timeout=10.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                current_time = datetime.now()
+                three_minutes_ago = current_time - timedelta(minutes=3)
+                
+                # Проверяем, есть ли активная сессия с последней активностью менее 3 минут назад
+                cursor = await db.execute('''
+                    SELECT us.id, us.session_start, MAX(rm.timestamp) as last_activity
+                    FROM user_sessions us
+                    LEFT JOIN request_metrics rm ON rm.user_id = us.user_id
+                        AND rm.timestamp >= us.session_start
+                    WHERE us.user_id = ? AND us.is_active = TRUE
+                    GROUP BY us.id
+                    HAVING last_activity >= ? OR last_activity IS NULL
+                    ORDER BY us.session_start DESC
+                    LIMIT 1
+                ''', (user_id, three_minutes_ago))
+                
+                session = await cursor.fetchone()
+                
+                if session:
+                    # Обновляем существующую сессию
+                    await db.execute('''
+                        UPDATE user_sessions
+                        SET request_count = request_count + 1
+                        WHERE id = ?
+                    ''', (session[0],))
+                    print(f"[SESSION] ✓ Updated session {session[0]} for user {user_id}")
+                else:
+                    # Создаем новую сессию (старые уже закрыты выше)
+                    await db.execute('''
+                        INSERT INTO user_sessions
+                        (user_id, session_start, request_count, is_active)
+                        VALUES (?, ?, 1, TRUE)
+                    ''', (user_id, current_time))
+                    print(f"[SESSION] ✓ Created new session for user {user_id}")
+                
+                await db.commit()
+        except aiosqlite.OperationalError as db_error:
+            print(f"[ERROR] Database error in update_session_activity: {db_error}")
+            import traceback
+            traceback.print_exc()
+        except Exception as e:
+            print(f"[ERROR] Failed to update session: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    async def get_dau_metrics(self, days: int = 30):
+        """
+        Получает метрики Daily Active Users за последние N дней - ИСКЛЮЧАЯ администраторов.
+        ИСПРАВЛЕНО: использует user_activity для корректного подсчета активности за 30 дней
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                start_date = datetime.now() - timedelta(days=days)
+                
+                # Используем user_activity для корректного подсчета DAU за период
+                cursor = await db.execute('''
+                    SELECT
+                        ua.activity_date,
+                        COUNT(DISTINCT ua.user_id) as dau,
+                        COALESCE(SUM(ua.request_count), 0) as total_requests,
+                        CASE
+                            WHEN COUNT(DISTINCT ua.user_id) > 0
+                            THEN CAST(COALESCE(SUM(ua.request_count), 0) AS REAL) / COUNT(DISTINCT ua.user_id)
+                            ELSE 0
+                        END as avg_requests_per_user
+                    FROM user_activity ua
+                    JOIN users u ON ua.user_id = u.telegram_id
+                    WHERE ua.activity_date >= DATE(?) AND u.role != 'admin'
+                    GROUP BY ua.activity_date
+                    ORDER BY ua.activity_date DESC
+                ''', (start_date,))
+                
+                return [dict(row) for row in await cursor.fetchall()]
+        except Exception as e:
+            print(f"[ERROR] Failed to get DAU metrics: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+
+    async def get_valid_requests_by_day(self, days: int = 30) -> dict:
+        """
+        Возвращает количество *валидных* запросов по дням.
+
+        Используется для отчётов, где «Всего запросов» должно соответствовать
+        прежней семантике: только запросы, залогированные в request_metrics
+        (general/code_search/name_search), исключая админов.
+
+        Важно: НЕ использует user_activity, потому что user_activity отражает
+        любую активность (включая навигацию и шаги регистрации) и может
+        раздувать «Всего запросов».
+        """
+        try:
+            start_date = datetime.now() - timedelta(days=days)
+
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute('''
+                    SELECT
+                        DATE(rm.timestamp) as activity_date,
+                        COUNT(*) as total_requests
+                    FROM request_metrics rm
+                    JOIN users u ON rm.user_id = u.telegram_id
+                    WHERE rm.timestamp >= ?
+                      AND rm.request_type IN ('general', 'code_search', 'name_search')
+                      AND u.role != 'admin'
+                    GROUP BY DATE(rm.timestamp)
+                ''', (start_date,))
+
+                rows = await cursor.fetchall()
+                # activity_date в SQLite DATE() возвращается как строка YYYY-MM-DD
+                return {row[0]: (row[1] or 0) for row in rows if row and row[0]}
+        except Exception as e:
+            print(f"[ERROR] Failed to get valid requests by day: {e}")
+            import traceback
+            traceback.print_exc()
+            return {}
+    
+    async def get_retention_metrics(self):
+        """
+        Получает метрики возвратности пользователей (ИСКЛЮЧАЯ администраторов).
+        ИСПРАВЛЕНО: правильный расчет retention за последние 30 дней
+        Retention X дней = (пользователи активные СЕГОДНЯ, которые также были активны X дней назад) / (пользователи активные X дней назад)
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                today = datetime.now().date()
+                
+                # Пользователи активные сегодня (ИСКЛЮЧАЯ админов)
+                cursor = await db.execute('''
+                    SELECT COUNT(DISTINCT ua.user_id) as today_users
+                    FROM user_activity ua
+                    JOIN users u ON ua.user_id = u.telegram_id
+                    WHERE ua.activity_date = ? AND u.role != 'admin'
+                ''', (today,))
+                today_users = (await cursor.fetchone())['today_users']
+                
+                # ========== Retention 1 день ==========
+                # Сколько из пользователей вчера вернулись сегодня
+                yesterday = today - timedelta(days=1)
+                
+                # Количество пользователей вчера
+                cursor = await db.execute('''
+                    SELECT COUNT(DISTINCT ua.user_id) as yesterday_users
+                    FROM user_activity ua
+                    JOIN users u ON ua.user_id = u.telegram_id
+                    WHERE ua.activity_date = ? AND u.role != 'admin'
+                ''', (yesterday,))
+                yesterday_users = (await cursor.fetchone())['yesterday_users']
+                
+                # Сколько из них вернулись сегодня
+                cursor = await db.execute('''
+                    SELECT COUNT(DISTINCT ua1.user_id) as returned
+                    FROM user_activity ua1
+                    JOIN users u ON ua1.user_id = u.telegram_id
+                    WHERE ua1.activity_date = ? AND u.role != 'admin'
+                    AND EXISTS (
+                        SELECT 1 FROM user_activity ua2
+                        WHERE ua2.user_id = ua1.user_id
+                        AND ua2.activity_date = ?
+                    )
+                ''', (yesterday, today))
+                returned_1d = (await cursor.fetchone())['returned']
+                
+                # ========== Retention 7 дней ==========
+                # Сколько из пользователей 7 дней назад были активны В ЛЮБОЙ ДЕНЬ за последние 7 дней
+                week_ago = today - timedelta(days=7)
+                
+                # Количество пользователей 7 дней назад
+                cursor = await db.execute('''
+                    SELECT COUNT(DISTINCT ua.user_id) as week_ago_users
+                    FROM user_activity ua
+                    JOIN users u ON ua.user_id = u.telegram_id
+                    WHERE ua.activity_date = ? AND u.role != 'admin'
+                ''', (week_ago,))
+                week_ago_users = (await cursor.fetchone())['week_ago_users']
+                
+                # Сколько из них были активны в последующие 7 дней
+                cursor = await db.execute('''
+                    SELECT COUNT(DISTINCT ua1.user_id) as returned
+                    FROM user_activity ua1
+                    JOIN users u ON ua1.user_id = u.telegram_id
+                    WHERE ua1.activity_date = ? AND u.role != 'admin'
+                    AND EXISTS (
+                        SELECT 1 FROM user_activity ua2
+                        WHERE ua2.user_id = ua1.user_id
+                        AND ua2.activity_date > ?
+                        AND ua2.activity_date <= ?
+                    )
+                ''', (week_ago, week_ago, today))
+                returned_7d = (await cursor.fetchone())['returned']
+                
+                # ========== Retention 30 дней ==========
+                # Сколько из пользователей 30 дней назад были активны В ЛЮБОЙ ДЕНЬ за последние 30 дней
+                month_ago = today - timedelta(days=30)
+                
+                # Количество пользователей 30 дней назад
+                cursor = await db.execute('''
+                    SELECT COUNT(DISTINCT ua.user_id) as month_ago_users
+                    FROM user_activity ua
+                    JOIN users u ON ua.user_id = u.telegram_id
+                    WHERE ua.activity_date = ? AND u.role != 'admin'
+                ''', (month_ago,))
+                month_ago_users = (await cursor.fetchone())['month_ago_users']
+                
+                # Сколько из них были активны в последующие 30 дней
+                cursor = await db.execute('''
+                    SELECT COUNT(DISTINCT ua1.user_id) as returned
+                    FROM user_activity ua1
+                    JOIN users u ON ua1.user_id = u.telegram_id
+                    WHERE ua1.activity_date = ? AND u.role != 'admin'
+                    AND EXISTS (
+                        SELECT 1 FROM user_activity ua2
+                        WHERE ua2.user_id = ua1.user_id
+                        AND ua2.activity_date > ?
+                        AND ua2.activity_date <= ?
+                    )
+                ''', (month_ago, month_ago, today))
+                returned_30d = (await cursor.fetchone())['returned']
+                
+                return {
+                    'today_users': today_users,
+                    'retention_1d': (returned_1d / yesterday_users * 100) if yesterday_users > 0 else 0,
+                    'retention_7d': (returned_7d / week_ago_users * 100) if week_ago_users > 0 else 0,
+                    'retention_30d': (returned_30d / month_ago_users * 100) if month_ago_users > 0 else 0,
+                    'returned_1d': returned_1d,
+                    'returned_7d': returned_7d,
+                    'returned_30d': returned_30d,
+                    'base_1d': yesterday_users,
+                    'base_7d': week_ago_users,
+                    'base_30d': month_ago_users
+                }
+        except Exception as e:
+            print(f"[ERROR] Failed to get retention metrics: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    async def get_session_metrics(self, days: int = 7):
+        """
+        Получает метрики по сессиям за последние N дней (ИСКЛЮЧАЯ администраторов).
+        ПРАВИЛЬНО: считает общую длительность от session_start до session_end (включает время на чтение материалов).
+        Параметр days может быть любым (7, 30 и т.д.) - корректно работает для любого периода.
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                start_date = datetime.now() - timedelta(days=days)
+                
+                # Считаем ОБЩУЮ длительность сессии (от начала до конца) за последние N дней
+                cursor = await db.execute('''
+                    SELECT
+                        COUNT(*) as total_sessions,
+                        AVG(
+                            CAST((julianday(session_end) - julianday(session_start)) * 24 * 60 AS REAL)
+                        ) as avg_duration_minutes,
+                        AVG(request_count) as avg_requests_per_session,
+                        COUNT(DISTINCT user_id) as unique_users
+                    FROM user_sessions
+                    WHERE session_start >= ?
+                      AND session_end IS NOT NULL
+                      AND user_id IN (SELECT telegram_id FROM users WHERE role != 'admin')
+                ''', (start_date,))
+                
+                result = dict(await cursor.fetchone())
+                
+                # Добавляем пояснение
+                result['note'] = 'Среднее время = от начала до конца сессии (включает чтение материалов, +3 мин после последней активности)'
+                
+                return result
+        except Exception as e:
+            print(f"[ERROR] Failed to get session metrics: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    async def update_system_metrics(self):
+        """Обновляет системные метрики"""
+        try:
+            import psutil
+            
+            today = datetime.now().date()
+            
+            # Получаем системные показатели
+            cpu = psutil.cpu_percent(interval=1)
+            memory = psutil.virtual_memory().percent
+            disk = psutil.disk_usage('/').percent
+            
+            # Подсчитываем активные сессии
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute('''
+                    SELECT COUNT(*) FROM user_sessions
+                    WHERE is_active = TRUE
+                ''')
+                active_sessions = (await cursor.fetchone())[0]
+                
+                # Подсчитываем ошибки за сегодня
+                cursor = await db.execute('''
+                    SELECT COUNT(*) FROM request_metrics
+                    WHERE DATE(timestamp) = ? AND success = FALSE
+                ''', (today,))
+                error_count = (await cursor.fetchone())[0]
+                
+                # Сохраняем метрики
+                await db.execute('''
+                    INSERT OR REPLACE INTO system_metrics
+                    (metric_date, cpu_usage, memory_usage, disk_usage,
+                     active_sessions, error_count, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (today, cpu, memory, disk, active_sessions, error_count, datetime.now()))
+                
+                await db.commit()
+        except Exception as e:
+            print(f"[ERROR] Failed to update system metrics: {e}")
+    
+    async def update_quality_metrics(self):
+        """
+        Обновляет метрики качества работы бота.
+        ИСПРАВЛЕНО: success=FALSE теперь считается как "вне специализации", а не ошибка.
+        """
+        try:
+            today = datetime.now().date()
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                # Подсчитываем метрики за сегодня ТОЛЬКО для валидных типов запросов
+                # SQLite допускает хранение BOOLEAN как 0/1 или строк.
+                # Чтобы метрики не "обнулялись" из-за типа данных, используем IN-списки.
+                cursor = await db.execute('''
+                    SELECT
+                        COUNT(*) as total,
+                        -- Корректные ответы с данными
+                        SUM(CASE WHEN has_answer IN (1, '1', 'true', 'True', 'TRUE') THEN 1 ELSE 0 END) as correct,
+                        -- 🔵 Вне специализации/нет результата.
+                        -- ВАЖНО: считаем по той же логике, что и статус в листе «📋 Детали»:
+                        --   «✅ Обработано (нет результата)» = success=TRUE и has_answer=FALSE.
+                        -- Дополнительно (на случай иной схемы логирования) включаем success=FALSE.
+                        SUM(
+                            CASE
+                                WHEN success IN (0, '0', 'false', 'False', 'FALSE') THEN 1
+                                WHEN success IN (1, '1', 'true', 'True', 'TRUE')
+                                     AND has_answer IN (0, '0', 'false', 'False', 'FALSE') THEN 1
+                                ELSE 0
+                            END
+                        ) as out_of_scope,
+                        -- Нет информации (оставляем для совместимости): success=TRUE, но has_answer=FALSE
+                        SUM(CASE WHEN success IN (1, '1', 'true', 'True', 'TRUE')
+                                  AND has_answer IN (0, '0', 'false', 'False', 'FALSE') THEN 1 ELSE 0 END) as no_answer,
+                        SUM(CASE WHEN request_type = 'code_search' THEN 1 ELSE 0 END) as code_search,
+                        SUM(CASE WHEN request_type = 'name_search' THEN 1 ELSE 0 END) as name_search,
+                        SUM(CASE WHEN request_type = 'general' THEN 1 ELSE 0 END) as general_question
+                    FROM request_metrics
+                    WHERE DATE(timestamp) = ?
+                    AND request_type IN ('general', 'code_search', 'name_search')
+                ''', (today,))
+                
+                stats = await cursor.fetchone()
+                
+                if stats and stats[0] > 0:
+                    # NOTE: В таблице quality_metrics поле называется "incorrect_answers"
+                    # но семантически теперь это "out_of_scope" (вне специализации)
+                    await db.execute('''
+                        INSERT OR REPLACE INTO quality_metrics
+                        (metric_date, total_queries, correct_answers, incorrect_answers,
+                         no_answer, code_search_count, name_search_count,
+                         general_question_count, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (today, stats[0], stats[1], stats[2], stats[3],
+                          stats[4], stats[5], stats[6], datetime.now()))
+                    
+                    await db.commit()
+        except Exception as e:
+            print(f"[ERROR] Failed to update quality metrics: {e}")
+    
+    async def get_quality_metrics_summary(self, days: int = 7):
+        """
+        Получает сводку по метрикам качества - ТОЛЬКО валидные типы запросов.
+        
+        ВАЖНО: success=FALSE не считается ошибкой, это корректная работа бота (вопрос вне специализации).
+        В "коэффициент точности" попадают ТОЛЬКО has_answer=TRUE (корректные ответы с данными).
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                start_date = datetime.now().date() - timedelta(days=days)
+                
+                # Считаем напрямую из request_metrics с фильтрацией типов (ИСКЛЮЧАЯ админов)
+                # ИСПРАВЛЕНО: success=FALSE не считается "некорректным", это "вне специализации"
+                # SQLite допускает хранение BOOLEAN как 0/1 или строк.
+                # Чтобы метрики не "обнулялись" из-за типа данных, используем IN-списки.
+                cursor = await db.execute('''
+                    SELECT
+                        COUNT(*) as total,
+                        -- Корректные ответы с данными (has_answer=TRUE, независимо от success)
+                        SUM(CASE WHEN rm.has_answer IN (1, '1', 'true', 'True', 'TRUE') THEN 1 ELSE 0 END) as correct,
+                        -- 🔵 Вопросы вне специализации бота
+                        -- ВАЖНО: считаем по той же логике, что и статус в листе «📋 Детали»:
+                        --   «✅ Обработано (нет результата)» = success=TRUE и has_answer=FALSE.
+                        -- Дополнительно (на случай иной схемы логирования) включаем success=FALSE.
+                        -- ВАЖНО: НЕ влияет на точность (исключаем из denominator).
+                        SUM(
+                            CASE
+                                WHEN rm.success IN (0, '0', 'false', 'False', 'FALSE') THEN 1
+                                WHEN rm.success IN (1, '1', 'true', 'True', 'TRUE')
+                                     AND rm.has_answer IN (0, '0', 'false', 'False', 'FALSE') THEN 1
+                                ELSE 0
+                            END
+                        ) as out_of_scope,
+                        -- ✅ Обработано (нет результата): success=TRUE, но has_answer=FALSE
+                        -- ВАЖНО: участвует в расчёте точности как "no_answer" (как было ранее)
+                        SUM(CASE WHEN rm.success IN (1, '1', 'true', 'True', 'TRUE')
+                                  AND rm.has_answer IN (0, '0', 'false', 'False', 'FALSE') THEN 1 ELSE 0 END) as no_result,
+                        -- ⚠️ Без ответа (таймаут): пользователь не получил ответ в течение 60 секунд
+                        -- ВАЖНО: по требованию НЕ влияет на точность (в отчёте показываем отдельно)
+                        SUM(CASE WHEN rm.response_time IS NULL OR rm.response_time >= 60 THEN 1 ELSE 0 END) as timeout_no_answer,
+                        SUM(CASE WHEN rm.request_type = 'code_search' THEN 1 ELSE 0 END) as code_searches,
+                        SUM(CASE WHEN rm.request_type = 'name_search' THEN 1 ELSE 0 END) as name_searches,
+                        SUM(CASE WHEN rm.request_type = 'general' THEN 1 ELSE 0 END) as general_questions
+                    FROM request_metrics rm
+                    JOIN users u ON rm.user_id = u.telegram_id
+                    WHERE DATE(rm.timestamp) >= ?
+                    AND rm.request_type IN ('general', 'code_search', 'name_search')
+                    AND u.role != 'admin'
+                ''', (start_date,))
+                
+                result = dict(await cursor.fetchone())
+                
+                # ИСПРАВЛЕНО: безопасная обработка None значений
+                total = result.get('total') or 0
+                correct = result.get('correct') or 0
+                out_of_scope = result.get('out_of_scope') or 0
+                no_result = result.get('no_result') or 0
+                timeout_no_answer = result.get('timeout_no_answer') or 0
+                
+                # Обновляем result с безопасными значениями
+                result['total'] = total
+                result['correct'] = correct
+                # ВАЖНО:
+                # - out_of_scope = success=FALSE (вне специализации) — НЕ влияет на точность
+                # - no_result = success=TRUE & has_answer=FALSE — влияет на точность (как было ранее)
+                # - no_answer в отчёте = таймаут (>=60 сек или NULL) — НЕ влияет на точность
+                result['out_of_scope'] = out_of_scope
+                result['no_answer'] = timeout_no_answer
+                # Доп. поля, чтобы сохранить прежние расчёты точности
+                result['no_result'] = no_result
+                result['timeout_no_answer'] = timeout_no_answer
+                result['code_searches'] = result.get('code_searches') or 0
+                result['name_searches'] = result.get('name_searches') or 0
+                result['general_questions'] = result.get('general_questions') or 0
+                
+                # Вычисляем проценты (защита от деления на ноль)
+                # Требование пользователя: «вопросы вне специализации» (🔵 out_of_scope)
+                # НЕ должны участвовать в процентах, но количество нужно показывать.
+                #
+                # Поэтому проценты считаем только в рамках релевантных запросов:
+                #   relevant_total = correct + timeout_no_answer
+                # где:
+                #   correct = has_answer=TRUE
+                #   timeout_no_answer = response_time IS NULL OR response_time >= 60
+                #
+                # Важно: no_result (success=TRUE & has_answer=FALSE) остаётся в данных как часть out_of_scope
+                # и не влияет на проценты.
+                relevant_total = correct + timeout_no_answer
+                if relevant_total > 0:
+                    result['correct_percentage'] = (correct / relevant_total * 100)
+                    result['no_answer_percentage'] = (timeout_no_answer / relevant_total * 100)
+                else:
+                    result['correct_percentage'] = 0
+                    result['no_answer_percentage'] = 0
+                
+                # Процент вопросов вне специализации (от общего числа запросов)
+                result['out_of_scope_percentage'] = (out_of_scope / total * 100) if total > 0 else 0
+
+                # Процент таймаутов (>= 60 сек) от общего числа запросов
+                result['timeout_no_answer_percentage'] = (timeout_no_answer / total * 100) if total > 0 else 0
+                
+                # Для обратной совместимости добавляем старое поле
+                result['incorrect'] = result['out_of_scope']
+                result['incorrect_percentage'] = result['out_of_scope_percentage']
+                
+                return result
+        except Exception as e:
+            print(f"[ERROR] Failed to get quality metrics summary: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    async def get_comprehensive_metrics(self, days: int = 7):
+        """Получает полную сводку всех метрик для админа"""
+        try:
+            return {
+                'client_metrics': {
+                    'dau': await self.get_dau_metrics(days),
+                    'retention': await self.get_retention_metrics(),  # NOTE: retention всегда считается от "сегодня"
+                    'sessions': await self.get_session_metrics(days)
+                },
+                'technical_metrics': {
+                    'response_time': await self.get_metrics_summary(days),
+                    'system': await self._get_latest_system_metrics(days)  # ИСПРАВЛЕНО: передаем days
+                },
+                'quality_metrics': await self.get_quality_metrics_summary(days),
+                'period_days': days
+            }
+        except Exception as e:
+            print(f"[ERROR] Failed to get comprehensive metrics: {e}")
+            return None
+    
+    async def _get_latest_system_metrics(self, days: int = 7):
+        """
+        Получает системные метрики за последние N дней.
+        По умолчанию возвращает последние 7 записей для тренда.
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                start_date = datetime.now().date() - timedelta(days=days)
+                
+                cursor = await db.execute('''
+                    SELECT * FROM system_metrics
+                    WHERE metric_date >= ?
+                    ORDER BY metric_date DESC
+                ''', (start_date,))
+                
+                return [dict(row) for row in await cursor.fetchall()]
+        except Exception as e:
+            print(f"[ERROR] Failed to get latest system metrics: {e}")
+            return []
+    
+    async def save_response_rating(self, user_id: int, chat_history_id: str, rating: int, 
+                                question: str = "", response: str = "", timestamp = None):
+        """Сохраняет оценку ответа"""
+        try:
+            if timestamp is None:
+                timestamp = datetime.now()
+                
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    INSERT INTO response_ratings 
+                    (user_id, chat_history_id, rating, question, response, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (user_id, chat_history_id, rating, question[:500], response[:1000], timestamp))
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"[ERROR] Failed to save rating: {e}")
+            return False
+
+    async def get_rating_stats(self, days: int = 30):
+        """Получает статистику оценок"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                start_date = datetime.now() - timedelta(days=days)
+                
+                # Общая статистика
+                cursor = await db.execute('''
+                    SELECT
+                        COUNT(*) as total_ratings,
+                        AVG(rating) as avg_rating,
+                        COUNT(CASE WHEN rating <= 3 THEN 1 END) as low_ratings,
+                        COUNT(CASE WHEN rating >= 4 THEN 1 END) as high_ratings
+                    FROM response_ratings
+                    WHERE timestamp >= ?
+                ''', (start_date,))
+                
+                stats = await cursor.fetchone()
+                return dict(stats) if stats else None
+        except Exception as e:
+            print(f"[ERROR] Failed to get rating stats: {e}")
+            return None
+    
+    async def get_average_user_rating(self, days: int = 30):
+        """Получает средний рейтинг от пользователей за период"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                start_date = datetime.now() - timedelta(days=days)
+                
+                cursor = await db.execute('''
+                    SELECT AVG(rating) as avg_rating, COUNT(*) as total_ratings
+                    FROM response_ratings
+                    WHERE timestamp >= ?
+                ''', (start_date,))
+                
+                result = await cursor.fetchone()
+                if result and result[1] > 0:  # Если есть оценки
+                    return round(result[0], 2)
+                return 0.0
+        except Exception as e:
+            print(f"[ERROR] Failed to get average rating: {e}")
+            return 0.0
+    
+    async def get_binary_feedback_metrics(self, days: int = 30) -> dict:
+        """
+        Получает метрики бинарной системы оценок (positive/negative/declined)
+        
+        Args:
+            days: Период анализа в днях
+            
+        Returns:
+            dict: Словарь с метриками:
+                - total_ratings: общее количество оценок
+                - positive_count: количество положительных
+                - negative_count: количество отрицательных
+                - declined_count: количество отказов
+                - satisfaction_rate: процент положительных оценок
+                - dissatisfaction_rate: процент отрицательных оценок
+                - declined_rate: процент отказов
+                - total_interactions: общее количество взаимодействий (валидных запросов)
+                - response_rate: коэффициент отклика (оценок к взаимодействиям)
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                start_date = datetime.now() - timedelta(days=days)
+                
+                # Получаем статистику по оценкам из bot_response_ratings (ИСКЛЮЧАЯ админов)
+                cursor = await db.execute('''
+                    SELECT
+                        COUNT(*) as total_ratings,
+                        SUM(CASE WHEN rating_type = 'positive' THEN 1 ELSE 0 END) as positive_count,
+                        SUM(CASE WHEN rating_type = 'negative' THEN 1 ELSE 0 END) as negative_count,
+                        SUM(CASE WHEN rating_type = 'declined' THEN 1 ELSE 0 END) as declined_count,
+                        COUNT(DISTINCT brr.user_id) as unique_users_rated
+                    FROM bot_response_ratings brr
+                    JOIN users u ON brr.user_id = u.telegram_id
+                    WHERE brr.timestamp >= ?
+                      AND u.role != 'admin'
+                ''', (start_date,))
+                
+                ratings = dict(await cursor.fetchone())
+
+                # Получаем количество ПОКАЗОВ формы оценки (denominator)
+                cursor = await db.execute('''
+                    SELECT
+                        COUNT(*) as total_interactions,
+                        COUNT(DISTINCT bfp.user_id) as unique_users_interacted
+                    FROM bot_feedback_prompts bfp
+                    JOIN users u ON bfp.user_id = u.telegram_id
+                    WHERE bfp.timestamp >= ?
+                      AND u.role != 'admin'
+                ''', (start_date,))
+
+                interactions = dict(await cursor.fetchone())
+                
+                # Вычисляем метрики
+                total_ratings = ratings.get('total_ratings') or 0
+                positive = ratings.get('positive_count') or 0
+                negative = ratings.get('negative_count') or 0
+                declined = ratings.get('declined_count') or 0
+                total_interactions = interactions.get('total_interactions') or 0
+                
+                # Процентные показатели от общего числа оценок
+                satisfaction_rate = (positive / total_ratings * 100) if total_ratings > 0 else 0
+                dissatisfaction_rate = (negative / total_ratings * 100) if total_ratings > 0 else 0
+                declined_rate = (declined / total_ratings * 100) if total_ratings > 0 else 0
+                
+                # Коэффициент отклика (response rate) - сколько пользователей оставляют оценки
+                response_rate = (total_ratings / total_interactions * 100) if total_interactions > 0 else 0
+                
+                return {
+                    'total_ratings': total_ratings,
+                    'positive_count': positive,
+                    'negative_count': negative,
+                    'declined_count': declined,
+                    'satisfaction_rate': round(satisfaction_rate, 2),
+                    'dissatisfaction_rate': round(dissatisfaction_rate, 2),
+                    'declined_rate': round(declined_rate, 2),
+                    'total_interactions': total_interactions,
+                    'response_rate': round(response_rate, 2),
+                    'unique_users_rated': ratings.get('unique_users_rated') or 0,
+                    'unique_users_interacted': interactions.get('unique_users_interacted') or 0
+                }
+                
+        except Exception as e:
+            print(f"[ERROR] Failed to get binary feedback metrics: {e}")
+            import traceback
+            traceback.print_exc()
+            return {
+                'total_ratings': 0,
+                'positive_count': 0,
+                'negative_count': 0,
+                'declined_count': 0,
+                'satisfaction_rate': 0,
+                'dissatisfaction_rate': 0,
+                'declined_rate': 0,
+                'total_interactions': 0,
+                'response_rate': 0,
+                'unique_users_rated': 0,
+                'unique_users_interacted': 0
+            }
+    
+    # ============================================================
+    # МЕТОДЫ ДЛЯ НОВОЙ СИСТЕМЫ ОЦЕНОК ОТВЕТОВ
+    # ============================================================
+    
+    async def save_bot_response_rating(
+        self,
+        user_id: int,
+        message_id: int,
+        rating_type: str,
+        question: str = "",
+        bot_response: str = ""
+    ) -> bool:
+        """
+        Сохраняет оценку ответа бота в новой системе
+        
+        Args:
+            user_id: ID пользователя Telegram
+            message_id: ID сообщения
+            rating_type: Тип оценки ('positive', 'negative', 'declined')
+            question: Текст вопроса пользователя
+            bot_response: Текст ответа бота
+            
+        Returns:
+            bool: True если успешно, False при ошибке
+        """
+        try:
+            # Валидация типа оценки
+            valid_types = ['positive', 'negative', 'declined']
+            if rating_type not in valid_types:
+                print(f"[ERROR] Invalid rating type: {rating_type}")
+                return False
+            
+            # Валидация user_id и message_id
+            if not user_id or not message_id:
+                print(f"[ERROR] Invalid user_id or message_id")
+                return False
+            
+            # Обрезаем длинные тексты
+            question_truncated = question[:2000] if question else ""
+            response_truncated = bot_response[:3000] if bot_response else ""
+            
+            async with aiosqlite.connect(self.db_path, timeout=10.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                await db.execute('''
+                    INSERT INTO bot_response_ratings
+                    (user_id, message_id, rating_type, question, bot_response, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (
+                    user_id,
+                    message_id,
+                    rating_type,
+                    question_truncated,
+                    response_truncated,
+                    datetime.now()
+                ))
+                
+                await db.commit()
+                print(f"[RATING] ✓ Saved {rating_type} rating from user {user_id}, message {message_id}")
+                return True
+                
+        except Exception as e:
+            print(f"[ERROR] Failed to save bot response rating: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    async def is_user_rating_enabled(self, user_id: int) -> bool:
+        """
+        Проверяет, включены ли запросы оценки для пользователя
+        
+        Args:
+            user_id: ID пользователя Telegram
+            
+        Returns:
+            bool: True если включены, False если отключены
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute('''
+                    SELECT is_rating_enabled
+                    FROM user_rating_preferences
+                    WHERE user_id = ?
+                ''', (user_id,))
+                
+                result = await cursor.fetchone()
+                
+                # Если записи нет - по умолчанию включено
+                if not result:
+                    return True
+                
+                return bool(result[0])
+                
+        except Exception as e:
+            print(f"[ERROR] Failed to check rating enabled: {e}")
+            # При ошибке возвращаем True (по умолчанию включено)
+            return True
+    
+    async def disable_user_ratings(self, user_id: int) -> bool:
+        """
+        Отключает запросы оценки для пользователя
+        
+        Args:
+            user_id: ID пользователя Telegram
+            
+        Returns:
+            bool: True если успешно
+        """
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=10.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                await db.execute('''
+                    INSERT INTO user_rating_preferences (user_id, is_rating_enabled, disabled_at)
+                    VALUES (?, FALSE, ?)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        is_rating_enabled = FALSE,
+                        disabled_at = excluded.disabled_at
+                ''', (user_id, datetime.now()))
+                
+                await db.commit()
+                print(f"[RATING] ✓ Disabled ratings for user {user_id}")
+                return True
+                
+        except Exception as e:
+            print(f"[ERROR] Failed to disable user ratings: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    async def enable_user_ratings(self, user_id: int) -> bool:
+        """
+        Включает запросы оценки для пользователя
+        
+        Args:
+            user_id: ID пользователя Telegram
+            
+        Returns:
+            bool: True если успешно
+        """
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=10.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                await db.execute('''
+                    INSERT INTO user_rating_preferences (user_id, is_rating_enabled, disabled_at)
+                    VALUES (?, TRUE, NULL)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        is_rating_enabled = TRUE,
+                        disabled_at = NULL
+                ''', (user_id,))
+                
+                await db.commit()
+                print(f"[RATING] ✓ Enabled ratings for user {user_id}")
+                return True
+                
+        except Exception as e:
+            print(f"[ERROR] Failed to enable user ratings: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    async def get_bot_rating_stats(self, days: int = 30) -> dict:
+        """
+        Получает статистику оценок ответов бота
+        
+        Args:
+            days: Количество дней для анализа
+            
+        Returns:
+            dict: Словарь со статистикой
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                start_date = datetime.now() - timedelta(days=days)
+                
+                # Общая статистика
+                cursor = await db.execute('''
+                    SELECT
+                        COUNT(*) as total_ratings,
+                        SUM(CASE WHEN rating_type = 'positive' THEN 1 ELSE 0 END) as positive_count,
+                        SUM(CASE WHEN rating_type = 'negative' THEN 1 ELSE 0 END) as negative_count,
+                        SUM(CASE WHEN rating_type = 'declined' THEN 1 ELSE 0 END) as declined_count,
+                        COUNT(DISTINCT user_id) as unique_users
+                    FROM bot_response_ratings
+                    WHERE timestamp >= ?
+                ''', (start_date,))
+                
+                overall = dict(await cursor.fetchone())
+                
+                # Вычисляем процентные показатели
+                total = overall.get('total_ratings', 0)
+                if total > 0:
+                    overall['positive_percentage'] = round((overall['positive_count'] / total) * 100, 2)
+                    overall['negative_percentage'] = round((overall['negative_count'] / total) * 100, 2)
+                    overall['declined_percentage'] = round((overall['declined_count'] / total) * 100, 2)
+                else:
+                    overall['positive_percentage'] = 0
+                    overall['negative_percentage'] = 0
+                    overall['declined_percentage'] = 0
+                
+                # Динамика по дням
+                cursor = await db.execute('''
+                    SELECT
+                        DATE(timestamp) as rating_date,
+                        COUNT(*) as total,
+                        SUM(CASE WHEN rating_type = 'positive' THEN 1 ELSE 0 END) as positive,
+                        SUM(CASE WHEN rating_type = 'negative' THEN 1 ELSE 0 END) as negative,
+                        SUM(CASE WHEN rating_type = 'declined' THEN 1 ELSE 0 END) as declined
+                    FROM bot_response_ratings
+                    WHERE timestamp >= ?
+                    GROUP BY DATE(timestamp)
+                    ORDER BY rating_date DESC
+                ''', (start_date,))
+                
+                daily_stats = [dict(row) for row in await cursor.fetchall()]
+                
+                # Топ пользователей по количеству оценок
+                cursor = await db.execute('''
+                    SELECT
+                        brr.user_id,
+                        u.name,
+                        u.user_type,
+                        COUNT(*) as rating_count,
+                        SUM(CASE WHEN brr.rating_type = 'positive' THEN 1 ELSE 0 END) as positive,
+                        SUM(CASE WHEN brr.rating_type = 'negative' THEN 1 ELSE 0 END) as negative
+                    FROM bot_response_ratings brr
+                    JOIN users u ON brr.user_id = u.telegram_id
+                    WHERE brr.timestamp >= ?
+                    GROUP BY brr.user_id
+                    ORDER BY rating_count DESC
+                    LIMIT 10
+                ''', (start_date,))
+                
+                top_users = [dict(row) for row in await cursor.fetchall()]
+                
+                # Статистика отключений
+                cursor = await db.execute('''
+                    SELECT COUNT(*) as disabled_count
+                    FROM user_rating_preferences
+                    WHERE is_rating_enabled = FALSE
+                ''')
+                
+                disabled = dict(await cursor.fetchone())
+                
+                return {
+                    'overall': overall,
+                    'daily_stats': daily_stats,
+                    'top_users': top_users,
+                    'disabled_users_count': disabled.get('disabled_count', 0),
+                    'period_days': days
+                }
+                
+        except Exception as e:
+            print(f"[ERROR] Failed to get bot rating stats: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    async def get_user_rating_history(self, user_id: int, limit: int = 20) -> list:
+        """
+        Получает историю оценок конкретного пользователя
+        
+        Args:
+            user_id: ID пользователя
+            limit: Максимальное количество записей
+            
+        Returns:
+            list: Список оценок
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                cursor = await db.execute('''
+                    SELECT
+                        id,
+                        message_id,
+                        rating_type,
+                        question,
+                        bot_response,
+                        timestamp
+                    FROM bot_response_ratings
+                    WHERE user_id = ?
+                    ORDER BY timestamp DESC
+                    LIMIT ?
+                ''', (user_id, limit))
+                
+                return [dict(row) for row in await cursor.fetchall()]
+                
+        except Exception as e:
+            print(f"[ERROR] Failed to get user rating history: {e}")
+            return []
+    
+    async def get_detailed_session_report(self, days: int = 30):
+        """
+        Получает детальный отчет по сессиям с анализом времени активности.
+        Показывает причины запредельного времени сессий.
+        ИСПРАВЛЕНО: общая длительность от session_start до session_end,
+        активное время - только между валидными запросами.
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                start_date = datetime.now() - timedelta(days=days)
+                
+                # Получаем все завершенные сессии с детальной информацией
+                cursor = await db.execute('''
+                    SELECT
+                        us.id as session_id,
+                        us.user_id,
+                        u.name as user_name,
+                        u.user_type,
+                        u.client_code,
+                        us.session_start,
+                        us.session_end,
+                        us.request_count as total_actions,
+                        -- ОБЩАЯ длительность сессии (от начала до конца, включает +3 мин на чтение)
+                        CAST((julianday(us.session_end) - julianday(us.session_start)) * 24 * 60 AS REAL) as duration_minutes,
+                        -- Подсчет валидных запросов из request_metrics
+                        (SELECT COUNT(*) FROM request_metrics rm
+                         WHERE rm.user_id = us.user_id
+                         AND rm.timestamp >= us.session_start
+                         AND rm.timestamp <= us.session_end) as valid_requests,
+                        -- Получаем первый и последний ВАЛИДНЫЕ запросы
+                        (SELECT MIN(rm.timestamp) FROM request_metrics rm
+                         WHERE rm.user_id = us.user_id
+                         AND rm.timestamp >= us.session_start
+                         AND rm.timestamp <= us.session_end) as first_request_time,
+                        (SELECT MAX(rm.timestamp) FROM request_metrics rm
+                         WHERE rm.user_id = us.user_id
+                         AND rm.timestamp >= us.session_start
+                         AND rm.timestamp <= us.session_end) as last_request_time
+                    FROM user_sessions us
+                    JOIN users u ON us.user_id = u.telegram_id
+                    WHERE us.session_start >= ?
+                      AND us.session_end IS NOT NULL
+                      AND u.role != 'admin'
+                    ORDER BY duration_minutes DESC
+                ''', (start_date,))
+                
+                sessions = await cursor.fetchall()
+                
+                # Обрабатываем каждую сессию для анализа
+                detailed_sessions = []
+                for session in sessions:
+                    session_dict = dict(session)
+                    
+                    # Получаем детальную информацию о ВАЛИДНЫХ запросах в этой сессии
+                    req_cursor = await db.execute('''
+                        SELECT
+                            rm.timestamp,
+                            rm.request_type,
+                            rm.query_text,
+                            rm.response_time,
+                            rm.success,
+                            rm.has_answer
+                        FROM request_metrics rm
+                        WHERE rm.user_id = ?
+                          AND rm.timestamp >= ?
+                          AND rm.timestamp <= ?
+                        ORDER BY rm.timestamp
+                    ''', (session_dict['user_id'],
+                          session_dict['session_start'],
+                          session_dict['session_end']))
+                    
+                    requests = await req_cursor.fetchall()
+                    session_dict['requests'] = [dict(r) for r in requests]
+                    
+                    # Используем количество ВАЛИДНЫХ запросов
+                    valid_requests_count = session_dict['valid_requests']
+                    total_actions = session_dict['total_actions']
+                    
+                    # Вычисляем активное время (между первым и последним валидным запросом)
+                    active_time_minutes = 0
+                    if session_dict['first_request_time'] and session_dict['last_request_time']:
+                        first_req = datetime.fromisoformat(session_dict['first_request_time'])
+                        last_req = datetime.fromisoformat(session_dict['last_request_time'])
+                        active_time_minutes = (last_req - first_req).total_seconds() / 60
+                    
+                    session_dict['active_time_minutes'] = active_time_minutes
+                    session_dict['navigation_actions'] = total_actions - valid_requests_count
+                    
+                    # Анализируем паузы между ВАЛИДНЫМИ запросами
+                    pauses = []
+                    if len(requests) > 1:
+                        for i in range(1, len(requests)):
+                            prev_time = datetime.fromisoformat(requests[i-1]['timestamp'])
+                            curr_time = datetime.fromisoformat(requests[i]['timestamp'])
+                            pause_minutes = (curr_time - prev_time).total_seconds() / 60
+                            pauses.append({
+                                'between_requests': f"{i} и {i+1}",
+                                'pause_minutes': pause_minutes,
+                                'prev_request_type': requests[i-1]['request_type'],
+                                'next_request_type': requests[i]['request_type']
+                            })
+                    
+                    session_dict['pauses'] = pauses
+                    
+                    # Определяем причину долгой сессии
+                    duration = session_dict['duration_minutes']
+                    
+                    reasons = []
+                    
+                    # Анализ времени на чтение (разница между общей длительностью и активным временем)
+                    reading_time = duration - active_time_minutes
+                    if reading_time > 3:
+                        reasons.append(f'📖 Время на изучение материала: {reading_time:.1f} мин')
+                    
+                    # Проверка на очень длинную сессию
+                    if duration > 60:
+                        reasons.append(f'⏰ Очень длинная сессия: {duration:.1f} мин ({duration/60:.1f} ч)')
+                    elif duration > 30:
+                        reasons.append(f'⏰ Длинная сессия: {duration:.1f} мин')
+                    
+                    # Анализ количества запросов
+                    if valid_requests_count == 0:
+                        reasons.append('⚠️ Нет валидных запросов (только навигация по меню)')
+                    elif valid_requests_count > 20:
+                        reasons.append(f'📊 Интенсивное использование: {valid_requests_count} запросов')
+                    
+                    # Анализ соотношения навигации к запросам
+                    if session_dict['navigation_actions'] > valid_requests_count * 2:
+                        reasons.append(f'🔘 Много навигации: {session_dict["navigation_actions"]} действий vs {valid_requests_count} запросов')
+                    
+                    # Анализ пауз между запросами
+                    if pauses:
+                        max_pause = max(p['pause_minutes'] for p in pauses)
+                        if max_pause > 10:
+                            reasons.append(f'⏸️ Длинная пауза между запросами: {max_pause:.1f} мин')
+                        
+                        avg_pause = sum(p['pause_minutes'] for p in pauses) / len(pauses)
+                        if avg_pause > 5:
+                            reasons.append(f'⏱️ Большие средние паузы: {avg_pause:.1f} мин')
+                    
+                    # Проверяем время после последнего запроса (время на изучение ответа)
+                    if session_dict['last_request_time']:
+                        last_req = datetime.fromisoformat(session_dict['last_request_time'])
+                        session_end = datetime.fromisoformat(session_dict['session_end'])
+                        final_reading_time = (session_end - last_req).total_seconds() / 60
+                        
+                        if final_reading_time > 3:
+                            reasons.append(f'📚 Изучение последнего ответа: {final_reading_time:.1f} мин')
+                    
+                    # Если нет особых причин
+                    if not reasons:
+                        if duration > 5:
+                            reasons.append('✅ Нормальная рабочая сессия')
+                        else:
+                            reasons.append('⚡ Быстрая сессия')
+                    
+                    session_dict['analysis_reasons'] = reasons
+                    detailed_sessions.append(session_dict)
+                
+                return detailed_sessions
+                
+        except Exception as e:
+            print(f"[ERROR] Failed to get detailed session report: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+    
+    async def clear_monthly_metrics(self):
+        """
+        Очищает все данные метрик за текущий месяц.
+        Используется для начала нового отчетного периода.
+        Возвращает словарь с количеством удаленных записей из каждой таблицы.
+        """
+        try:
+            deleted_counts = {}
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                # 1. Очистка детальных метрик запросов
+                cursor = await db.execute('DELETE FROM request_metrics')
+                deleted_counts['request_metrics'] = cursor.rowcount
+                
+                # 2. Очистка агрегированных ежедневных метрик
+                cursor = await db.execute('DELETE FROM bot_metrics')
+                deleted_counts['bot_metrics'] = cursor.rowcount
+                
+                # 3. Очистка активности пользователей (DAU)
+                cursor = await db.execute('DELETE FROM user_activity')
+                deleted_counts['user_activity'] = cursor.rowcount
+                
+                # 4. Очистка сессий пользователей
+                cursor = await db.execute('DELETE FROM user_sessions')
+                deleted_counts['user_sessions'] = cursor.rowcount
+                
+                # 5. Очистка системных метрик
+                cursor = await db.execute('DELETE FROM system_metrics')
+                deleted_counts['system_metrics'] = cursor.rowcount
+                
+                # 6. Очистка метрик качества
+                cursor = await db.execute('DELETE FROM quality_metrics')
+                deleted_counts['quality_metrics'] = cursor.rowcount
+                
+                # 7. Очистка оценок пользователей
+                cursor = await db.execute('DELETE FROM response_ratings')
+                deleted_counts['response_ratings'] = cursor.rowcount
+                
+                await db.commit()
+                
+                # Вычисляем общее количество удаленных записей
+                total_deleted = sum(deleted_counts.values())
+                deleted_counts['total'] = total_deleted
+                
+                print(f"[METRICS CLEANUP] Successfully cleared all metrics tables:")
+                for table, count in deleted_counts.items():
+                    if table != 'total':
+                        print(f"  - {table}: {count} records")
+                print(f"  Total: {total_deleted} records deleted")
+                
+                return deleted_counts
+                
+        except Exception as e:
+            print(f"[ERROR] Failed to clear monthly metrics: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+        
+     # ============================================================
+    # МЕТОДЫ ДЛЯ ГАЛЕРЕИ ПРОБИРОК И КОНТЕЙНЕРОВ
+    # ============================================================
+    
+    async def ensure_gallery_table(self):
+        """Создает таблицу галереи если её нет"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS gallery_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    file_id TEXT NOT NULL,
+                    description TEXT,
+                    added_by INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    FOREIGN KEY (added_by) REFERENCES users(telegram_id)
+                )
+            ''')
+            await db.commit()
+    
+    async def add_gallery_item(self, title: str, file_id: str, description: str = None, added_by: int = None):
+        """Добавляет элемент в галерею"""
+        try:
+            await self.ensure_gallery_table()
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute('''
+                    INSERT INTO gallery_items (title, file_id, description, added_by)
+                    VALUES (?, ?, ?, ?)
+                ''', (title, file_id, description, added_by))
+                await db.commit()
+                return cursor.lastrowid
+        except Exception as e:
+            print(f"[ERROR] Failed to add gallery item: {e}")
+            return None
+    
+    async def get_all_gallery_items(self):
+        """Получает все активные элементы галереи"""
+        try:
+            await self.ensure_gallery_table()
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute('''
+                    SELECT * FROM gallery_items 
+                    WHERE is_active = TRUE
+                    ORDER BY created_at DESC
+                ''')
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
+        except Exception as e:
+            print(f"[ERROR] Failed to get gallery items: {e}")
+            return []
+    
+    async def get_gallery_item(self, item_id: int):
+        """Получает конкретный элемент галереи"""
+        try:
+            await self.ensure_gallery_table()
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute(
+                    'SELECT * FROM gallery_items WHERE id = ? AND is_active = TRUE',
+                    (item_id,)
+                )
+                row = await cursor.fetchone()
+                return dict(row) if row else None
+        except Exception as e:
+            print(f"[ERROR] Failed to get gallery item: {e}")
+            return None
+    
+    async def delete_gallery_item(self, item_id: int):
+        """Деактивирует элемент галереи"""
+        try:
+            await self.ensure_gallery_table()
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute(
+                    'UPDATE gallery_items SET is_active = FALSE WHERE id = ?',
+                    (item_id,)
+                )
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"[ERROR] Failed to delete gallery item: {e}")
+            return False
+    
+    # ============================================================
+    # МЕТОДЫ ДЛЯ ССЫЛОК НА БЛАНКИ
+    # ============================================================
+    
+    async def ensure_blanks_table(self):
+        """Создает таблицу бланков если её нет"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS blank_documents (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    file_id TEXT NOT NULL,
+                    description TEXT,
+                    added_by INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    FOREIGN KEY (added_by) REFERENCES users(telegram_id)
+                )
+            ''')
+            await db.commit()
+    
+    async def add_blank_document(self, title: str, file_id: str, description: str = None, added_by: int = None):
+        """Добавляет документ бланка"""
+        try:
+            await self.ensure_blanks_table()
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute('''
+                    INSERT INTO blank_documents (title, file_id, description, added_by)
+                    VALUES (?, ?, ?, ?)
+                ''', (title, file_id, description, added_by))
+                await db.commit()
+                return cursor.lastrowid
+        except Exception as e:
+            print(f"[ERROR] Failed to add blank document: {e}")
+            return None
+    
+    async def get_all_blank_documents(self):
+        """Получает все активные документы бланков"""
+        try:
+            await self.ensure_blanks_table()
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute('''
+                    SELECT * FROM blank_documents
+                    WHERE is_active = TRUE
+                    ORDER BY created_at DESC
+                ''')
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
+        except Exception as e:
+            print(f"[ERROR] Failed to get blank documents: {e}")
+            return []
+    
+    async def delete_blank_document(self, blank_id: int):
+        """Деактивирует документ бланка"""
+        try:
+            await self.ensure_blanks_table()
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute(
+                    'UPDATE blank_documents SET is_active = FALSE WHERE id = ?',
+                    (blank_id,)
+                )
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"[ERROR] Failed to delete blank document: {e}")
+            return False
+    
+    async def get_blank_document(self, blank_id: int):
+        """Получает конкретный документ бланка"""
+        try:
+            await self.ensure_blanks_table()
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute(
+                    'SELECT * FROM blank_documents WHERE id = ? AND is_active = TRUE',
+                    (blank_id,)
+                )
+                row = await cursor.fetchone()
+                return dict(row) if row else None
+        except Exception as e:
+            print(f"[ERROR] Failed to get blank document: {e}")
+            return None
+
+    # ============================================================
+    # МЕТОДЫ ДЛЯ РАБОТЫ СО СТОП-ЛИСТОМ
+    # ============================================================
+    
+    async def update_stoplist_file(self, file_type: str, file_id: str):
+        """Обновление файла стоп-листа (suspended или removed)"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                file_name = f"stoplist_{file_type}"
+                await db.execute('''
+                    INSERT OR REPLACE INTO blank_files (file_name, file_id, created_at)
+                    VALUES (?, ?, ?)
+                ''', (file_name, file_id, datetime.now()))
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"[ERROR] Failed to update stoplist file: {e}")
+            return False
+    
+    async def get_stoplist_file(self, file_type: str):
+        """Получение файла стоп-листа"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                file_name = f"stoplist_{file_type}"
+                cursor = await db.execute(
+                    'SELECT file_id FROM blank_files WHERE file_name = ?',
+                    (file_name,)
+                )
+                row = await cursor.fetchone()
+                return row[0] if row else None
+        except Exception as e:
+            print(f"[ERROR] Failed to get stoplist file: {e}")
+            return None
+
+    # В класс Database добавим:
+
+    async def get_blank_file_id(self, file_name: str):
+        """Получает file_id бланка из базы данных"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute(
+                    "SELECT file_id FROM blank_files WHERE file_name = ?",
+                    (file_name,)
+                )
+                row = await cursor.fetchone()
+                return {"file_id": row[0]} if row else None
+        except Exception as e:
+            print(f"[ERROR] Failed to get blank file_id: {e}")
+            return None
+
+    async def save_blank_file_id(self, file_name: str, file_id: str):
+        """Сохраняет file_id бланка в базу данных"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    INSERT OR REPLACE INTO blank_files (file_name, file_id, created_at)
+                    VALUES (?, ?, ?)
+                ''', (file_name, file_id, datetime.now()))
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"[ERROR] Failed to save blank file_id: {e}")
+            return False

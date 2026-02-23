@@ -46,6 +46,7 @@ class PollStates(StatesGroup):
     poll_menu = State()
     creating_title = State()
     creating_description = State()
+    adding_welcome_image = State()
     adding_questions = State()
     entering_question = State()
     setting_answer_type = State()
@@ -479,6 +480,11 @@ async def handle_poll_questions(message: Message, state: FSMContext):
             questions=questions,
             created_by=message.from_user.id
         )
+        
+        # Если есть приветственное изображение, добавляем его с форматом
+        if data.get('welcome_image'):
+            welcome_format = data.get('welcome_format', 'image_with_text')
+            await db.update_poll_welcome_image(poll_id, data['welcome_image'], welcome_format)
 
         # Сохраняем данные опроса для рассылки
         await state.update_data(
@@ -646,10 +652,99 @@ async def create_poll_description(message: Message, state: FSMContext):
     await state.update_data(poll_description=description, poll_questions=[])
     
     await message.answer(
-        "Теперь добавим вопросы к опросу.",
-        reply_markup=get_poll_creation_kb()
+        "Выберите формат приветственного сообщения:\n\n"
+        "📝 <b>Только текст</b> - классическое текстовое приветствие\n"
+        "🖼️ <b>Только изображение</b> - приветствие в виде картинки без текста\n"
+        "🎨 <b>Изображение + текст</b> - изображение с текстовой подписью\n",
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="📝 Только текст")],
+                [KeyboardButton(text="🖼️ Только изображение")],
+                [KeyboardButton(text="🎨 Изображение + текст")],
+                [KeyboardButton(text="🔙 Вернуться в главное меню")]
+            ],
+            resize_keyboard=True
+        )
     )
+    await state.set_state(PollStates.adding_welcome_image)
+
+@admin_router.message(PollStates.adding_welcome_image, F.photo)
+async def add_welcome_image(message: Message, state: FSMContext):
+    """Обработка приветственного изображения"""
+    data = await state.get_data()
+    welcome_format = data.get('welcome_format', 'text')
+    
+    photo = message.photo[-1]  # Берем лучшее качество
+    file_id = photo.file_id
+    
+    await state.update_data(welcome_image=file_id)
+    
+    if welcome_format == 'image_with_text':
+        await message.answer(
+            "✅ Изображение добавлено!\n\n"
+            "Приветственный текст будет показан как подпись к изображению.\n\n"
+            "Теперь добавим вопросы к опросу.",
+            reply_markup=get_poll_creation_kb()
+        )
+    else:
+        await message.answer(
+            "✅ Приветственное изображение добавлено!\n\n"
+            "Теперь добавим вопросы к опросу.",
+            reply_markup=get_poll_creation_kb()
+        )
+    
     await state.set_state(PollStates.adding_questions)
+
+@admin_router.message(PollStates.adding_welcome_image)
+async def handle_welcome_format_choice(message: Message, state: FSMContext):
+    """Обработка выбора формата приветствия"""
+    if message.text == "🔙 Вернуться в главное меню":
+        await state.clear()
+        await message.answer("Операция отменена.", reply_markup=get_admin_menu_kb())
+        return
+    
+    if message.text == "📝 Только текст":
+        # Только текст - пропускаем изображение
+        await state.update_data(welcome_format='text_only')
+        await message.answer(
+            "Выбран формат: только текст\n\n"
+            "Теперь добавим вопросы к опросу.",
+            reply_markup=get_poll_creation_kb()
+        )
+        await state.set_state(PollStates.adding_questions)
+    
+    elif message.text == "🖼️ Только изображение":
+        # Только изображение - запрашиваем его
+        await state.update_data(welcome_format='image_only')
+        await message.answer(
+            "📸 Отправьте приветственное изображение:\n\n"
+            "Изображение будет показано вместо текста при начале опроса.",
+            reply_markup=get_back_to_menu_kb()
+        )
+    
+    elif message.text == "🎨 Изображение + текст":
+        # Изображение с текстом - запрашиваем изображение
+        await state.update_data(welcome_format='image_with_text')
+        await message.answer(
+            "📸 Отправьте приветственное изображение:\n\n"
+            "Текстовое приветствие будет показано как подпись к изображению.",
+            reply_markup=get_back_to_menu_kb()
+        )
+    
+    else:
+        await message.answer(
+            "❌ Пожалуйста, выберите формат из предложенных вариантов",
+            reply_markup=ReplyKeyboardMarkup(
+                keyboard=[
+                    [KeyboardButton(text="📝 Только текст")],
+                    [KeyboardButton(text="🖼️ Только изображение")],
+                    [KeyboardButton(text="🎨 Изображение + текст")],
+                    [KeyboardButton(text="🔙 Вернуться в главное меню")]
+                ],
+                resize_keyboard=True
+            )
+        )
 
 
 @admin_router.message(PollStates.entering_question)
@@ -2516,3 +2611,49 @@ async def export_session_activity_report(message: Message):
             "• Ошибка при создании Excel файла",
             reply_markup=get_admin_menu_kb()
         )
+
+
+# # Обработчики для просмотра контента админом (как обычный пользователь)
+# @admin_router.message(F.text == "🖼️ Просмотр галереи")
+# async def admin_view_gallery(message: Message):
+#     """Просмотр галереи админом как пользователем"""
+#     items = await db.get_all_gallery_items()
+    
+#     if not items:
+#         await message.answer(
+#             "🖼️ Галерея пока пуста.\n"
+#             "Добавьте элементы через 'Управление контентом'.",
+#             reply_markup=get_admin_menu_kb()
+#         )
+#         return
+    
+#     from bot.handlers.content import create_gallery_keyboard
+    
+#     await message.answer(
+#         "🖼️ <b>Галерея пробирок и контейнеров</b>\n\n"
+#         "Выберите интересующий вас элемент:",
+#         parse_mode="HTML",
+#         reply_markup=create_gallery_keyboard(items)
+#     )
+
+# @admin_router.message(F.text == "📄 Просмотр бланков")
+# async def admin_view_blanks(message: Message):
+#     """Просмотр бланков админом как пользователем"""
+#     items = await db.get_all_blank_links()
+    
+#     if not items:
+#         await message.answer(
+#             "📄 Список бланков пока пуст.\n"
+#             "Добавьте бланки через 'Управление контентом'.",
+#             reply_markup=get_admin_menu_kb()
+#         )
+#         return
+    
+#     from bot.handlers.content import create_blanks_keyboard
+    
+#     await message.answer(
+#         "📄 <b>Ссылки на бланки</b>\n\n"
+#         "Выберите нужный бланк для открытия:",
+#         parse_mode="HTML",
+#         reply_markup=create_blanks_keyboard(items)
+#     )
