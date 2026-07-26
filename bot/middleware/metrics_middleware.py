@@ -9,8 +9,13 @@ from aiogram.types import Message, CallbackQuery, TelegramObject
 from datetime import datetime
 
 from src.database.db_init import db
+from src.database.feature_usage import (
+    FeatureUsageTracker,
+    get_main_menu_feature,
+)
 
 logger = logging.getLogger(__name__)
+feature_usage_tracker = FeatureUsageTracker(db.db_path)
 
 
 class MetricsMiddleware(BaseMiddleware):
@@ -39,7 +44,8 @@ class MetricsMiddleware(BaseMiddleware):
         if not user_id:
             return await handler(event, data)
         
-        # Проверяем, что пользователь не админ
+        # Проверяем, что пользователь зарегистрирован и не является админом
+        user = None
         try:
             user = await db.get_user(user_id)
             if user and user.get('role') == 'admin':
@@ -47,7 +53,26 @@ class MetricsMiddleware(BaseMiddleware):
                 return await handler(event, data)
         except Exception as e:
             logger.error(f"[METRICS] Failed to check user role: {e}")
-        
+
+        # Отдельно логируем выбор функций именно из главного меню.
+        # Telegram присылает ReplyKeyboard-кнопки как обычное текстовое сообщение.
+        if user and isinstance(event, Message):
+            feature_key = get_main_menu_feature(event.text)
+            if feature_key:
+                try:
+                    await feature_usage_tracker.log_main_menu_selection(
+                        user_id=user_id,
+                        feature_key=feature_key,
+                        button_text=event.text,
+                    )
+                except Exception as e:
+                    # Ошибка аналитики не должна мешать пользователю работать с ботом.
+                    logger.error(
+                        "[METRICS] Failed to log main menu feature %s: %s",
+                        feature_key,
+                        e,
+                    )
+
         # Отслеживаем активность пользователя
         # ВАЖНО:
         # - track_user_activity: обновляет user_activity (для DAU)
