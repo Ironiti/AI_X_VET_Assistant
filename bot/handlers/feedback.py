@@ -15,6 +15,7 @@ from bot.keyboards import (
 from utils.email_sender import send_callback_email, send_feedback_email
 
 from src.database.db_init import db
+from bot.telegram_html import build_callback_confirmation_html
 
 feedback_router = Router()
 
@@ -229,9 +230,7 @@ async def process_callback_message(message: Message, state: FSMContext):
 
     user_role = user['role'] if user else 'user'
     await message.answer(
-        "✅ Ваша заявка на обратный звонок успешно отправлена!\n\n"
-        f"📞 Телефон: {phone}\n💬 Сообщение: {message.text}\n\n"
-        "Наш специалист свяжется с вами в ближайшее время.",
+        build_callback_confirmation_html(phone, message.text),
         reply_markup=get_menu_by_role(user_role)
     )
     await state.clear()
