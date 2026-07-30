@@ -18,12 +18,14 @@ def test_callback_confirmation_escapes_all_dynamic_values():
     confirmation = build_callback_confirmation_html(
         "+375 <29>",
         "Результат <=10*3 КОЕ/мл, <b>не тег</b> & повторить посев",
+        "анализ <мочи>.pdf",
     )
 
     assert "📞 Телефон: +375 &lt;29&gt;" in confirmation
     assert "Результат &lt;=10*3 КОЕ/мл" in confirmation
     assert "&lt;b&gt;не тег&lt;/b&gt;" in confirmation
     assert "&amp; повторить посев" in confirmation
+    assert "📎 Вложение: анализ &lt;мочи&gt;.pdf" in confirmation
     assert "<=10*3" not in confirmation
     assert "<b>" not in confirmation
 
