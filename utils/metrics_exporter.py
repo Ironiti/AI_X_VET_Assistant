@@ -293,8 +293,6 @@ class MetricsExporter:
         
         # Получаем данные
         metrics = await self.db.get_comprehensive_metrics(days)
-        binary_feedback = await self.db.get_binary_feedback_metrics(days)
-        
         if not metrics:
             worksheet.write(row, 0, 'Нет данных за указанный период', formats['metric_label'])
             return
@@ -364,97 +362,8 @@ class MetricsExporter:
         worksheet.write(row, 3, interpretation, formats['cell_data'])
         row += 1
         
-        # Оценки пользователей (бинарная система)
-        # Процент положительных оценок (Satisfaction Rate)
-        satisfaction_rate = binary_feedback.get('satisfaction_rate', 0)
-        worksheet.write(row, 0, '👍 Процент положительных оценок', formats['metric_label'])
-        
-        # Создаем формат с цветом в зависимости от значения
-        satisfaction_format = workbook.add_format({
-            'bold': True,
-            'font_size': 14,
-            'font_color': '#10B981' if satisfaction_rate >= 80 else '#F59E0B' if satisfaction_rate >= 60 else '#EF4444',
-            'bg_color': '#ECFDF5' if satisfaction_rate >= 80 else '#FFFBEB' if satisfaction_rate >= 60 else '#FEF2F2',
-            'align': 'right',
-            'valign': 'vcenter',
-            'border': 2,
-            'border_color': '#10B981' if satisfaction_rate >= 80 else '#F59E0B' if satisfaction_rate >= 60 else '#EF4444'
-        })
-        
-        positive_count = binary_feedback.get('positive_count', 0)
-        total_ratings = binary_feedback.get('total_ratings', 0)
-        
-        worksheet.write(row, 1, f'{satisfaction_rate:.1f}%', satisfaction_format)
-        worksheet.write(row, 2, f'{positive_count}/{total_ratings} оценок', formats['metric_value'])
-        # Интерпретация
-        if satisfaction_rate >= 80:
-            interpretation = '🟢 ≥ 80% — высокая удовлетворенность (норма: ≥80%)'
-        elif satisfaction_rate >= 60:
-            interpretation = '🟡 60-80% — требует внимания (норма: ≥80%)'
-        else:
-            interpretation = '🔴 < 60% — низкая удовлетворенность (норма: ≥80%)'
-        worksheet.write(row, 3, interpretation, formats['cell_data'])
+        # Оценки пользователей и response rate не выводятся в ежемесячном отчете.
         row += 1
-        
-        # Процент отрицательных оценок
-        dissatisfaction_rate = binary_feedback.get('dissatisfaction_rate', 0)
-        negative_count = binary_feedback.get('negative_count', 0)
-        
-        worksheet.write(row, 0, '👎 Процент отрицательных оценок', formats['metric_label'])
-        
-        dissatisfaction_format = workbook.add_format({
-            'bold': True,
-            'font_color': '#10B981' if dissatisfaction_rate < 10 else '#F59E0B' if dissatisfaction_rate < 20 else '#EF4444',
-            'bg_color': '#D1FAE5' if dissatisfaction_rate < 10 else '#FEF3C7' if dissatisfaction_rate < 20 else '#FEE2E2',
-            'align': 'right',
-            'valign': 'vcenter',
-            'border': 1
-        })
-        
-        worksheet.write(row, 1, f'{dissatisfaction_rate:.1f}%', dissatisfaction_format)
-        worksheet.write(row, 2, f'{negative_count}/{total_ratings} оценок', formats['metric_value'])
-        # Интерпретация
-        if dissatisfaction_rate < 10:
-            interpretation = '🟢 < 10% — отличный показатель (норма: <10%)'
-        elif dissatisfaction_rate < 20:
-            interpretation = '🟡 10-20% — требует улучшений (норма: <10%)'
-        else:
-            interpretation = '🔴 ≥ 20% — критический уровень недовольства (норма: <10%)'
-        worksheet.write(row, 3, interpretation, formats['cell_data'])
-        row += 1
-        
-        # Общее количество оценок
-        worksheet.write(row, 0, '📊 Всего получено оценок', formats['metric_label'])
-        worksheet.write(row, 1, total_ratings, formats['metric_value'])
-        worksheet.write(row, 2, 'оценок за период', formats['cell_data'])
-        row += 1
-        
-        # Коэффициент отклика (Response Rate)
-        response_rate = binary_feedback.get('response_rate', 0)
-        total_interactions = binary_feedback.get('total_interactions', 0)
-        
-        worksheet.write(row, 0, '📈 Коэффициент отклика', formats['metric_label'])
-        
-        response_rate_format = workbook.add_format({
-            'bold': True,
-            'font_color': '#10B981' if response_rate >= 20 else '#F59E0B' if response_rate >= 10 else '#EF4444',
-            'bg_color': '#D1FAE5' if response_rate >= 20 else '#FEF3C7' if response_rate >= 10 else '#FEE2E2',
-            'align': 'right',
-            'valign': 'vcenter',
-            'border': 1
-        })
-        
-        worksheet.write(row, 1, f'{response_rate:.1f}%', response_rate_format)
-        worksheet.write(row, 2, f'{total_ratings}/{total_interactions} взаимодействий', formats['metric_value'])
-        # Интерпретация
-        if response_rate >= 20:
-            interpretation = '🟢 ≥ 20% — высокая вовлеченность (норма: ≥20%)'
-        elif response_rate >= 10:
-            interpretation = '🟡 10-20% — средняя вовлеченность (норма: ≥20%)'
-        else:
-            interpretation = '🔴 < 10% — низкая вовлеченность (норма: ≥20%)'
-        worksheet.write(row, 3, interpretation, formats['cell_data'])
-        row += 2
         
         # ===== КЛИЕНТСКАЯ АКТИВНОСТЬ =====
         worksheet.merge_range(row, 0, row, 3,

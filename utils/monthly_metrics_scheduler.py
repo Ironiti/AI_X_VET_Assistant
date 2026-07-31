@@ -9,6 +9,7 @@ import os
 
 from utils.metrics_exporter import MetricsExporter
 from utils.email_sender import send_monthly_metrics_email
+from utils.monthly_metrics_config import merge_monthly_metrics_recipients
 from src.database.db_init import db
 
 logging.basicConfig(level=logging.INFO)
@@ -29,7 +30,9 @@ class MonthlyMetricsScheduler:
     def __init__(self):
         self.is_running = False
         self.task = None
-        self.metrics_email = os.getenv('METRICS_EMAIL') or os.getenv('EMAIL_TO')
+        self.metrics_email = merge_monthly_metrics_recipients(
+            os.getenv('METRICS_EMAIL') or os.getenv('EMAIL_TO')
+        )
         
     async def check_and_send_metrics(self):
         """
@@ -41,13 +44,14 @@ class MonthlyMetricsScheduler:
             current_day = now.day
             current_month = now.month
             current_year = now.year
-            
-            # Определяем последний день текущего месяца
+
+            # Отчет отправляется в 23:55 последнего дня месяца.
             last_day_of_month = monthrange(current_year, current_month)[1]
-            
-            # Проверяем, сегодня ли последний день месяца
             if current_day == last_day_of_month:
-                logger.info(f"[MONTHLY METRICS] Today is the last day of month: {current_day}/{current_month}/{current_year}")
+                logger.info(
+                    "[MONTHLY METRICS] Today is the last day of month: "
+                    f"{current_day}/{current_month}/{current_year}"
+                )
                 
                 # Вычисляем количество дней для отчета (весь месяц)
                 days_in_month = last_day_of_month
@@ -84,7 +88,10 @@ class MonthlyMetricsScheduler:
                 return True
             else:
                 days_until_end = last_day_of_month - current_day
-                logger.debug(f"[MONTHLY METRICS] Not the last day yet. {days_until_end} days until month end")
+                logger.debug(
+                    f"[MONTHLY METRICS] Not the last day yet. "
+                    f"{days_until_end} days until month end"
+                )
                 return False
                 
         except Exception as e:
@@ -95,7 +102,7 @@ class MonthlyMetricsScheduler:
     
     async def run_daily_check(self):
         """
-        Запускает ежедневную проверку в 23:55 (за 5 минут до полуночи последнего дня)
+        Запускает ежедневную проверку в 23:55.
         """
         logger.info("[MONTHLY METRICS SCHEDULER] Starting daily check loop...")
         
@@ -103,11 +110,11 @@ class MonthlyMetricsScheduler:
             try:
                 now = datetime.now()
                 
-                # Определяем время следующей проверки (сегодня в 23:55 или завтра в 23:55)
+                # Следующая проверка — в 23:55 по локальному времени сервера.
                 next_check_time = now.replace(hour=23, minute=55, second=0, microsecond=0)
                 
                 if now >= next_check_time:
-                    # Если уже прошло 23:55 сегодня, планируем на завтра
+                    # Если 23:55 уже прошло, планируем на завтра.
                     next_check_time += timedelta(days=1)
                 
                 # Вычисляем время ожидания до следующей проверки
