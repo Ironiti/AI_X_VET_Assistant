@@ -20,6 +20,7 @@ MONTH_NAMES_RU = {
     5: "Май", 6: "Июнь", 7: "Июль", 8: "Август",
     9: "Сентябрь", 10: "Октябрь", 11: "Ноябрь", 12: "Декабрь"
 }
+DEFAULT_METRICS_SOURCE_NAME = "X-LAB — Telegram"
 
 
 class MonthlyMetricsScheduler:
@@ -32,6 +33,9 @@ class MonthlyMetricsScheduler:
         self.task = None
         self.metrics_email = merge_monthly_metrics_recipients(
             os.getenv('METRICS_EMAIL') or os.getenv('EMAIL_TO')
+        )
+        self.metrics_source_name = os.getenv(
+            'METRICS_SOURCE_NAME', DEFAULT_METRICS_SOURCE_NAME
         )
         
     async def check_and_send_metrics(self):
@@ -76,7 +80,8 @@ class MonthlyMetricsScheduler:
                 email_sent = await send_monthly_metrics_email(
                     excel_data=excel_data,
                     month_name=month_name,
-                    metrics_recipient=self.metrics_email
+                    metrics_recipient=self.metrics_email,
+                    source_name=self.metrics_source_name,
                 )
                 
                 if not email_sent:
@@ -202,7 +207,8 @@ class MonthlyMetricsScheduler:
             email_sent = await send_monthly_metrics_email(
                 excel_data=excel_data,
                 month_name=month_name,
-                metrics_recipient=self.metrics_email
+                metrics_recipient=self.metrics_email,
+                source_name=self.metrics_source_name,
             )
             
             if email_sent:

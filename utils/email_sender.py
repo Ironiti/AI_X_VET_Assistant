@@ -5,10 +5,17 @@ from email.mime.base import MIMEBase
 from email import encoders
 from datetime import datetime
 import logging
+import re
 from config import EMAIL_HOST, EMAIL_PORT, EMAIL_LOGIN, EMAIL_PASSWORD, EMAIL_TO
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def _report_source_parts(source_name: str, default_source: str) -> tuple[str, str]:
+    normalized = " ".join((source_name or default_source).split()) or default_source
+    slug = re.sub(r"[^a-z0-9]+", "_", normalized.casefold()).strip("_") or "ai_vet"
+    return normalized, slug
 
 async def send_feedback_email(user_data: dict, feedback_type: str, message: str):
     """Отправка email о предложениях и жалобах"""
@@ -225,7 +232,12 @@ async def send_callback_email(user_data: dict, phone: str, message: str):
         logger.error(f"Ошибка при отправке email: {e}", exc_info=True)
         return False
 
-async def send_monthly_metrics_email(excel_data: bytes, month_name: str, metrics_recipient: str = None):
+async def send_monthly_metrics_email(
+    excel_data: bytes,
+    month_name: str,
+    metrics_recipient: str = None,
+    source_name: str = "X-LAB — Telegram",
+):
     """
     Отправка ежемесячного отчета по метрикам на email
     
@@ -237,8 +249,11 @@ async def send_monthly_metrics_email(excel_data: bytes, month_name: str, metrics
     try:
         recipient = metrics_recipient or EMAIL_TO
         
+        report_source, source_slug = _report_source_parts(
+            source_name, "X-LAB — Telegram"
+        )
         msg = MIMEMultipart('mixed')
-        msg['Subject'] = f'Ежемесячный отчет по метрикам X-LAB - {month_name}'
+        msg['Subject'] = f'Ежемесячный отчет по метрикам — {report_source} — {month_name}'
         msg['From'] = EMAIL_LOGIN
         msg['To'] = recipient
         msg['Reply-To'] = EMAIL_LOGIN
@@ -326,7 +341,7 @@ async def send_monthly_metrics_email(excel_data: bytes, month_name: str, metrics
         attachment.set_payload(excel_data)
         encoders.encode_base64(attachment)
         
-        filename = f"metrics_report_{datetime.now().strftime('%Y_%m')}.xlsx"
+        filename = f"metrics_report_{source_slug}_{datetime.now().strftime('%Y_%m')}.xlsx"
         attachment.add_header('Content-Disposition', f'attachment; filename="{filename}"')
         msg.attach(attachment)
         
