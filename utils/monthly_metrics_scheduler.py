@@ -20,7 +20,7 @@ MONTH_NAMES_RU = {
     5: "Май", 6: "Июнь", 7: "Июль", 8: "Август",
     9: "Сентябрь", 10: "Октябрь", 11: "Ноябрь", 12: "Декабрь"
 }
-DEFAULT_METRICS_SOURCE_NAME = "X-LAB — Telegram"
+DEFAULT_METRICS_SOURCE_NAME = "Telegram"
 
 
 class MonthlyMetricsScheduler:
@@ -79,9 +79,8 @@ class MonthlyMetricsScheduler:
                 logger.info(f"[MONTHLY METRICS] Sending report to {self.metrics_email}...")
                 email_sent = await send_monthly_metrics_email(
                     excel_data=excel_data,
-                    month_name=month_name,
+                    month_name=f"{month_name} [{self.metrics_source_name}]",
                     metrics_recipient=self.metrics_email,
-                    source_name=self.metrics_source_name,
                 )
                 
                 if not email_sent:
@@ -206,9 +205,8 @@ class MonthlyMetricsScheduler:
             # Отправляем на email
             email_sent = await send_monthly_metrics_email(
                 excel_data=excel_data,
-                month_name=month_name,
+                month_name=f"{month_name} [{self.metrics_source_name}]",
                 metrics_recipient=self.metrics_email,
-                source_name=self.metrics_source_name,
             )
             
             if email_sent:
