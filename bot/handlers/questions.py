@@ -22,6 +22,7 @@ from bot.handlers.ultimate_classifier import ultimate_classifier
 from bot.handlers.content import create_gallery_keyboard, create_blanks_keyboard
 from bot.handlers.query_processing.query_preprocessing import expand_query_with_abbreviations
 from bot.handlers.query_processing.animal_filter import animal_filter
+from bot.telegram_html import build_callback_confirmation_html
 
 from src.database.db_init import db
 from src.data_vectorization import DataProcessor
@@ -51,6 +52,7 @@ from bot.handlers.score_test import (
     smart_test_search
 )
 from bot.keyboards import (
+    PREANALYTICS_QUESTION_BUTTON_ALIASES,
     get_menu_by_role,
     get_dialog_kb,
     get_back_to_menu_kb,
@@ -786,7 +788,7 @@ async def handle_back_to_menu(message: Message, state: FSMContext):
     farewell = get_time_based_farewell(user_name)
     await message.answer(farewell, reply_markup=get_menu_by_role(role))
 
-@questions_router.message(F.text == "🔬 Задать вопрос")
+@questions_router.message(F.text.in_(PREANALYTICS_QUESTION_BUTTON_ALIASES))
 async def start_question(message: Message, state: FSMContext):
     """Начало диалога с ассистентом"""
     user_id = message.from_user.id
@@ -2033,9 +2035,7 @@ async def process_callback_message(message: Message, state: FSMContext):
     # Обычный flow - если не нужно возвращаться в диалог
     user_role = user['role'] if user else 'user'
     await message.answer(
-        "✅ Ваша заявка на обратный звонок успешно отправлена!\n\n"
-        f"📞 Телефон: {phone}\n💬 Сообщение: {message.text}\n\n"
-        "Наш специалист свяжется с вами в ближайшее время.",
+        build_callback_confirmation_html(phone, message.text),
         reply_markup=get_dialog_kb()
     )
     await state.set_state(QuestionStates.waiting_for_search_type)

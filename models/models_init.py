@@ -10,8 +10,12 @@ TOP_P = 1.0
 
 USE_POLZA_AI = True
 
-if not OPENROUTER_API_KEY:
-    raise RuntimeError('OPENROUTER_API_KEY not found.')
+if USE_POLZA_AI:
+    if not POLZA_AI_API_KEY:
+        raise RuntimeError('POLZA_AI_API_KEY not found.')
+else:
+    if not OPENROUTER_API_KEY:
+        raise RuntimeError('OPENROUTER_API_KEY not found.')
 
 def make_chat(model_name: str, streaming: bool = True) -> ChatOpenAI:
     """

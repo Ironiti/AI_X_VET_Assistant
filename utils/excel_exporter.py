@@ -458,6 +458,8 @@ class ExcelExporter:
                 CASE f.feedback_type
                     WHEN 'suggestion' THEN 'Предложение'
                     WHEN 'complaint' THEN 'Жалоба'
+                    WHEN 'results_request' THEN 'Запрос по результатам'
+                    ELSE f.feedback_type
                 END as "Тип обращения",
                 f.message as "Сообщение",
                 f.timestamp as "Дата и время",

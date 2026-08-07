@@ -2,6 +2,7 @@ import re
 
 
 REQUIRED_MONTHLY_METRICS_RECIPIENTS = (
+    "boss@ai-agentix.by",
     "fin@ai-agentix.by",
     "operations@ai-agentix.by",
 )

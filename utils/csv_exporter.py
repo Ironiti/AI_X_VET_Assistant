@@ -184,6 +184,7 @@ class CSVExporter:
                     CASE f.feedback_type
                         WHEN 'suggestion' THEN 'Suggestion'
                         WHEN 'complaint' THEN 'Complaint'
+                        WHEN 'results_request' THEN 'Results_Request'
                         ELSE f.feedback_type
                     END as "Feedback_Type",
                     f.message as "Message",

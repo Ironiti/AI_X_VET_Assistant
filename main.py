@@ -4,6 +4,7 @@ from datetime import datetime
 from bot.handlers import bot, dp
 from src.database.db_init import db
 from utils.monthly_metrics_scheduler import monthly_scheduler
+from utils.heartbeat import heartbeat_loop
 
 # Настройка логирования
 logging.basicConfig(
@@ -140,6 +141,13 @@ async def main():
         running_tasks.append(asyncio.create_task(periodic_session_cleanup()))
         running_tasks.append(asyncio.create_task(periodic_metrics_update()))
         running_tasks.append(asyncio.create_task(periodic_cache_cleanup()))
+        running_tasks.append(asyncio.create_task(
+            heartbeat_loop(
+                "Telegram X-Lab",
+                "xlab.json",
+                stop_event=shutdown_event,
+            )
+        ))
         
         logger.info("[INFO] Starting bot polling...")
         

@@ -1349,6 +1349,18 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_user_activity_date_user
                 ON user_activity(activity_date, user_id)
             ''')
+
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS guest_users (
+                    user_id INTEGER PRIMARY KEY,
+                    platform TEXT DEFAULT 'telegram',
+                    first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    request_count INTEGER DEFAULT 0,
+                    last_request_text TEXT,
+                    converted_at TIMESTAMP
+                )
+            ''')
             
             # Индекс для быстрой фильтрации по роли (админ/не админ)
             await db.execute('''
@@ -1503,6 +1515,88 @@ class Database:
                 return True
             except aiosqlite.IntegrityError:
                 return False
+
+    async def ensure_guest_users_table(self):
+        """Создает таблицу first-touch гостей."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS guest_users (
+                    user_id INTEGER PRIMARY KEY,
+                    platform TEXT DEFAULT 'telegram',
+                    first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    request_count INTEGER DEFAULT 0,
+                    last_request_text TEXT,
+                    converted_at TIMESTAMP
+                )
+            ''')
+            await db.commit()
+
+    async def touch_guest_user(self, user_id: int, platform: str = 'telegram') -> bool:
+        """Сохраняет ID пользователя при первом гостевом обращении."""
+        try:
+            await self.ensure_guest_users_table()
+            async with aiosqlite.connect(self.db_path) as db:
+                now = datetime.now()
+                await db.execute('''
+                    INSERT INTO guest_users (user_id, platform, first_seen_at, last_seen_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        platform = excluded.platform,
+                        last_seen_at = excluded.last_seen_at
+                ''', (user_id, platform, now, now))
+                await db.commit()
+            return True
+        except Exception as e:
+            print(f"[GUEST] Failed to touch guest user {user_id}: {e}")
+            return False
+
+    async def can_guest_make_request(self, user_id: int) -> bool:
+        """Проверяет лимит гостя: один ограниченный запрос."""
+        await self.ensure_guest_users_table()
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                'SELECT request_count FROM guest_users WHERE user_id = ?',
+                (user_id,)
+            )
+            row = await cursor.fetchone()
+            return not row or int(row[0] or 0) < 1
+
+    async def mark_guest_request_used(self, user_id: int, request_text: str = None) -> bool:
+        """Фиксирует использованный гостевой запрос."""
+        try:
+            await self.ensure_guest_users_table()
+            async with aiosqlite.connect(self.db_path) as db:
+                now = datetime.now()
+                await db.execute('''
+                    INSERT INTO guest_users
+                        (user_id, platform, first_seen_at, last_seen_at, request_count, last_request_text)
+                    VALUES (?, 'telegram', ?, ?, 1, ?)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        last_seen_at = excluded.last_seen_at,
+                        request_count = request_count + 1,
+                        last_request_text = excluded.last_request_text
+                ''', (user_id, now, now, (request_text or '')[:500]))
+                await db.commit()
+            return True
+        except Exception as e:
+            print(f"[GUEST] Failed to mark guest request for {user_id}: {e}")
+            return False
+
+    async def mark_guest_converted(self, user_id: int) -> bool:
+        """Отмечает, что гость начал/завершил регистрацию."""
+        try:
+            await self.ensure_guest_users_table()
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute(
+                    'UPDATE guest_users SET converted_at = ?, last_seen_at = ? WHERE user_id = ?',
+                    (datetime.now(), datetime.now(), user_id)
+                )
+                await db.commit()
+            return True
+        except Exception as e:
+            print(f"[GUEST] Failed to mark guest conversion for {user_id}: {e}")
+            return False
     
     async def get_user(self, telegram_id: int):
         """Получает пользователя с кэшированием"""

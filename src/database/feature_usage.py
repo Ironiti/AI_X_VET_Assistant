@@ -6,12 +6,39 @@ from typing import Optional
 import aiosqlite
 
 
+FEATURE_USAGE_COLUMNS = (
+    ("question", "🔬 Вопрос по преаналитике"),
+    ("results_request", "🧪 Запрос по результатам"),
+    ("gallery", "🖼️ Галерея пробирок"),
+    ("blanks", "📄 Скачать бланки"),
+    ("laboratory_contact", "📞 Заказать звонок"),
+    ("feedback", "💬 Жалобы и предложения"),
+    ("stoplist", "📋 Актуальный стоп-лист"),
+)
+
+
 MAIN_MENU_FEATURES = {
     "🔬 Задать вопрос": "question",
+    "🔬 Вопрос по преаналитике": "question",
+    "🔬 Преаналитика": "question",
+    "🧪 Запрос по результатам": "results_request",
+    "🧪 Результаты": "results_request",
     "📋 Стоп-лист": "stoplist",
+    "📋 Актуальный стоп-лист": "stoplist",
     "🖼️ Галерея пробирок": "gallery",
+    "🖼️ Галерея пробирок и контейнеров": "gallery",
+    "🖼 Галерея пробирок и контейнеров": "gallery",
+    "📷 Пробирки": "gallery",
     "📄 Скачать бланки": "blanks",
+    "📄 Ссылки на бланки": "blanks",
+    "📄 Бланки": "blanks",
     "📞 Связь с лабораторией": "laboratory_contact",
+    "📞 Заказать звонок": "laboratory_contact",
+    "💬 Жалобы и предложения": "feedback",
+    "💬 Обратная связь": "feedback",
+    "💡 Предложение/жалоба": "feedback",
+    "💡 Предложение": "feedback",
+    "⚠️ Жалоба": "feedback",
 }
 
 
@@ -139,3 +166,47 @@ class FeatureUsageTracker:
                 round(row["usage_count"] * 100 / total, 2) if total else 0.0
             )
         return rows
+
+    async def get_daily(self, days: int = 30) -> list[dict]:
+        """Возвращает ежедневные нажатия по всем функциям главного меню."""
+        await self.ensure_schema()
+        period_days = max(int(days), 1)
+        today = datetime.now().date()
+        start_date = today - timedelta(days=period_days - 1)
+        feature_keys = [key for key, _ in FEATURE_USAGE_COLUMNS]
+        daily = {}
+
+        for offset in range(period_days):
+            date_value = start_date + timedelta(days=offset)
+            daily[date_value.isoformat()] = {
+                "date": date_value.isoformat(),
+                **{feature_key: 0 for feature_key in feature_keys},
+                "total_clicks": 0,
+            }
+
+        async with aiosqlite.connect(self.db_path, timeout=10) as connection:
+            connection.row_factory = aiosqlite.Row
+            cursor = await connection.execute(
+                """
+                SELECT DATE(timestamp) AS activity_date,
+                       feature_key,
+                       COUNT(*) AS usage_count
+                FROM feature_usage_events
+                WHERE timestamp >= ?
+                GROUP BY DATE(timestamp), feature_key
+                ORDER BY DATE(timestamp)
+                """,
+                (start_date.isoformat(),),
+            )
+            rows = await cursor.fetchall()
+
+        for row in rows:
+            date_key = row["activity_date"]
+            feature_key = row["feature_key"]
+            if date_key not in daily or feature_key not in feature_keys:
+                continue
+            count = row["usage_count"] or 0
+            daily[date_key][feature_key] += count
+            daily[date_key]["total_clicks"] += count
+
+        return [daily[date_key] for date_key in sorted(daily)]

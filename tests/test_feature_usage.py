@@ -32,6 +32,8 @@ def test_main_menu_button_mapping_is_exact():
         get_main_menu_feature("📞 Связь с лабораторией")
         == "laboratory_contact"
     )
+    assert get_main_menu_feature("💡 Предложение") == "feedback"
+    assert get_main_menu_feature("⚠️ Жалоба") == "feedback"
     assert get_main_menu_feature("произвольный текст") is None
     assert get_main_menu_feature(None) is None
 

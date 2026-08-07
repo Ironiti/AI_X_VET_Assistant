@@ -16,8 +16,17 @@ from datetime import datetime
 import asyncio
 
 from src.database.db_init import db
+from src.database.feature_usage import FEATURE_USAGE_COLUMNS, FeatureUsageTracker
 
 admin_router = Router()
+
+
+def _feedback_type_label(feedback_type: str) -> str:
+    return {
+        'suggestion': '💡 Предложение',
+        'complaint': '⚠️ Жалоба',
+        'results_request': '🧪 Запрос по результатам',
+    }.get(feedback_type, '💬 Обращение')
 
 class ActivationStates(StatesGroup):
     waiting_for_code = State()
@@ -1148,6 +1157,15 @@ async def show_stats(message: Message):
         return
     
     stats = await db.get_statistics()
+    daily_feature_usage = await FeatureUsageTracker(db.db_path).get_daily(days=30)
+    feature_totals = {
+        feature_key: sum(day.get(feature_key, 0) for day in daily_feature_usage)
+        for feature_key, _ in FEATURE_USAGE_COLUMNS
+    }
+    feature_lines = "\n".join(
+        f"• {label}: {feature_totals[feature_key]}"
+        for feature_key, label in FEATURE_USAGE_COLUMNS
+    )
     
     await message.answer(
         f"📊 Статистика системы:\n\n"
@@ -1159,7 +1177,8 @@ async def show_stats(message: Message):
         f"❓ Вопросов: {stats['questions']}\n"
         f"📞 Звонков: {stats['callbacks']}\n"
         f"💡 Предложений: {stats['suggestions']}\n"
-        f"⚠️ Жалоб: {stats['complaints']}",
+        f"⚠️ Жалоб: {stats['complaints']}\n\n"
+        f"Нажатия по функциям за 30 дней:\n{feature_lines}",
         reply_markup=get_admin_menu_kb()
     )
 
@@ -1779,7 +1798,7 @@ async def show_all_requests(message: Message, state: FSMContext):
         text = "📋 Последние обращения:\n\n"
         
         for i, feedback in enumerate(recent_feedback[:5], 1):
-            feedback_type = "💡 Предложение" if feedback.get('feedback_type') == 'suggestion' else "⚠️ Жалоба"
+            feedback_type = _feedback_type_label(feedback.get('feedback_type'))
             status = {
                 'new': '🆕 Новое',
                 'in_progress': '⏳ В работе',
@@ -1845,7 +1864,7 @@ async def view_feedback_detail(message: Message, state: FSMContext):
                 await state.update_data(current_feedback=feedback, current_index=index)
                 
                 # Формируем детальную информацию
-                feedback_type = "💡 Предложение" if feedback.get('feedback_type') == 'suggestion' else "⚠️ Жалоба"
+                feedback_type = _feedback_type_label(feedback.get('feedback_type'))
                 status = {
                     'new': '🆕 Новое',
                     'in_progress': '⏳ В работе',

@@ -1,12 +1,14 @@
 import re
-from aiogram import Router
-from aiogram.types import Message, ReplyKeyboardRemove
+import html
+from aiogram import F, Router
+from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from bot.keyboards import (
     get_user_type_kb, get_department_function_kb, 
-    get_main_menu_kb, get_admin_menu_kb, get_specialization_kb
+    get_main_menu_kb, get_admin_menu_kb, get_specialization_kb,
+    get_guest_registration_decision_kb, get_registration_type_kb
 )
 from bot.handlers.questions import (
     smart_test_search, 
@@ -23,6 +25,8 @@ registration_router = Router()
 
 class RegistrationStates(StatesGroup):
     waiting_for_user_type = State()
+    waiting_for_guest_code = State()
+    waiting_for_guest_registration_decision = State()
     # Для клиентов
     waiting_for_client_code = State()
     waiting_for_client_name = State()
@@ -67,16 +71,18 @@ async def cmd_start(message: Message, state: FSMContext):
             user_exists = await db.user_exists(user_id)
             
             if not user_exists:
-                # Сохраняем для обработки после регистрации
-                await state.update_data(pending_test_code=test_code)
+                await db.touch_guest_user(user_id, platform='telegram')
+                if not await db.can_guest_make_request(user_id):
+                    await send_guest_limit_message(message, state)
+                    return
+
                 await message.answer(
-                    "Для просмотра информации о тестах необходимо пройти регистрацию.\n\n"
-                    f"После регистрации вы автоматически получите информацию о тесте <b>{test_code}</b>.\n\n"
-                    "Выберите, кто вы:",
-                    reply_markup=get_user_type_kb(),
+                    "👤 <b>Гостевой просмотр</b>\n\n"
+                    f"Покажу информацию по тесту <b>{html.escape(test_code)}</b> без регистрации.\n"
+                    "В гостевом режиме доступен один быстрый запрос по коду теста.",
                     parse_mode="HTML"
                 )
-                await state.set_state(RegistrationStates.waiting_for_user_type)
+                await process_test_request(message, state, test_code, user_id, is_guest=True)
                 return
             
             # Пользователь зарегистрирован - показываем тест
@@ -100,13 +106,14 @@ async def cmd_start(message: Message, state: FSMContext):
         print(f"[INFO] User {user_id} starting new registration")
         await message.answer(
             "Добро пожаловать в бот Лаборатории X-LAB VET! 🧪\n\n"
-            "Для начала работы необходимо пройти регистрацию.\n"
-            "Выберите, кто вы:",
+            "Зарегистрированные пользователи получают полный доступ к поиску, материалам и связи с лабораторией.\n\n"
+            "Если вы впервые здесь, можно начать как гость: бот покажет один тест по коду, а затем предложит регистрацию.\n\n"
+            "Выберите удобный вариант:",
             reply_markup=get_user_type_kb()
         )
         await state.set_state(RegistrationStates.waiting_for_user_type)
         
-async def process_test_request(message: Message, state: FSMContext, test_code: str, user_id: int):
+async def process_test_request(message: Message, state: FSMContext, test_code: str, user_id: int, is_guest: bool = False):
     """Обрабатывает запрос теста через deep link."""
     
     loading_msg = await message.answer(f"🔍 Загружаю информацию о тесте <b>{test_code}</b>...", parse_mode="HTML")
@@ -133,6 +140,11 @@ async def process_test_request(message: Message, state: FSMContext, test_code: s
             
             # Отправляем с фото
             await send_test_info_with_photo(message, test_data, response)
+
+            if is_guest:
+                await db.mark_guest_request_used(user_id, test_code)
+                await ask_guest_registration(message, state)
+                return
             
             # Обновляем статистику
             await db.add_search_history(
@@ -166,13 +178,15 @@ async def process_test_request(message: Message, state: FSMContext, test_code: s
             except:
                 pass
             
-            # Записываем неудачную попытку
-            await db.add_search_history(
-                user_id=user_id,
-                search_query=f"Deep link: {test_code}",
-                search_type='code',
-                success=False
-            )
+            if is_guest:
+                await db.mark_guest_request_used(user_id, test_code)
+            else:
+                await db.add_search_history(
+                    user_id=user_id,
+                    search_query=f"Deep link: {test_code}",
+                    search_type='code',
+                    success=False
+                )
             
             await message.answer(
                 f"❌ Тест <b>{test_code}</b> не найден в базе данных.\n\n"
@@ -181,10 +195,12 @@ async def process_test_request(message: Message, state: FSMContext, test_code: s
                 parse_mode="HTML"
             )
             
-            # Показываем главное меню
-            user = await db.get_user(user_id)
-            menu_kb = get_admin_menu_kb() if user['role'] == 'admin' else get_main_menu_kb()
-            await message.answer("Выберите действие:", reply_markup=menu_kb)
+            if is_guest:
+                await ask_guest_registration(message, state)
+            else:
+                user = await db.get_user(user_id)
+                menu_kb = get_admin_menu_kb() if user['role'] == 'admin' else get_main_menu_kb()
+                await message.answer("Выберите действие:", reply_markup=menu_kb)
             
             print(f"[WARNING] Test {test_code} not found via deep link")
             
@@ -204,10 +220,48 @@ async def process_test_request(message: Message, state: FSMContext, test_code: s
             parse_mode="HTML"
         )
         
-        # Показываем главное меню
-        user = await db.get_user(user_id)
-        menu_kb = get_admin_menu_kb() if user['role'] == 'admin' else get_main_menu_kb()
-        await message.answer("Выберите действие:", reply_markup=menu_kb)
+        if is_guest:
+            await ask_guest_registration(message, state)
+        else:
+            user = await db.get_user(user_id)
+            menu_kb = get_admin_menu_kb() if user['role'] == 'admin' else get_main_menu_kb()
+            await message.answer("Выберите действие:", reply_markup=menu_kb)
+
+
+async def ask_guest_registration(message: Message, state: FSMContext):
+    """Предлагает гостю перейти к полной регистрации."""
+    await message.answer(
+        "✨ <b>Хотите открыть полный доступ?</b>\n\n"
+        "После регистрации можно искать тесты без лимита, задавать вопросы ассистенту и обращаться в лабораторию.\n\n"
+        "Зарегистрироваться сейчас?",
+        reply_markup=get_guest_registration_decision_kb(),
+        parse_mode="HTML"
+    )
+    await state.set_state(RegistrationStates.waiting_for_guest_registration_decision)
+
+
+@registration_router.callback_query(F.data == "guest_register_yes")
+async def process_guest_registration_callback(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    await db.mark_guest_converted(user_id)
+    await callback.answer()
+    await callback.message.answer(
+        "Отлично. Выберите, кто вы:",
+        reply_markup=get_registration_type_kb()
+    )
+    await state.set_state(RegistrationStates.waiting_for_user_type)
+
+
+async def send_guest_limit_message(message: Message, state: FSMContext):
+    """Сообщает, что единственный гостевой запрос уже использован."""
+    await message.answer(
+        "👤 <b>Гостевой запрос уже использован</b>\n\n"
+        "Чтобы продолжить поиск и пользоваться всеми функциями X-LAB VET, пройдите короткую регистрацию.\n\n"
+        "Выберите, кто вы:",
+        reply_markup=get_registration_type_kb(),
+        parse_mode="HTML"
+    )
+    await state.set_state(RegistrationStates.waiting_for_user_type)
 
 @registration_router.message(RegistrationStates.waiting_for_user_type)
 async def process_user_type(message: Message, state: FSMContext):
@@ -231,12 +285,58 @@ async def process_user_type(message: Message, state: FSMContext):
             reply_markup=ReplyKeyboardRemove()
         )
         await state.set_state(RegistrationStates.waiting_for_employee_first_name)
+    elif message.text == "👤 Продолжить как гость":
+        await db.touch_guest_user(user_id, platform='telegram')
+        if not await db.can_guest_make_request(user_id):
+            await send_guest_limit_message(message, state)
+            return
+        await message.answer(
+            "👤 <b>Гостевой режим</b>\n\n"
+            "Введите код теста, например <code>AN116</code>.\n"
+            "Я покажу один результат без регистрации, а затем предложу открыть полный доступ.",
+            reply_markup=ReplyKeyboardRemove(),
+            parse_mode="HTML"
+        )
+        await state.set_state(RegistrationStates.waiting_for_guest_code)
     else:
         await message.answer(
             "❌ Пожалуйста, выберите из предложенных вариантов",
             reply_markup=get_user_type_kb()
         )
         return
+
+
+@registration_router.message(RegistrationStates.waiting_for_guest_code)
+async def process_guest_code(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    if not message.text:
+        await message.answer("Пожалуйста, отправьте код теста текстом, например AN116.")
+        return
+    if not await db.can_guest_make_request(user_id):
+        await send_guest_limit_message(message, state)
+        return
+    await process_test_request(message, state, message.text.strip(), user_id, is_guest=True)
+
+
+@registration_router.message(RegistrationStates.waiting_for_guest_registration_decision)
+async def process_guest_registration_decision(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    if message.text == "✅ Да, зарегистрироваться":
+        await db.mark_guest_converted(user_id)
+        await message.answer("Отлично. Выберите, кто вы:", reply_markup=get_registration_type_kb())
+        await state.set_state(RegistrationStates.waiting_for_user_type)
+        return
+    if message.text == "⏳ Позже":
+        await state.clear()
+        await message.answer(
+            "Хорошо, буду ждать вас снова.\n\nКогда захотите продолжить, нажмите /start и пройдите регистрацию.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return
+    await message.answer(
+        "Пожалуйста, выберите один из вариантов ниже.",
+        reply_markup=get_guest_registration_decision_kb()
+    )
 
 # Обработчики для клиентов
 @registration_router.message(RegistrationStates.waiting_for_client_code)

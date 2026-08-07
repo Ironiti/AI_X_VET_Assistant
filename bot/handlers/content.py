@@ -4,7 +4,12 @@ from aiogram.fsm.context import FSMContext
 import html
 
 from src.database.db_init import db
-from bot.keyboards import get_main_menu_kb, get_menu_by_role
+from bot.keyboards import (
+    DOWNLOAD_FORMS_BUTTON_ALIASES,
+    TUBE_GALLERY_BUTTON_ALIASES,
+    get_main_menu_kb,
+    get_menu_by_role,
+)
 
 content_router = Router()
 
@@ -12,7 +17,7 @@ content_router = Router()
 # ГАЛЕРЕЯ ПРОБИРОК - ПОКАЗ ПОЛЬЗОВАТЕЛЯМ
 # ============================================================
 
-@content_router.message(F.text == "🖼️ Галерея пробирок")
+@content_router.message(F.text.in_(TUBE_GALLERY_BUTTON_ALIASES))
 async def show_gallery(message: Message):
     """Показ галереи пользователю"""
     user_id = message.from_user.id
@@ -139,7 +144,7 @@ async def close_gallery_and_photo(callback: CallbackQuery):
 # ССЫЛКИ НА БЛАНКИ - ПОКАЗ ПОЛЬЗОВАТЕЛЯМ
 # ============================================================
 
-@content_router.message(F.text == "📄 Скачать бланки")
+@content_router.message(F.text.in_(DOWNLOAD_FORMS_BUTTON_ALIASES))
 async def show_blanks(message: Message):
     """Показ бланков пользователю"""
     user_id = message.from_user.id

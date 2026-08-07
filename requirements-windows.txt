@@ -24,6 +24,7 @@ colorama
 
 pyarrow==20.0.0
 aiohttp==3.11.18
+aiohttp-socks
 transformers==4.51.3
 asyncio==3.4.3
 aiogram

@@ -5,6 +5,9 @@ import io
 from datetime import datetime, timedelta
 from typing import Optional
 import xlsxwriter
+from xlsxwriter.utility import xl_col_to_name
+
+from src.database.feature_usage import FEATURE_USAGE_COLUMNS, FeatureUsageTracker
 
 
 class MetricsExporter:
@@ -259,12 +262,68 @@ class MetricsExporter:
         # 5. Метрики качества
         await self._create_quality_metrics_sheet(workbook, formats, days)
         
-        # 6. Детальные данные
+        # 6. Использование функций главного меню
+        await self._create_feature_usage_sheet(workbook, formats, days)
+
+        # 7. Детальные данные
         await self._create_detailed_data_sheet(workbook, formats, days)
         
         workbook.close()
         output.seek(0)
         return output.read()
+
+    async def _create_feature_usage_sheet(self, workbook, formats, days):
+        """Создаёт ежедневную таблицу нажатий по функциям главного меню."""
+        worksheet = workbook.add_worksheet('📌 Функции меню')
+        daily_usage = await FeatureUsageTracker(self.db.db_path).get_daily(days=days)
+        feature_keys = [feature_key for feature_key, _ in FEATURE_USAGE_COLUMNS]
+        headers = ['Дата', *[label for _, label in FEATURE_USAGE_COLUMNS], 'Всего']
+
+        worksheet.freeze_panes(1, 1)
+        worksheet.set_column(0, 0, 13)
+        worksheet.set_column(1, len(feature_keys), 25)
+        worksheet.set_column(len(feature_keys) + 1, len(feature_keys) + 1, 12)
+
+        for column, header in enumerate(headers):
+            worksheet.write(0, column, header, formats['table_header'])
+
+        for row, day_data in enumerate(daily_usage, start=1):
+            worksheet.write(row, 0, day_data.get('date', ''), formats['cell_data'])
+            for column, feature_key in enumerate(feature_keys, start=1):
+                worksheet.write(
+                    row,
+                    column,
+                    day_data.get(feature_key, 0) or 0,
+                    formats['cell_number'],
+                )
+            worksheet.write(
+                row,
+                len(feature_keys) + 1,
+                day_data.get('total_clicks', 0) or 0,
+                formats['cell_number'],
+            )
+
+        if daily_usage:
+            worksheet.autofilter(0, 0, len(daily_usage), len(headers) - 1)
+            chart = workbook.add_chart({'type': 'line'})
+            colors = ['#1E3A8A', '#10B981', '#8B5CF6', '#F59E0B', '#EF4444', '#64748B', '#06B6D4']
+            last_excel_row = len(daily_usage) + 1
+            for column, ((_, label), color) in enumerate(zip(FEATURE_USAGE_COLUMNS, colors), start=1):
+                chart.add_series({
+                    'name': label,
+                    'categories': f"='📌 Функции меню'!$A$2:$A${last_excel_row}",
+                    'values': (
+                        f"='📌 Функции меню'!${xl_col_to_name(column)}$2:"
+                        f"${xl_col_to_name(column)}${last_excel_row}"
+                    ),
+                    'line': {'color': color, 'width': 2},
+                })
+            chart.set_title({'name': 'Нажатия по функциям главного меню'})
+            chart.set_x_axis({'name': 'Дата'})
+            chart.set_y_axis({'name': 'Количество нажатий', 'min': 0})
+            chart.set_legend({'position': 'bottom'})
+            chart.set_size({'width': 920, 'height': 430})
+            worksheet.insert_chart(len(daily_usage) + 3, 0, chart)
     
     async def _create_summary_sheet(self, workbook, formats, days):
         """Создает сводный лист - Executive Dashboard"""

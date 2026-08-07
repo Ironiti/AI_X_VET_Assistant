@@ -110,7 +110,7 @@ class QwenEmbeddings(Embeddings):
 
         # Determine remote vs local
         if use_remote is None:
-            self.use_remote = bool(OPENROUTER_API_KEY)
+            self.use_remote = bool(POLZA_AI_API_KEY if USE_POLZA_AI else OPENROUTER_API_KEY)
         else:
             self.use_remote = use_remote
 
@@ -124,7 +124,7 @@ class QwenEmbeddings(Embeddings):
 
         if self.use_remote:
             if not api_key:
-                raise ValueError('DEEPINFRA_API_KEY not set for remote embeddings')
+                raise ValueError('AI API key not set for remote embeddings')
             self.client = OpenAI(
                 api_key=api_key,
                 base_url=api_url

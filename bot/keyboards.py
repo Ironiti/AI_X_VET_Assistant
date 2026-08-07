@@ -1,5 +1,67 @@
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
+
+PREANALYTICS_QUESTION_BUTTON = "🔬 Вопрос по преаналитике"
+RESULTS_REQUEST_BUTTON = "🧪 Запрос по результатам"
+TUBE_GALLERY_BUTTON = "🖼️ Галерея пробирок"
+DOWNLOAD_FORMS_BUTTON = "📄 Скачать бланки"
+CALLBACK_BUTTON = "📞 Заказать звонок"
+FEEDBACK_BUTTON = "💬 Жалобы и предложения"
+CURRENT_STOPLIST_BUTTON = "📋 Актуальный стоп-лист"
+
+PREANALYTICS_QUESTION_BUTTON_ALIASES = (
+    PREANALYTICS_QUESTION_BUTTON,
+    "🔬 Преаналитика",
+    "🔬 Задать вопрос",
+)
+RESULTS_REQUEST_BUTTON_ALIASES = (
+    RESULTS_REQUEST_BUTTON,
+    "🧪 Результаты",
+)
+TUBE_GALLERY_BUTTON_ALIASES = (
+    TUBE_GALLERY_BUTTON,
+    "🖼️ Галерея пробирок и контейнеров",
+    "🖼 Галерея пробирок и контейнеров",
+    "📷 Пробирки",
+)
+DOWNLOAD_FORMS_BUTTON_ALIASES = (
+    DOWNLOAD_FORMS_BUTTON,
+    "📄 Ссылки на бланки",
+    "📄 Бланки",
+)
+CALLBACK_BUTTON_ALIASES = (CALLBACK_BUTTON,)
+FEEDBACK_BUTTON_ALIASES = (
+    FEEDBACK_BUTTON,
+    "💬 Обратная связь",
+    "💡 Предложение/жалоба",
+)
+CURRENT_STOPLIST_BUTTON_ALIASES = (
+    CURRENT_STOPLIST_BUTTON,
+    "📋 Стоп-лист",
+)
+
+SEND_SUBMISSION_BUTTON = "✅ Отправить"
+CLEAR_SUBMISSION_BUTTON = "🗑 Очистить"
+REMOVE_LAST_FILE_BUTTON = "↩️ Удалить файл"
+
+
+def _get_user_actions_keyboard():
+    return [
+        [
+            KeyboardButton(text=PREANALYTICS_QUESTION_BUTTON),
+            KeyboardButton(text=RESULTS_REQUEST_BUTTON),
+        ],
+        [
+            KeyboardButton(text=TUBE_GALLERY_BUTTON),
+            KeyboardButton(text=DOWNLOAD_FORMS_BUTTON),
+        ],
+        [
+            KeyboardButton(text=CALLBACK_BUTTON),
+            KeyboardButton(text=FEEDBACK_BUTTON),
+        ],
+        [KeyboardButton(text=CURRENT_STOPLIST_BUTTON)],
+    ]
+
 def get_back_to_menu_kb():
     """Клавиатура с кнопкой возврата в меню"""
     kb = [
@@ -25,9 +87,27 @@ def get_user_type_kb():
     """Клавиатура выбора типа пользователя"""
     kb = [
         [KeyboardButton(text="👨‍⚕️ Ветеринарный врач клиники-партнера")],
+        [KeyboardButton(text="🔬 Сотрудник X-LAB VET")],
+        [KeyboardButton(text="👤 Продолжить как гость")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
+def get_registration_type_kb():
+    """Клавиатура выбора роли для полной регистрации"""
+    kb = [
+        [KeyboardButton(text="👨‍⚕️ Ветеринарный врач клиники-партнера")],
         [KeyboardButton(text="🔬 Сотрудник X-LAB VET")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
+def get_guest_registration_decision_kb():
+    """Предложение полной регистрации после гостевого запроса"""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Да, зарегистрироваться", callback_data="guest_register_yes")],
+            [InlineKeyboardButton(text="⏳ Позже", url="https://x-lab.vet")]
+        ]
+    )
 
 def get_specialization_kb():
     """Клавиатура выбора специализации для ветеринарных врачей"""
@@ -116,13 +196,7 @@ def get_department_function_kb():
 
 def get_main_menu_kb():
     """Единое меню для всех пользователей (кроме админа)"""
-    kb = [
-        [KeyboardButton(text="🔬 Задать вопрос"), KeyboardButton(text="📋 Стоп-лист")],
-        # [KeyboardButton(text="📚 Часто задаваемые вопросы")],
-        [KeyboardButton(text="🖼️ Галерея пробирок"), KeyboardButton(text="📄 Скачать бланки")],
-        [KeyboardButton(text="📞 Связь с лабораторией")]
-    ]
-    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+    return ReplyKeyboardMarkup(keyboard=_get_user_actions_keyboard(), resize_keyboard=True)
 
 def get_admin_menu_kb():
     """Меню для администраторов с логической группировкой"""
@@ -145,10 +219,7 @@ def get_admin_menu_kb():
         [KeyboardButton(text="🔧 Управление системой")],
         
         # Основные функции
-        [KeyboardButton(text="🔬 Задать вопрос")],
-        [KeyboardButton(text="📋 Стоп-лист")],
-        [KeyboardButton(text="🖼️ Галерея пробирок"), KeyboardButton(text="📄 Скачать бланки")],
-        [KeyboardButton(text="📞 Связь с лабораторией")]
+        *_get_user_actions_keyboard(),
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
@@ -167,6 +238,21 @@ def get_phone_kb():
         [KeyboardButton(text="🔙 Вернуться в главное меню")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
+
+def get_submission_kb():
+    """Клавиатура для подготовки обращения перед отправкой."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=SEND_SUBMISSION_BUTTON)],
+            [
+                KeyboardButton(text=REMOVE_LAST_FILE_BUTTON),
+                KeyboardButton(text=CLEAR_SUBMISSION_BUTTON),
+            ],
+            [KeyboardButton(text="🔙 Вернуться в главное меню")],
+        ],
+        resize_keyboard=True,
+    )
 
 def get_contact_type_kb():
     """Клавиатура выбора типа обращения для связи с лабораторией"""

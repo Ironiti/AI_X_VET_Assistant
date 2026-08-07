@@ -1,13 +1,22 @@
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
 # API
 BOT_API_KEY = os.getenv('BOT_API_KEY')
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
 DEEPINFRA_API_KEY = os.getenv('DEEPINFRA_API_KEY')
 POLZA_AI_API_KEY = os.getenv('POLZA_AI_API_KEY')
+
+# Telegram-only proxy fallback. Keep X-Lab traffic independent from other bots.
+PROXY_URL = os.getenv('PROXY_URL')
+TELEGRAM_RESERVE_PROXY_URL = (
+    os.getenv('TELEGRAM_RESERVE_PROXY_URL')
+    or os.getenv('RESERVE_PROXY_URL')
+)
+TELEGRAM_PROXY_PREFLIGHT_ENABLED = os.getenv('TELEGRAM_PROXY_PREFLIGHT_ENABLED', '1')
+TELEGRAM_PROXY_CHECK_TIMEOUT = float(os.getenv('TELEGRAM_PROXY_CHECK_TIMEOUT', '5'))
 
 # Gmail SMTP config
 EMAIL_HOST = os.getenv('EMAIL_HOST', 'smtp.gmail.com')

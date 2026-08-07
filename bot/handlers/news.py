@@ -8,7 +8,12 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 from src.database.db_init import db
-from bot.keyboards import get_admin_menu_kb, get_main_menu_kb, get_menu_by_role
+from bot.keyboards import (
+    CURRENT_STOPLIST_BUTTON_ALIASES,
+    get_admin_menu_kb,
+    get_main_menu_kb,
+    get_menu_by_role,
+)
 
 news_router = Router()
 
@@ -363,7 +368,7 @@ async def back_from_stoplist_management(message: Message, state: FSMContext):
 # ОБРАБОТЧИКИ ДЛЯ ПОЛЬЗОВАТЕЛЕЙ
 # ============================================================
 
-@news_router.message(F.text == "📋 Стоп-лист")
+@news_router.message(F.text.in_(CURRENT_STOPLIST_BUTTON_ALIASES))
 async def show_stoplist(message: Message):
     """Показ стоп-листа пользователю (и админу в режиме просмотра)"""
     user_id = message.from_user.id
@@ -379,7 +384,7 @@ async def show_stoplist(message: Message):
     
     if not suspended_file and not removed_file:
         await message.answer(
-            "📋 <b>Стоп-лист</b>\n\n"
+            "📋 <b>Актуальный стоп-лист</b>\n\n"
             "Файлы стоп-листа пока не загружены.\n"
             "Обратитесь к администратору.",
             parse_mode="HTML",
@@ -388,7 +393,7 @@ async def show_stoplist(message: Message):
         return
     
     await message.answer(
-        "📋 <b>Стоп-лист</b>\n\n"
+        "📋 <b>Актуальный стоп-лист</b>\n\n"
         "Выберите нужный файл:",
         parse_mode="HTML",
         reply_markup=create_stoplist_keyboard()
@@ -499,7 +504,7 @@ async def back_to_stoplist(callback: CallbackQuery):
         
         # Показываем список снова
         await callback.message.answer(
-            "📋 <b>Стоп-лист</b>\n\n"
+            "📋 <b>Актуальный стоп-лист</b>\n\n"
             "Выберите нужный файл:",
             parse_mode="HTML",
             reply_markup=create_stoplist_keyboard()

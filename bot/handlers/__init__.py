@@ -1,6 +1,7 @@
 from aiogram import Bot, Dispatcher
 from aiogram.enums.parse_mode import ParseMode
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from bot.handlers.poll_sender import poll_callback_router
@@ -19,14 +20,31 @@ from bot.handlers.error_callbacks import error_callbacks_router  # ✅ НОВО�
 from bot.middleware.metrics_middleware import MetricsMiddleware
 from bot.middleware.state_recovery_middleware import StateRecoveryMiddleware
 from bot.middleware.error_middleware import ErrorHandlingMiddleware  # ✅ НОВОЕ: Обработка ошибок
+from bot.telegram_proxy import select_telegram_proxy
 # from .questions import questions_router, questions_callbacks_router
-from config import BOT_API_KEY
+from config import (
+    BOT_API_KEY,
+    PROXY_URL,
+    TELEGRAM_PROXY_CHECK_TIMEOUT,
+    TELEGRAM_PROXY_PREFLIGHT_ENABLED,
+    TELEGRAM_RESERVE_PROXY_URL,
+)
 
 if not BOT_API_KEY:
     raise RuntimeError('BOT_API_KEY not found.')
 
+selected_proxy = select_telegram_proxy(
+    bot_token=BOT_API_KEY,
+    primary_proxy_url=PROXY_URL,
+    reserve_proxy_url=TELEGRAM_RESERVE_PROXY_URL,
+    preflight_enabled=TELEGRAM_PROXY_PREFLIGHT_ENABLED,
+    timeout=TELEGRAM_PROXY_CHECK_TIMEOUT,
+)
+session = AiohttpSession(proxy=selected_proxy) if selected_proxy else AiohttpSession()
+
 bot = Bot(
     token=BOT_API_KEY,
+    session=session,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
 )
 dp = Dispatcher(storage=MemoryStorage())
