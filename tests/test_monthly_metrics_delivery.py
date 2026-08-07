@@ -11,13 +11,13 @@ class MonthlyMetricsDeliveryTests(unittest.TestCase):
 
         self.assertEqual(
             recipients,
-            "existing@example.by, FIN@ai-agentix.by, operations@ai-agentix.by",
+            "existing@example.by, FIN@ai-agentix.by, boss@ai-agentix.by, operations@ai-agentix.by",
         )
 
     def test_empty_configuration_still_contains_required_recipients(self):
         self.assertEqual(
             merge_monthly_metrics_recipients(None),
-            "fin@ai-agentix.by, operations@ai-agentix.by",
+            "boss@ai-agentix.by, fin@ai-agentix.by, operations@ai-agentix.by",
         )
 
 
