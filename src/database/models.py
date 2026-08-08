@@ -1039,6 +1039,15 @@ class Database:
                 )
             ''')
         
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS user_menu_versions (
+                    user_id INTEGER PRIMARY KEY,
+                    menu_version TEXT NOT NULL,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(telegram_id)
+                )
+            ''')
+
             # Таблица для жалоб и предложений с поддержкой медиа
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS feedback (
@@ -1662,6 +1671,31 @@ class Database:
         user = await self.get_user(telegram_id)
         return user['role'] if user else None
     
+    async def get_user_menu_version(self, telegram_id: int) -> Optional[str]:
+        """Return the last reply-menu version delivered to a user."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                'SELECT menu_version FROM user_menu_versions WHERE user_id = ?',
+                (telegram_id,),
+            )
+            row = await cursor.fetchone()
+            return row[0] if row else None
+
+    async def set_user_menu_version(self, telegram_id: int, menu_version: str) -> None:
+        """Persist the reply-menu version after Telegram accepted the message."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                '''
+                INSERT INTO user_menu_versions (user_id, menu_version, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    menu_version = excluded.menu_version,
+                    updated_at = CURRENT_TIMESTAMP
+                ''',
+                (telegram_id, menu_version),
+            )
+            await db.commit()
+
     async def update_user_role(self, telegram_id: int, role: str):
         """Обновление роли пользователя (только для админа)"""
         async with aiosqlite.connect(self.db_path) as db:

@@ -25,3 +25,6 @@ EMAIL_LOGIN = os.getenv('EMAIL_LOGIN')
 EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD')
 EMAIL_TO = os.getenv('EMAIL_TO')
 
+# Increase this value whenever the Telegram reply-menu structure changes.
+MENU_VERSION = os.getenv('MENU_VERSION', '2026-08-08.1').strip() or '2026-08-08.1'
+
