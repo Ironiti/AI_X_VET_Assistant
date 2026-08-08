@@ -2,7 +2,6 @@ from aiogram import Bot, Dispatcher
 from aiogram.enums.parse_mode import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
-from aiogram.fsm.storage.memory import MemoryStorage
 
 from bot.handlers.poll_sender import poll_callback_router
 from bot.handlers.registration import registration_router
@@ -21,10 +20,12 @@ from bot.middleware.metrics_middleware import MetricsMiddleware
 from bot.middleware.state_recovery_middleware import StateRecoveryMiddleware
 from bot.middleware.error_middleware import ErrorHandlingMiddleware  # ✅ НОВОЕ: Обработка ошибок
 from bot.middleware.menu_refresh_middleware import MenuRefreshMiddleware
+from bot.storage import SQLiteStorage
 from bot.telegram_proxy import select_telegram_proxy
 # from .questions import questions_router, questions_callbacks_router
 from config import (
     BOT_API_KEY,
+    FSM_STORAGE_PATH,
     PROXY_URL,
     TELEGRAM_PROXY_CHECK_TIMEOUT,
     TELEGRAM_PROXY_PREFLIGHT_ENABLED,
@@ -48,16 +49,16 @@ bot = Bot(
     session=session,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
 )
-dp = Dispatcher(storage=MemoryStorage())
+dp = Dispatcher(storage=SQLiteStorage(FSM_STORAGE_PATH))
 
 # Регистрация middleware (порядок важен!)
 # 1. ErrorHandlingMiddleware - глобальная обработка ошибок (первым!)
 dp.message.middleware(ErrorHandlingMiddleware())
 dp.callback_query.middleware(ErrorHandlingMiddleware())
 
-# 2. StateRecoveryMiddleware - восстанавливает состояние после перезагрузки
-dp.message.middleware(StateRecoveryMiddleware())
-dp.callback_query.middleware(StateRecoveryMiddleware())
+# Silently routes the first text after a legacy in-memory restart.
+# Outer middleware runs before state filters select a handler.
+dp.message.outer_middleware(StateRecoveryMiddleware())
 
 # 3. MetricsMiddleware - записывает метрики
 dp.message.middleware(MetricsMiddleware())

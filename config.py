@@ -28,3 +28,5 @@ EMAIL_TO = os.getenv('EMAIL_TO')
 # Increase this value whenever the Telegram reply-menu structure changes.
 MENU_VERSION = os.getenv('MENU_VERSION', '2026-08-08.1').strip() or '2026-08-08.1'
 
+# Persistent aiogram dialog state. Keeps active forms and searches after restart.
+FSM_STORAGE_PATH = os.getenv('FSM_STORAGE_PATH', 'data/fsm_storage.db').strip() or 'data/fsm_storage.db'

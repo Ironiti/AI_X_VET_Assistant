@@ -1,26 +1,22 @@
-"""
-Middleware для автоматического восстановления состояния пользователя после перезагрузки бота
-"""
+"""Silent fallback for users whose legacy in-memory state was lost."""
 import logging
 from typing import Callable, Dict, Any, Awaitable
 from aiogram import BaseMiddleware
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.fsm.state import State
+from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 
 logger = logging.getLogger(__name__)
 
 
 class StateRecoveryMiddleware(BaseMiddleware):
-    """
-    Middleware для восстановления состояния диалога после перезагрузки бота.
+    """Route legacy post-restart text into search without a technical prompt."""
     
-    Если пользователь находился в диалоге с ассистентом до перезагрузки,
-    показывает информационное сообщение с кнопкой для продолжения поиска.
-    """
-    
-    def __init__(self):
+    def __init__(self, database=None, recovery_state=None):
         super().__init__()
-        self.recovered_users = set()  # Кеш уже восстановленных пользователей
+        self.database = database
+        self.recovery_state = recovery_state
+        self.recovered_users = set()
     
     async def __call__(
         self,
@@ -36,12 +32,26 @@ class StateRecoveryMiddleware(BaseMiddleware):
             event: Событие (Message или CallbackQuery)
             data: Дополнительные данные
         """
-        from bot.handlers.questions import QuestionStates
-        from src.database.db_init import db
-        from bot.handlers.sending_style import get_user_first_name
+        if self.recovery_state is None:
+            from bot.handlers.questions import QuestionStates
+            recovery_state = QuestionStates.waiting_for_search_type
+        else:
+            recovery_state = self.recovery_state
+
+        if self.database is None:
+            from src.database.db_init import db
+            database = db
+        else:
+            database = self.database
         
+        if event.from_user is None:
+            return await handler(event, data)
+
         user_id = event.from_user.id
         state: FSMContext = data.get("state")
+
+        if state is None:
+            return await handler(event, data)
         
         # Пропускаем callback для восстановления поиска
         if isinstance(event, CallbackQuery) and event.data == "recover_search:execute":
@@ -56,16 +66,18 @@ class StateRecoveryMiddleware(BaseMiddleware):
             # Служебные кнопки
             "🔙 Вернуться в главное меню", "❌ Завершить диалог", "🔙 Назад",
             "❌ Отмена", "🏠 В главное меню", "🔙 Назад к списку вопросов", "❌ Выйти из опроса",
+            "✅ Отправить", "🗑 Очистить", "↩️ Удалить файл",
             
             # Главное меню
-            "🔬 Задать вопрос", "🔬 Преаналитика", "🔬 Вопрос по преаналитике",
+            "🔬 Задать вопрос", "🔬 Вопрос по преаналитике", "🔬 Преаналитика",
             "🧪 Запрос по результатам", "🧪 Результаты",
             "🖼️ Галерея пробирок", "🖼️ Галерея пробирок и контейнеров",
             "🖼 Галерея пробирок и контейнеров", "📷 Пробирки",
             "📄 Скачать бланки", "📄 Ссылки на бланки", "📄 Бланки",
-            "📞 Связь с лабораторией", "📞 Заказать звонок",
-            "💬 Жалобы и предложения", "💬 Обратная связь",
-            "📚 Часто задаваемые вопросы", "📋 Стоп-лист", "📋 Актуальный стоп-лист",
+            "📞 Связь с лабораторией",
+            "📞 Заказать звонок", "💬 Жалобы и предложения", "💬 Обратная связь",
+            "📚 Часто задаваемые вопросы", "📋 Стоп-лист",
+            "📋 Актуальный стоп-лист",
             
             # Админ меню
             "📊 Статистика", "📈 Экспорт метрик", "📥 Выгрузка в Excel",
@@ -75,9 +87,8 @@ class StateRecoveryMiddleware(BaseMiddleware):
             
             # Контент и связь
             "⚙️ Управление галереей", "⚙️ Управление бланками",
-            "💡 Предложение/жалоба",
+            "📞 Заказать звонок", "💡 Предложение/жалоба",
             "💡 Предложение", "⚠️ Жалоба",
-            "✅ Отправить", "🗑 Очистить", "↩️ Удалить файл",
             
             # Excel выгрузка
             "📊 Полная выгрузка", "👥 Только пользователи", "❓ Только вопросы",
@@ -115,51 +126,24 @@ class StateRecoveryMiddleware(BaseMiddleware):
                 
                 # Если состояние отсутствует (None) - бот был перезагружен
                 if current_state is None:
+                    if not event.text:
+                        return await handler(event, data)
+
                     # Проверяем, зарегистрирован ли пользователь
-                    user = await db.get_user(user_id)
+                    user = await database.get_user(user_id)
                     
                     if user:
-                        # Сохраняем запрос пользователя
-                        user_message = event.text.strip()
-                        await state.update_data(pending_search_query=user_message)
-                        
-                        # Восстанавливаем состояние
-                        await state.set_state(QuestionStates.waiting_for_search_type)
-                        
-                        user_name = get_user_first_name(user)
-                        
-                        # Обрезаем длинный запрос для отображения
-                        display_query = user_message if len(user_message) <= 50 else user_message[:47] + "..."
-                        
-                        from bot.keyboards import get_dialog_kb
-                        
-                        keyboard = InlineKeyboardMarkup(
-                            inline_keyboard=[
-                                [
-                                    InlineKeyboardButton(
-                                        text=f"🔍 Искать: {display_query}",
-                                        callback_data="recover_search:execute"
-                                    )
-                                ]
-                            ]
+                        await state.set_state(recovery_state)
+                        data["raw_state"] = (
+                            recovery_state.state
+                            if isinstance(recovery_state, State)
+                            else recovery_state
                         )
-                        
-                        await event.answer(
-                            f"👋 С возвращением, {user_name}!\n\n"
-                            f"🔄 <b>Бот был перезагружен</b>\n\n"
-                            f"📝 Вы написали: <code>{display_query}</code>\n\n"
-                            f"💡 Нажмите на кнопку ниже, чтобы выполнить поиск:",
-                            parse_mode="HTML",
-                            reply_markup=keyboard
-                        )
-                        
-                        logger.info(f"[STATE_RECOVERY] Showed recovery prompt for user {user_id}, query: {user_message}")
-                        
-                        # Добавляем в кеш
                         self.recovered_users.add(user_id)
-                        
-                        # НЕ вызываем handler - пользователь должен нажать кнопку
-                        return None
+                        logger.info(
+                            "[STATE_RECOVERY] Silently restored search state for user %s",
+                            user_id,
+                        )
                 else:
                     # Состояние есть - добавляем в кеш
                     self.recovered_users.add(user_id)
