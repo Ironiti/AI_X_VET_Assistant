@@ -878,7 +878,7 @@ class MetricsExporter:
         worksheet = workbook.add_worksheet('👥 Клиенты')
         
         # Заголовок
-        worksheet.merge_range(0, 0, 0, 3, 
+        worksheet.merge_range(0, 0, 0, len(FEATURE_USAGE_COLUMNS) + 1,
                             f'КЛИЕНТСКИЕ МЕТРИКИ ЗА {days} ДНЕЙ',
                             formats['main_title'])
         worksheet.set_row(0, 30)
@@ -890,9 +890,9 @@ class MetricsExporter:
         # - «Всего запросов» в этом листе должно совпадать с прежней семантикой
         #   (валидные запросы из request_metrics: general/code_search/name_search)
         valid_requests_by_day = await self.db.get_valid_requests_by_day(days)
+        row = 2
         
         if dau_data:
-            row = 2
             worksheet.merge_range(row, 0, row, 3,
                                 'Ежедневная активность пользователей (DAU)',
                                 formats['section_header'])
@@ -936,6 +936,69 @@ class MetricsExporter:
                 chart.set_size({'width': 720, 'height': 400})
                 chart.set_legend({'position': 'bottom'})
                 worksheet.insert_chart(row + 2, 0, chart)
+                row += 24
+
+        monthly_usage = await FeatureUsageTracker(self.db.db_path).get_monthly()
+        if monthly_usage:
+            row += 2
+            feature_keys = [feature_key for feature_key, _ in FEATURE_USAGE_COLUMNS]
+            headers = ['Месяц', *[label for _, label in FEATURE_USAGE_COLUMNS], 'Всего']
+            worksheet.merge_range(
+                row,
+                0,
+                row,
+                len(headers) - 1,
+                'Использование функций по месяцам',
+                formats['section_header'],
+            )
+            row += 1
+            for column, header in enumerate(headers):
+                worksheet.write(row, column, header, formats['table_header'])
+
+            worksheet.set_column(0, 0, 12)
+            worksheet.set_column(1, len(feature_keys), 24)
+            worksheet.set_column(len(feature_keys) + 1, len(feature_keys) + 1, 12)
+
+            row += 1
+            first_data_row = row
+            for month_data in monthly_usage:
+                worksheet.write(row, 0, month_data.get('month', ''), formats['cell_data'])
+                for column, feature_key in enumerate(feature_keys, start=1):
+                    worksheet.write(
+                        row,
+                        column,
+                        month_data.get(feature_key, 0) or 0,
+                        formats['cell_number'],
+                    )
+                worksheet.write(
+                    row,
+                    len(feature_keys) + 1,
+                    month_data.get('total_clicks', 0) or 0,
+                    formats['cell_number'],
+                )
+                row += 1
+
+            chart = workbook.add_chart({'type': 'line'})
+            colors = ['#1E3A8A', '#10B981', '#8B5CF6', '#F59E0B', '#EF4444', '#64748B', '#06B6D4']
+            first_excel_row = first_data_row + 1
+            last_excel_row = row
+            for column, ((_, label), color) in enumerate(zip(FEATURE_USAGE_COLUMNS, colors), start=1):
+                column_name = xl_col_to_name(column)
+                chart.add_series({
+                    'name': label,
+                    'categories': f"='👥 Клиенты'!$A${first_excel_row}:$A${last_excel_row}",
+                    'values': (
+                        f"='👥 Клиенты'!${column_name}${first_excel_row}:"
+                        f"${column_name}${last_excel_row}"
+                    ),
+                    'line': {'color': color, 'width': 2},
+                })
+            chart.set_title({'name': 'Использование функций по месяцам'})
+            chart.set_x_axis({'name': 'Месяц'})
+            chart.set_y_axis({'name': 'Количество нажатий', 'min': 0})
+            chart.set_legend({'position': 'bottom'})
+            chart.set_size({'width': 920, 'height': 430})
+            worksheet.insert_chart(row + 1, 0, chart)
     
     async def _create_technical_metrics_sheet(self, workbook, formats, days):
         """Создает лист с техническими метриками"""

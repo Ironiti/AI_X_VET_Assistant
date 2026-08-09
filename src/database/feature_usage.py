@@ -210,3 +210,53 @@ class FeatureUsageTracker:
             daily[date_key]["total_clicks"] += count
 
         return [daily[date_key] for date_key in sorted(daily)]
+
+    async def get_monthly(self) -> list[dict]:
+        """Возвращает помесячные нажатия за весь период учёта."""
+        await self.ensure_schema()
+        feature_keys = [key for key, _ in FEATURE_USAGE_COLUMNS]
+
+        async with aiosqlite.connect(self.db_path, timeout=10) as connection:
+            connection.row_factory = aiosqlite.Row
+            cursor = await connection.execute(
+                """
+                SELECT strftime('%Y-%m', timestamp) AS activity_month,
+                       feature_key,
+                       COUNT(*) AS usage_count
+                FROM feature_usage_events
+                GROUP BY strftime('%Y-%m', timestamp), feature_key
+                ORDER BY activity_month
+                """
+            )
+            rows = await cursor.fetchall()
+
+        valid_rows = [row for row in rows if row["activity_month"]]
+        if not valid_rows:
+            return []
+
+        first_year, first_month = map(int, valid_rows[0]["activity_month"].split("-"))
+        today = datetime.now().date()
+        monthly = {}
+        year, month = first_year, first_month
+        while (year, month) <= (today.year, today.month):
+            month_key = f"{year:04d}-{month:02d}"
+            monthly[month_key] = {
+                "month": month_key,
+                **{feature_key: 0 for feature_key in feature_keys},
+                "total_clicks": 0,
+            }
+            if month == 12:
+                year, month = year + 1, 1
+            else:
+                month += 1
+
+        for row in valid_rows:
+            month_key = row["activity_month"]
+            feature_key = row["feature_key"]
+            if month_key not in monthly or feature_key not in feature_keys:
+                continue
+            count = row["usage_count"] or 0
+            monthly[month_key][feature_key] += count
+            monthly[month_key]["total_clicks"] += count
+
+        return [monthly[month_key] for month_key in sorted(monthly)]
