@@ -2,7 +2,7 @@ import random
 import string
 import html
 from aiogram import Router, F
-from aiogram.types import Message, BufferedInputFile, ReplyKeyboardMarkup, KeyboardButton, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, InputMediaDocument
+from aiogram.types import Message, BufferedInputFile, ReplyKeyboardMarkup, KeyboardButton, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, InputMediaDocument, InputRichMessage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from bot.keyboards import (
@@ -12,6 +12,11 @@ from bot.keyboards import (
 from utils.excel_exporter import ExcelExporter
 from utils.csv_exporter import CSVExporter
 from utils.metrics_exporter import MetricsExporter
+from utils.rich_broadcast import (
+    build_rich_broadcast_markdown,
+    decode_markdown_file,
+    is_markdown_filename,
+)
 from datetime import datetime
 import asyncio
 
@@ -38,6 +43,7 @@ class BroadcastStates(StatesGroup):
     choosing_broadcast_type = State()
     choosing_content_type = State()
     waiting_for_message = State()
+    waiting_for_markdown_file = State()
     waiting_for_media = State()
     waiting_for_caption = State()
     collecting_photos = State()  # Новое состояние для сбора нескольких фото
@@ -1034,6 +1040,7 @@ def get_broadcast_content_type_kb():
     from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
     keyboard = [
         [KeyboardButton(text="📝 Текстовое сообщение")],
+        [KeyboardButton(text="📑 Markdown (.md)")],
         [KeyboardButton(text="🖼️ Одно изображение")],
         [KeyboardButton(text="📸 Несколько изображений")],
         [KeyboardButton(text="📄 Документы")],
@@ -1348,6 +1355,16 @@ async def process_content_type(message: Message, state: FSMContext):
             reply_markup=get_back_to_menu_kb()
         )
         await state.set_state(BroadcastStates.waiting_for_message)
+
+    elif message.text == "📑 Markdown (.md)":
+        await state.update_data(content_type="rich_markdown")
+        await message.answer(
+            "📑 Отправьте один файл в формате .md.\n\n"
+            "Текст из файла будет отправлен как оформленное сообщение. "
+            "Поддерживаются заголовки, списки, таблицы, цитаты и ссылки.",
+            reply_markup=get_back_to_menu_kb()
+        )
+        await state.set_state(BroadcastStates.waiting_for_markdown_file)
     
     elif message.text == "🖼️ Одно изображение":
         await state.update_data(content_type="photo")
@@ -1459,6 +1476,44 @@ async def process_broadcast_message(message: Message, state: FSMContext):
     await state.update_data(text=message.text)
     await send_broadcast(message, state)
 
+
+@admin_router.message(BroadcastStates.waiting_for_markdown_file)
+async def process_broadcast_markdown_file(message: Message, state: FSMContext):
+    if message.text == "🔙 Вернуться в главное меню":
+        await state.clear()
+        await message.answer("Операция отменена.", reply_markup=get_admin_menu_kb())
+        return
+
+    document = message.document
+    if not document or not is_markdown_filename(document.file_name):
+        await message.answer(
+            "❌ Нужен файл с расширением .md.",
+            reply_markup=get_back_to_menu_kb()
+        )
+        return
+
+    try:
+        downloaded = await message.bot.download(document)
+        if downloaded is None:
+            raise ValueError("Не удалось скачать файл.")
+        markdown = decode_markdown_file(downloaded.read())
+    except ValueError as exc:
+        await message.answer(
+            f"❌ {exc}",
+            reply_markup=get_back_to_menu_kb()
+        )
+        return
+    except Exception as exc:
+        print(f"Failed to read Markdown broadcast file: {exc}")
+        await message.answer(
+            "❌ Не удалось прочитать файл. Отправьте его ещё раз.",
+            reply_markup=get_back_to_menu_kb()
+        )
+        return
+
+    await state.update_data(text=markdown, file_name=document.file_name)
+    await send_broadcast(message, state)
+
 async def send_broadcast(message: Message, state: FSMContext):
     data = await state.get_data()
     broadcast_type = data['broadcast_type']
@@ -1479,6 +1534,11 @@ async def send_broadcast(message: Message, state: FSMContext):
     
     if content_type == "text":
         preview_text += f"Текст сообщения:\n{data.get('text')}\n\n"
+    elif content_type == "rich_markdown":
+        preview_text += (
+            f"Тип контента: Markdown-сообщение\n"
+            f"Файл: {data.get('file_name')}\n\n"
+        )
     elif content_type == "photo_group":
         media_group = data.get('media_group', [])
         preview_text += f"Тип контента: Несколько изображений ({len(media_group)} шт.)\n"
@@ -1511,6 +1571,13 @@ async def send_broadcast(message: Message, state: FSMContext):
                     recipient_id,
                     final_text,
                     parse_mode="HTML"
+                )
+            elif content_type == "rich_markdown":
+                await bot.send_rich_message(
+                    chat_id=recipient_id,
+                    rich_message=InputRichMessage(
+                        markdown=build_rich_broadcast_markdown(data.get('text', ''))
+                    )
                 )
             elif content_type == "photo":
                 caption = f"📢 <b>Сообщение от группы техподдержки</b>\n\n{data.get('caption')}" if data.get('caption') else "📢 <b>Сообщение от группы техподдержки</b>"
