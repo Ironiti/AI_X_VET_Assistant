@@ -305,7 +305,7 @@ class MetricsExporter:
 
         if daily_usage:
             worksheet.autofilter(0, 0, len(daily_usage), len(headers) - 1)
-            chart = workbook.add_chart({'type': 'line'})
+            chart = workbook.add_chart({'type': 'column', 'subtype': 'clustered'})
             colors = ['#1E3A8A', '#10B981', '#8B5CF6', '#F59E0B', '#EF4444', '#64748B', '#06B6D4']
             last_excel_row = len(daily_usage) + 1
             for column, ((_, label), color) in enumerate(zip(FEATURE_USAGE_COLUMNS, colors), start=1):
@@ -316,7 +316,8 @@ class MetricsExporter:
                         f"='📌 Функции меню'!${xl_col_to_name(column)}$2:"
                         f"${xl_col_to_name(column)}${last_excel_row}"
                     ),
-                    'line': {'color': color, 'width': 2},
+                    'fill': {'color': color},
+                    'border': {'color': color},
                 })
             chart.set_title({'name': 'Нажатия по функциям главного меню'})
             chart.set_x_axis({'name': 'Дата'})
@@ -978,7 +979,7 @@ class MetricsExporter:
                 )
                 row += 1
 
-            chart = workbook.add_chart({'type': 'line'})
+            chart = workbook.add_chart({'type': 'column', 'subtype': 'clustered'})
             colors = ['#1E3A8A', '#10B981', '#8B5CF6', '#F59E0B', '#EF4444', '#64748B', '#06B6D4']
             first_excel_row = first_data_row + 1
             last_excel_row = row
@@ -991,7 +992,8 @@ class MetricsExporter:
                         f"='👥 Клиенты'!${column_name}${first_excel_row}:"
                         f"${column_name}${last_excel_row}"
                     ),
-                    'line': {'color': color, 'width': 2},
+                    'fill': {'color': color},
+                    'border': {'color': color},
                 })
             chart.set_title({'name': 'Использование функций по месяцам'})
             chart.set_x_axis({'name': 'Месяц'})

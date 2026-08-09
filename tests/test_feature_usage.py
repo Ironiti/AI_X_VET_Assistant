@@ -149,3 +149,35 @@ def test_client_sheet_contains_monthly_feature_chart(tmp_path):
     assert "👥 Клиенты" in workbook_xml
     assert "Использование функций по месяцам" in shared_strings
     assert "Запрос по результатам" in chart_xml
+    assert "<c:barChart>" in chart_xml
+    assert '<c:barDir val="col"/>' in chart_xml
+    assert "<c:lineChart>" not in chart_xml
+
+
+def test_feature_usage_sheet_contains_daily_column_chart(tmp_path):
+    db_path = tmp_path / "metrics.db"
+    _create_users_table(db_path)
+    tracker = FeatureUsageTracker(str(db_path))
+    asyncio.run(
+        tracker.log_main_menu_selection(101, "question", "🔬 Задать вопрос")
+    )
+
+    class FakeDatabase:
+        def __init__(self, path):
+            self.db_path = str(path)
+
+    output = io.BytesIO()
+    workbook = xlsxwriter.Workbook(output, {"in_memory": True})
+    exporter = MetricsExporter(FakeDatabase(db_path))
+    formats = exporter._create_formats(workbook)
+    asyncio.run(exporter._create_feature_usage_sheet(workbook, formats, 30))
+    workbook.close()
+
+    with zipfile.ZipFile(io.BytesIO(output.getvalue())) as archive:
+        workbook_xml = archive.read("xl/workbook.xml").decode("utf-8")
+        chart_xml = archive.read("xl/charts/chart1.xml").decode("utf-8")
+
+    assert "📌 Функции меню" in workbook_xml
+    assert "<c:barChart>" in chart_xml
+    assert '<c:barDir val="col"/>' in chart_xml
+    assert "<c:lineChart>" not in chart_xml
