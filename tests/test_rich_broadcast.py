@@ -57,7 +57,7 @@ def test_rich_message_places_photo_before_markdown():
     assert message.media[0].media.media == "photo-file-id"
 
 
-def test_rich_message_builds_mixed_media_collage():
+def test_rich_message_keeps_every_mixed_media_block():
     message = build_rich_broadcast_message(
         "Описание",
         [
@@ -66,7 +66,22 @@ def test_rich_message_builds_mixed_media_collage():
         ],
     )
 
-    assert "<tg-collage>" in message.markdown
+    assert "<tg-collage>" not in message.markdown
     assert "tg://photo?id=broadcast_media_0" in message.markdown
     assert "tg://video?id=broadcast_media_1" in message.markdown
     assert [item.id for item in message.media] == ["broadcast_media_0", "broadcast_media_1"]
+
+
+def test_rich_message_supports_audio_and_voice():
+    message = build_rich_broadcast_message(
+        "Описание",
+        [
+            {"type": "audio", "file_id": "audio-id"},
+            {"type": "voice", "file_id": "voice-id"},
+        ],
+    )
+
+    assert "tg://audio?id=broadcast_media_0" in message.markdown
+    assert "tg://audio?id=broadcast_media_1" in message.markdown
+    assert message.media[0].media.media == "audio-id"
+    assert message.media[1].media.media == "voice-id"

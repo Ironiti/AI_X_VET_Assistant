@@ -2,8 +2,10 @@
 
 from aiogram.types import (
     InputMediaAnimation,
+    InputMediaAudio,
     InputMediaPhoto,
     InputMediaVideo,
+    InputMediaVoiceNote,
     InputRichMessage,
     InputRichMessageMedia,
 )
@@ -67,6 +69,12 @@ def build_rich_broadcast_message(
         elif media_type == "animation":
             media = InputMediaAnimation(media=file_id)
             link_type = "video"
+        elif media_type == "audio":
+            media = InputMediaAudio(media=file_id)
+            link_type = "audio"
+        elif media_type == "voice":
+            media = InputMediaVoiceNote(media=file_id)
+            link_type = "audio"
         else:
             raise ValueError(f"Неподдерживаемый тип медиа: {media_type}")
 
@@ -76,10 +84,7 @@ def build_rich_broadcast_message(
     if not media_blocks:
         return InputRichMessage(markdown=body)
 
-    if len(media_blocks) == 1:
-        media_markdown = media_blocks[0]
-    else:
-        media_markdown = "<tg-collage>\n\n" + "\n".join(media_blocks) + "\n\n</tg-collage>"
+    media_markdown = "\n\n".join(media_blocks)
 
     return InputRichMessage(
         markdown=f"{media_markdown}\n\n{body}",

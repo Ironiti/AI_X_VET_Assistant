@@ -1361,7 +1361,7 @@ async def process_broadcast_type(message: Message, state: FSMContext):
     await message.answer(
         "Отправьте материалы для рассылки в любом порядке:\n\n"
         "• текст с Markdown-разметкой или файл .md;\n"
-        "• фотографии, видео, GIF и документы.\n\n"
+        "• фотографии, видео, аудио, голосовые сообщения, GIF и документы.\n\n"
         "Можно отправить несколько файлов. Когда всё будет готово, "
         "нажмите «👁 Предпросмотр».",
         reply_markup=get_unified_broadcast_kb()
@@ -1376,6 +1376,8 @@ def _unified_broadcast_summary(data: dict) -> str:
         "photo": sum(item.get("type") == "photo" for item in media_items),
         "video": sum(item.get("type") == "video" for item in media_items),
         "animation": sum(item.get("type") == "animation" for item in media_items),
+        "audio": sum(item.get("type") == "audio" for item in media_items),
+        "voice": sum(item.get("type") == "voice" for item in media_items),
     }
     parts = []
     if data.get("markdown", "").strip():
@@ -1386,6 +1388,10 @@ def _unified_broadcast_summary(data: dict) -> str:
         parts.append(f"видео: {counts['video']}")
     if counts["animation"]:
         parts.append(f"GIF: {counts['animation']}")
+    if counts["audio"]:
+        parts.append(f"аудио: {counts['audio']}")
+    if counts["voice"]:
+        parts.append(f"голосовые: {counts['voice']}")
     if documents:
         parts.append(f"документы: {len(documents)}")
     return ", ".join(parts) if parts else "материалов пока нет"
@@ -1475,6 +1481,16 @@ async def collect_unified_broadcast_content(message: Message, state: FSMContext)
             if len(media_items) >= 50:
                 raise ValueError("Можно добавить не больше 50 фото и видео.")
             media_items.append({"type": "animation", "file_id": message.animation.file_id})
+            await state.update_data(media_items=media_items)
+        elif message.audio:
+            if len(media_items) >= 50:
+                raise ValueError("Можно добавить не больше 50 медиафайлов.")
+            media_items.append({"type": "audio", "file_id": message.audio.file_id})
+            await state.update_data(media_items=media_items)
+        elif message.voice:
+            if len(media_items) >= 50:
+                raise ValueError("Можно добавить не больше 50 медиафайлов.")
+            media_items.append({"type": "voice", "file_id": message.voice.file_id})
             await state.update_data(media_items=media_items)
         elif message.document:
             if is_markdown_filename(message.document.file_name):
