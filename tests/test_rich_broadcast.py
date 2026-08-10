@@ -4,6 +4,7 @@ from utils.rich_broadcast import (
     RICH_BROADCAST_HEADER,
     RICH_MARKDOWN_MAX_CHARS,
     build_rich_broadcast_markdown,
+    build_rich_broadcast_message,
     decode_markdown_file,
     is_markdown_filename,
 )
@@ -42,3 +43,30 @@ def test_rich_markdown_limit_includes_broadcast_header():
 
     with pytest.raises(ValueError, match="слишком длинное"):
         build_rich_broadcast_markdown("a" * (available + 1))
+
+
+def test_rich_message_places_photo_before_markdown():
+    message = build_rich_broadcast_message(
+        "# Новость\n\nТекст",
+        [{"type": "photo", "file_id": "photo-file-id"}],
+    )
+
+    assert message.markdown.startswith("![](tg://photo?id=broadcast_media_0)")
+    assert message.markdown.endswith(f"{RICH_BROADCAST_HEADER}\n\n# Новость\n\nТекст")
+    assert message.media[0].id == "broadcast_media_0"
+    assert message.media[0].media.media == "photo-file-id"
+
+
+def test_rich_message_builds_mixed_media_collage():
+    message = build_rich_broadcast_message(
+        "Описание",
+        [
+            {"type": "photo", "file_id": "photo-id"},
+            {"type": "video", "file_id": "video-id"},
+        ],
+    )
+
+    assert "<tg-collage>" in message.markdown
+    assert "tg://photo?id=broadcast_media_0" in message.markdown
+    assert "tg://video?id=broadcast_media_1" in message.markdown
+    assert [item.id for item in message.media] == ["broadcast_media_0", "broadcast_media_1"]

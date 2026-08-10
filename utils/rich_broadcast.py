@@ -1,5 +1,13 @@
 """Utilities for Telegram rich-message broadcasts."""
 
+from aiogram.types import (
+    InputMediaAnimation,
+    InputMediaPhoto,
+    InputMediaVideo,
+    InputRichMessage,
+    InputRichMessageMedia,
+)
+
 RICH_MARKDOWN_MAX_CHARS = 32_768
 RICH_BROADCAST_HEADER = "**📢 Сообщение от группы техподдержки**"
 
@@ -33,3 +41,47 @@ def decode_markdown_file(raw_content: bytes) -> str:
     markdown = markdown.strip()
     build_rich_broadcast_markdown(markdown)
     return markdown
+
+
+def build_rich_broadcast_message(
+    markdown: str | None,
+    media_items: list[dict] | None = None,
+) -> InputRichMessage:
+    """Build one Telegram rich message with media above the Markdown text."""
+    content = (markdown or "").strip()
+    body = build_rich_broadcast_markdown(content) if content else RICH_BROADCAST_HEADER
+    items = media_items or []
+
+    rich_media: list[InputRichMessageMedia] = []
+    media_blocks: list[str] = []
+    for index, item in enumerate(items):
+        media_id = f"broadcast_media_{index}"
+        media_type = item.get("type")
+        file_id = item.get("file_id")
+        if media_type == "photo":
+            media = InputMediaPhoto(media=file_id)
+            link_type = "photo"
+        elif media_type == "video":
+            media = InputMediaVideo(media=file_id)
+            link_type = "video"
+        elif media_type == "animation":
+            media = InputMediaAnimation(media=file_id)
+            link_type = "video"
+        else:
+            raise ValueError(f"Неподдерживаемый тип медиа: {media_type}")
+
+        rich_media.append(InputRichMessageMedia(id=media_id, media=media))
+        media_blocks.append(f"![](tg://{link_type}?id={media_id})")
+
+    if not media_blocks:
+        return InputRichMessage(markdown=body)
+
+    if len(media_blocks) == 1:
+        media_markdown = media_blocks[0]
+    else:
+        media_markdown = "<tg-collage>\n\n" + "\n".join(media_blocks) + "\n\n</tg-collage>"
+
+    return InputRichMessage(
+        markdown=f"{media_markdown}\n\n{body}",
+        media=rich_media,
+    )

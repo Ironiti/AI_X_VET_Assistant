@@ -14,6 +14,7 @@ from utils.csv_exporter import CSVExporter
 from utils.metrics_exporter import MetricsExporter
 from utils.rich_broadcast import (
     build_rich_broadcast_markdown,
+    build_rich_broadcast_message,
     decode_markdown_file,
     is_markdown_filename,
 )
@@ -42,6 +43,8 @@ class ExportStates(StatesGroup):
 class BroadcastStates(StatesGroup):
     choosing_broadcast_type = State()
     choosing_content_type = State()
+    collecting_broadcast_content = State()
+    confirming_broadcast = State()
     waiting_for_message = State()
     waiting_for_markdown_file = State()
     waiting_for_media = State()
@@ -1050,6 +1053,24 @@ def get_broadcast_content_type_kb():
     ]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
+
+def get_unified_broadcast_kb():
+    keyboard = [
+        [KeyboardButton(text="👁 Предпросмотр")],
+        [KeyboardButton(text="🧹 Очистить")],
+        [KeyboardButton(text="🔙 Вернуться в главное меню")],
+    ]
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+
+
+def get_broadcast_confirmation_kb():
+    keyboard = [
+        [KeyboardButton(text="✅ Отправить рассылку")],
+        [KeyboardButton(text="✏️ Вернуться к материалам")],
+        [KeyboardButton(text="🔙 Вернуться в главное меню")],
+    ]
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+
 def get_media_collection_kb():
     """Клавиатура для сбора множественных файлов"""
     from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
@@ -1330,12 +1351,189 @@ async def process_broadcast_type(message: Message, state: FSMContext):
         )
         return
     
-    await state.update_data(broadcast_type=broadcast_types[message.text])
-    await message.answer(
-        "Выберите тип контента для рассылки:",
-        reply_markup=get_broadcast_content_type_kb()
+    await state.update_data(
+        broadcast_type=broadcast_types[message.text],
+        content_type="unified",
+        markdown="",
+        media_items=[],
+        documents=[],
     )
-    await state.set_state(BroadcastStates.choosing_content_type)
+    await message.answer(
+        "Отправьте материалы для рассылки в любом порядке:\n\n"
+        "• текст с Markdown-разметкой или файл .md;\n"
+        "• фотографии, видео, GIF и документы.\n\n"
+        "Можно отправить несколько файлов. Когда всё будет готово, "
+        "нажмите «👁 Предпросмотр».",
+        reply_markup=get_unified_broadcast_kb()
+    )
+    await state.set_state(BroadcastStates.collecting_broadcast_content)
+
+
+def _unified_broadcast_summary(data: dict) -> str:
+    media_items = data.get("media_items", [])
+    documents = data.get("documents", [])
+    counts = {
+        "photo": sum(item.get("type") == "photo" for item in media_items),
+        "video": sum(item.get("type") == "video" for item in media_items),
+        "animation": sum(item.get("type") == "animation" for item in media_items),
+    }
+    parts = []
+    if data.get("markdown", "").strip():
+        parts.append("текст добавлен")
+    if counts["photo"]:
+        parts.append(f"фото: {counts['photo']}")
+    if counts["video"]:
+        parts.append(f"видео: {counts['video']}")
+    if counts["animation"]:
+        parts.append(f"GIF: {counts['animation']}")
+    if documents:
+        parts.append(f"документы: {len(documents)}")
+    return ", ".join(parts) if parts else "материалов пока нет"
+
+
+async def _append_unified_markdown(state: FSMContext, markdown: str) -> None:
+    data = await state.get_data()
+    current = data.get("markdown", "").strip()
+    updated = f"{current}\n\n{markdown.strip()}" if current else markdown.strip()
+    build_rich_broadcast_markdown(updated)
+    await state.update_data(markdown=updated)
+
+
+async def _show_unified_broadcast_preview(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    markdown = data.get("markdown", "").strip()
+    media_items = data.get("media_items", [])
+    documents = data.get("documents", [])
+    if not markdown and not media_items and not documents:
+        await message.answer(
+            "Сначала добавьте текст или файлы.",
+            reply_markup=get_unified_broadcast_kb(),
+        )
+        return
+
+    try:
+        rich_message = build_rich_broadcast_message(markdown, media_items)
+        await message.answer("Так рассылка будет выглядеть у получателя:")
+        await message.bot.send_rich_message(
+            chat_id=message.chat.id,
+            rich_message=rich_message,
+            disable_notification=True,
+        )
+        for document in documents:
+            await message.bot.send_document(
+                chat_id=message.chat.id,
+                document=document["file_id"],
+            )
+    except Exception as exc:
+        print(f"Failed to build broadcast preview: {exc}")
+        await message.answer(
+            "Не удалось сформировать предпросмотр. Проверьте Markdown-разметку и файлы.",
+            reply_markup=get_unified_broadcast_kb(),
+        )
+        return
+
+    recipients = await db.get_broadcast_recipients(data["broadcast_type"])
+    await message.answer(
+        f"Отправить эту рассылку? Получателей: {len(recipients)}.",
+        reply_markup=get_broadcast_confirmation_kb(),
+    )
+    await state.set_state(BroadcastStates.confirming_broadcast)
+
+
+@admin_router.message(BroadcastStates.collecting_broadcast_content)
+async def collect_unified_broadcast_content(message: Message, state: FSMContext):
+    if message.text == "🔙 Вернуться в главное меню":
+        await state.clear()
+        await message.answer("Операция отменена.", reply_markup=get_admin_menu_kb())
+        return
+
+    if message.text == "🧹 Очистить":
+        await state.update_data(markdown="", media_items=[], documents=[])
+        await message.answer("Материалы удалены.", reply_markup=get_unified_broadcast_kb())
+        return
+
+    if message.text == "👁 Предпросмотр":
+        await _show_unified_broadcast_preview(message, state)
+        return
+
+    data = await state.get_data()
+    media_items = data.get("media_items", [])
+    documents = data.get("documents", [])
+
+    try:
+        if message.photo:
+            if len(media_items) >= 50:
+                raise ValueError("Можно добавить не больше 50 фото и видео.")
+            media_items.append({"type": "photo", "file_id": message.photo[-1].file_id})
+            await state.update_data(media_items=media_items)
+        elif message.video:
+            if len(media_items) >= 50:
+                raise ValueError("Можно добавить не больше 50 фото и видео.")
+            media_items.append({"type": "video", "file_id": message.video.file_id})
+            await state.update_data(media_items=media_items)
+        elif message.animation:
+            if len(media_items) >= 50:
+                raise ValueError("Можно добавить не больше 50 фото и видео.")
+            media_items.append({"type": "animation", "file_id": message.animation.file_id})
+            await state.update_data(media_items=media_items)
+        elif message.document:
+            if is_markdown_filename(message.document.file_name):
+                downloaded = await message.bot.download(message.document)
+                if downloaded is None:
+                    raise ValueError("Не удалось скачать Markdown-файл.")
+                await _append_unified_markdown(state, decode_markdown_file(downloaded.read()))
+            else:
+                if len(documents) >= 10:
+                    raise ValueError("Можно добавить не больше 10 документов.")
+                documents.append({
+                    "type": "document",
+                    "file_id": message.document.file_id,
+                    "file_name": message.document.file_name,
+                })
+                await state.update_data(documents=documents)
+        elif message.text:
+            await _append_unified_markdown(state, message.text)
+        else:
+            raise ValueError("Этот тип сообщения пока не поддерживается в рассылке.")
+    except ValueError as exc:
+        await message.answer(str(exc), reply_markup=get_unified_broadcast_kb())
+        return
+    except Exception as exc:
+        print(f"Failed to collect broadcast content: {exc}")
+        await message.answer(
+            "Не удалось добавить материал. Отправьте его ещё раз.",
+            reply_markup=get_unified_broadcast_kb(),
+        )
+        return
+
+    updated = await state.get_data()
+    await message.answer(
+        f"Добавлено. Сейчас: {_unified_broadcast_summary(updated)}.",
+        reply_markup=get_unified_broadcast_kb(),
+    )
+
+
+@admin_router.message(BroadcastStates.confirming_broadcast)
+async def confirm_unified_broadcast(message: Message, state: FSMContext):
+    if message.text == "✅ Отправить рассылку":
+        await send_broadcast(message, state)
+        return
+    if message.text == "✏️ Вернуться к материалам":
+        await state.set_state(BroadcastStates.collecting_broadcast_content)
+        data = await state.get_data()
+        await message.answer(
+            f"Продолжайте добавлять материалы. Сейчас: {_unified_broadcast_summary(data)}.",
+            reply_markup=get_unified_broadcast_kb(),
+        )
+        return
+    if message.text == "🔙 Вернуться в главное меню":
+        await state.clear()
+        await message.answer("Операция отменена.", reply_markup=get_admin_menu_kb())
+        return
+    await message.answer(
+        "Выберите действие кнопкой ниже.",
+        reply_markup=get_broadcast_confirmation_kb(),
+    )
 
 @admin_router.message(BroadcastStates.choosing_content_type)
 async def process_content_type(message: Message, state: FSMContext):
@@ -1344,6 +1542,20 @@ async def process_content_type(message: Message, state: FSMContext):
         await message.answer("Операция отменена.", reply_markup=get_admin_menu_kb())
         return
     
+    await state.update_data(
+        content_type="unified",
+        markdown="",
+        media_items=[],
+        documents=[],
+    )
+    await message.answer(
+        "Выбор типа больше не нужен. Отправьте текст и файлы в любом порядке, "
+        "затем нажмите «👁 Предпросмотр».",
+        reply_markup=get_unified_broadcast_kb(),
+    )
+    await state.set_state(BroadcastStates.collecting_broadcast_content)
+    return
+
     if message.text == "📝 Текстовое сообщение":
         await state.update_data(content_type="text")
         await message.answer(
@@ -1534,6 +1746,8 @@ async def send_broadcast(message: Message, state: FSMContext):
     
     if content_type == "text":
         preview_text += f"Текст сообщения:\n{data.get('text')}\n\n"
+    elif content_type == "unified":
+        preview_text = f"Начинаю отправку. Получателей: {len(recipients)}."
     elif content_type == "rich_markdown":
         preview_text += (
             f"Тип контента: Markdown-сообщение\n"
@@ -1555,7 +1769,8 @@ async def send_broadcast(message: Message, state: FSMContext):
         if data.get('caption'):
             preview_text += f"Подпись: {data.get('caption')}\n\n"
     
-    preview_text += "Начинаю рассылку..."
+    if content_type != "unified":
+        preview_text += "Начинаю рассылку..."
     
     await message.answer(preview_text)
     
@@ -1565,7 +1780,21 @@ async def send_broadcast(message: Message, state: FSMContext):
     
     for recipient_id in recipients:
         try:
-            if content_type == "text":
+            if content_type == "unified":
+                await bot.send_rich_message(
+                    chat_id=recipient_id,
+                    rich_message=build_rich_broadcast_message(
+                        data.get('markdown'),
+                        data.get('media_items', []),
+                    ),
+                )
+                for document in data.get('documents', []):
+                    await bot.send_document(
+                        chat_id=recipient_id,
+                        document=document['file_id'],
+                    )
+                    await asyncio.sleep(0.05)
+            elif content_type == "text":
                 final_text = f"📢 <b>Сообщение от группы техподдержки</b>\n\n{data.get('text')}"
                 await bot.send_message(
                     recipient_id,
