@@ -22,16 +22,23 @@ BOT_USERNAME = "AI_VET_Assistant_Bot"
 BLANKS_PATH = "data/documents"
 
 async def send_blank_files_by_names(message, form_names: List[str]) -> Tuple[bool, List[int]]:
-    """Отправляет файлы бланков используя file_id и возвращает message_ids"""
+    """Отправляет актуальные бланки из админ-панели, кэша или с диска."""
     try:
         sent_files = 0
         message_ids = []
         
         for form_name in form_names:
-            file_name = f"{form_name.strip()}.pdf"
-            
-            # Пытаемся найти file_id в базе данных
-            file_data = await db.get_blank_file_id(file_name)
+            name = form_name.strip()
+            file_name = f"{name}.pdf"
+
+            # Файл из админ-панели имеет приоритет: именно его видят и в
+            # разделе скачивания, и внутри карточки анализа.
+            blank_doc = await db.find_blank_document_by_title(name)
+            file_data = (
+                {"file_id": blank_doc["file_id"]}
+                if blank_doc and blank_doc.get("file_id")
+                else await db.get_blank_file_id(file_name)
+            )
             
             if file_data and file_data.get("file_id"):
                 # Используем существующий file_id для быстрой отправки

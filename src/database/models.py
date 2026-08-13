@@ -3833,6 +3833,13 @@ class Database:
         """Создает таблицу бланков если её нет"""
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute('''
+                CREATE TABLE IF NOT EXISTS blank_files (
+                    file_name TEXT PRIMARY KEY,
+                    file_id TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            await db.execute('''
                 CREATE TABLE IF NOT EXISTS blank_documents (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     title TEXT NOT NULL,
@@ -3855,6 +3862,10 @@ class Database:
                     INSERT INTO blank_documents (title, file_id, description, added_by)
                     VALUES (?, ?, ?, ?)
                 ''', (title, file_id, description, added_by))
+                await db.execute('''
+                    INSERT OR REPLACE INTO blank_files (file_name, file_id, created_at)
+                    VALUES (?, ?, ?)
+                ''', (f"{title.strip()}.pdf", file_id, datetime.now()))
                 await db.commit()
                 return cursor.lastrowid
         except Exception as e:
@@ -3908,6 +3919,58 @@ class Database:
         except Exception as e:
             print(f"[ERROR] Failed to get blank document: {e}")
             return None
+
+    async def find_blank_document_by_title(self, title: str):
+        """Ищет активный бланк по точному или частичному совпадению названия."""
+        try:
+            await self.ensure_blanks_table()
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute(
+                    'SELECT * FROM blank_documents WHERE LOWER(title) = LOWER(?) AND is_active = TRUE',
+                    (title,)
+                )
+                row = await cursor.fetchone()
+                if row:
+                    return dict(row)
+                cursor = await db.execute(
+                    'SELECT * FROM blank_documents WHERE '
+                    '(LOWER(title) LIKE LOWER(?) OR LOWER(?) LIKE \'%\' || LOWER(title) || \'%\') '
+                    'AND is_active = TRUE ORDER BY created_at DESC LIMIT 1',
+                    (f'%{title}%', title)
+                )
+                row = await cursor.fetchone()
+                return dict(row) if row else None
+        except Exception as e:
+            logger.error(f"Failed to find blank document by title '{title}': {e}")
+            return None
+
+    async def update_blank_document_file(self, blank_id: int, file_id: str):
+        """Заменяет файл бланка и обновляет файл для карточек анализов."""
+        try:
+            await self.ensure_blanks_table()
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute(
+                    'SELECT title FROM blank_documents WHERE id = ? AND is_active = TRUE',
+                    (blank_id,)
+                )
+                row = await cursor.fetchone()
+                if not row:
+                    return False
+                await db.execute(
+                    'UPDATE blank_documents SET file_id = ? WHERE id = ?',
+                    (file_id, blank_id)
+                )
+                await db.execute('''
+                    INSERT OR REPLACE INTO blank_files (file_name, file_id, created_at)
+                    VALUES (?, ?, ?)
+                ''', (f"{row['title'].strip()}.pdf", file_id, datetime.now()))
+                await db.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Failed to update blank document {blank_id}: {e}")
+            return False
 
     # ============================================================
     # МЕТОДЫ ДЛЯ РАБОТЫ СО СТОП-ЛИСТОМ

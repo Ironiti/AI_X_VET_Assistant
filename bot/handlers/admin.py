@@ -99,6 +99,8 @@ class BlanksManagementStates(StatesGroup):
     entering_description = State()
     viewing_blanks = State()
     deleting_blank = State()
+    selecting_update = State()
+    waiting_for_update_document = State()
     
 def get_container_photos_kb():
     keyboard = [
@@ -2425,6 +2427,7 @@ def get_blanks_management_kb():
     """Клавиатура управления бланками"""
     keyboard = [
         [KeyboardButton(text="➕ Добавить бланк")],
+        [KeyboardButton(text="🔄 Обновить бланк")],
         [KeyboardButton(text="📋 Просмотр бланков")],
         [KeyboardButton(text="🗑️ Удалить бланк")],
         [KeyboardButton(text="🔙 Назад")]
@@ -2647,6 +2650,82 @@ async def start_add_blank(message: Message, state: FSMContext):
         reply_markup=get_back_to_menu_kb()
     )
     await state.set_state(BlanksManagementStates.entering_title)
+
+@admin_router.message(BlanksManagementStates.menu, F.text == "🔄 Обновить бланк")
+async def start_update_blank(message: Message, state: FSMContext):
+    """Выбор существующего бланка для замены файла."""
+    items = await db.get_all_blank_documents()
+    if not items:
+        await message.answer("Список бланков пока пуст.", reply_markup=get_blanks_management_kb())
+        return
+    keyboard = [
+        [KeyboardButton(text=f"🔄 {item['id']} · {item['title'][:34]}")]
+        for item in items[:20]
+    ]
+    keyboard.append([KeyboardButton(text="🔙 Отмена")])
+    await message.answer(
+        "Выберите бланк, файл которого нужно заменить:",
+        reply_markup=ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+    )
+    await state.set_state(BlanksManagementStates.selecting_update)
+
+@admin_router.message(BlanksManagementStates.selecting_update)
+async def select_blank_for_update(message: Message, state: FSMContext):
+    if message.text == "🔙 Отмена":
+        await state.set_state(BlanksManagementStates.menu)
+        await message.answer("Обновление отменено.", reply_markup=get_blanks_management_kb())
+        return
+    if not message.text or not message.text.startswith("🔄 "):
+        await message.answer("Выберите бланк кнопкой ниже.")
+        return
+    try:
+        blank_id = int(message.text[2:].split(" · ", 1)[0])
+    except (TypeError, ValueError):
+        await message.answer("Не удалось определить бланк. Выберите его кнопкой ниже.")
+        return
+    selected = await db.get_blank_document(blank_id)
+    if not selected:
+        await message.answer("Бланк не найден. Откройте список заново.")
+        return
+    await state.update_data(update_blank_id=selected['id'], update_blank_title=selected['title'])
+    await state.set_state(BlanksManagementStates.waiting_for_update_document)
+    await message.answer(
+        f"Отправьте новый файл для бланка «{html.escape(selected['title'])}».",
+        parse_mode="HTML",
+        reply_markup=get_back_to_menu_kb()
+    )
+
+@admin_router.message(BlanksManagementStates.waiting_for_update_document, F.document)
+async def update_blank_document(message: Message, state: FSMContext):
+    data = await state.get_data()
+    blank_id = data.get('update_blank_id')
+    title = data.get('update_blank_title')
+    if not blank_id or not title:
+        await state.set_state(BlanksManagementStates.menu)
+        await message.answer(
+            "Не удалось определить бланк. Начните обновление заново.",
+            reply_markup=get_blanks_management_kb()
+        )
+        return
+    success = await db.update_blank_document_file(blank_id, message.document.file_id)
+    await state.set_state(BlanksManagementStates.menu)
+    if success:
+        await message.answer(
+            f"✅ Бланк «{html.escape(title)}» обновлён.\n\n"
+            "Новый файл используется в разделе бланков и в карточках анализов.",
+            parse_mode="HTML",
+            reply_markup=get_blanks_management_kb()
+        )
+    else:
+        await message.answer("❌ Не удалось обновить бланк.", reply_markup=get_blanks_management_kb())
+
+@admin_router.message(BlanksManagementStates.waiting_for_update_document)
+async def invalid_blank_update_document(message: Message, state: FSMContext):
+    if message.text == "🔙 Вернуться в главное меню":
+        await state.set_state(BlanksManagementStates.menu)
+        await message.answer("Обновление отменено.", reply_markup=get_blanks_management_kb())
+        return
+    await message.answer("Пожалуйста, отправьте новый бланк как документ.")
 
 @admin_router.message(BlanksManagementStates.entering_title)
 async def blank_enter_title(message: Message, state: FSMContext):
