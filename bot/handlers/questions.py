@@ -4,7 +4,8 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
-    ReplyKeyboardRemove
+    ReplyKeyboardRemove,
+    FSInputFile,
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -13,6 +14,7 @@ import asyncio
 import html
 from typing import Dict, List, Tuple, Optional, Set
 from datetime import datetime
+from pathlib import Path
 import re
 import hashlib
 from collections import defaultdict
@@ -79,6 +81,9 @@ LOADING_GIF_ID = "CgACAgIAAxkBAANyaPpHf3v-Ra2alXm1M4RH6uJWPhsAAm6BAAL5U9lLj5R8UC
 FUZZY_SEARCH_THRESHOLD_MIN = 55  # Увеличен с 30 до 55
 FUZZY_SEARCH_THRESHOLD_EXACT = 60
 TEXT_SEARCH_TOP_K = 80
+WAYBILL_FILE_NAME = "Сопроводительная плюс и минус.xlsx"
+WAYBILL_TITLE = "Сопроводительная накладная"
+WAYBILL_PATH = Path(__file__).resolve().parents[2] / "data" / "documents" / WAYBILL_FILE_NAME
 
 # Параметры пагинации
 ITEMS_PER_PAGE = 6
@@ -3551,10 +3556,17 @@ async def send_test_info_with_photo(
     if has_forms:
         keyboard_buttons.append([
             InlineKeyboardButton(
-                text="📋 Показать все бланки и файлы",
+                text="📋 Направительный бланк",
                 callback_data=f"show_blanks:{test_data['test_code']}",
             )
         ])
+
+    keyboard_buttons.append([
+        InlineKeyboardButton(
+            text="📄 Сопроводительная накладная",
+            callback_data=f"show_waybill:{test_data['test_code']}",
+        )
+    ])
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons) if keyboard_buttons else None
     
@@ -3618,6 +3630,25 @@ async def send_test_info_with_photo(
                     continue
     
     return sent_message
+
+
+@questions_router.callback_query(F.data.startswith("show_waybill:"))
+async def handle_show_waybill_callback(callback: CallbackQuery):
+    """Отправляет общую сопроводительную накладную."""
+    await callback.answer("📄 Загружаю сопроводительную накладную...")
+
+    try:
+        if not WAYBILL_PATH.is_file():
+            await callback.message.answer("❌ Сопроводительная накладная временно недоступна")
+            return
+
+        await callback.message.answer_document(
+            FSInputFile(WAYBILL_PATH, filename=WAYBILL_FILE_NAME),
+            caption=f"📄 {WAYBILL_TITLE}",
+        )
+    except Exception as exc:
+        logger.error("[WAYBILL] Failed to send waybill: %s", exc)
+        await callback.message.answer("❌ Не удалось загрузить сопроводительную накладную")
 
 @questions_router.callback_query(F.data.startswith("show_blanks:"))
 async def handle_show_blanks_callback(callback: CallbackQuery, state: FSMContext):
