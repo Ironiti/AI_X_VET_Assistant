@@ -1,4 +1,5 @@
 from aiogram.types import Message
+from utils.document_files import blank_file_name
 from langchain.schema import Document
 import pytz
 import asyncio
@@ -29,7 +30,7 @@ async def send_blank_files_by_names(message, form_names: List[str]) -> Tuple[boo
         
         for form_name in form_names:
             name = form_name.strip()
-            file_name = f"{name}.pdf"
+            file_name = blank_file_name(name, BLANKS_PATH)
 
             # Файл из админ-панели имеет приоритет: именно его видят и в
             # разделе скачивания, и внутри карточки анализа.
