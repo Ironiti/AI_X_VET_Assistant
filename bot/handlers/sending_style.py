@@ -253,6 +253,24 @@ def get_user_first_name(user):
 
 ['primary_container_type', 'container_type', 'container_number']
 
+STOPLIST_STATUS_BANNERS = {
+    "suspended": "⏸️ <b>В ПРИОСТАНОВКЕ</b>",
+    "removed": "⛔ <b>ВЫВЕДЕНО</b>",
+}
+
+
+def normalize_stoplist_status(value) -> str:
+    """Return a supported stop-list status or an empty fallback."""
+    if value is None:
+        return ""
+    status = str(value).strip().casefold()
+    return status if status in STOPLIST_STATUS_BANNERS else ""
+
+
+def format_stoplist_status_banner(value) -> str:
+    """Build the prominent card banner for a supported status."""
+    return STOPLIST_STATUS_BANNERS.get(normalize_stoplist_status(value), "")
+
 def format_test_data(metadata: Dict) -> Dict:
     """Extract and format test metadata into standardized dictionary."""
 
@@ -260,6 +278,7 @@ def format_test_data(metadata: Dict) -> Dict:
         "type": metadata.get("type"),
         "test_code": metadata.get("test_code"),
         "test_name": metadata.get("test_name"),
+        "stoplist_status": normalize_stoplist_status(metadata.get("stoplist_status")),
         "department": metadata.get("department"),
         "term_of_execution": metadata.get("term_of_execution"),
         "important_information": metadata.get("important_information"),
@@ -296,7 +315,10 @@ def format_test_info_brief(test_data: Dict) -> str:
     test_name = html.escape(test_data.get("test_name"))
     department = html.escape(test_data.get("department"))
 
-    return emoji_manager.format_message(
+    banner = format_stoplist_status_banner(test_data.get("stoplist_status"))
+    banner_prefix = f"{banner}\n\n" if banner else ""
+
+    return banner_prefix + emoji_manager.format_message(
         f"test_name <b>{t_type}: {test_data['test_code']} - {test_name}</b>\n\n"
     ) + emoji_manager.format_message(
         f"🧬department <b>Вид исследования:</b> {department}\n"
@@ -340,11 +362,14 @@ def format_test_info(test_data: Dict) -> str:
         ),
     }
 
-    message_parts = [
+    message_parts = []
+    if banner := format_stoplist_status_banner(test_data.get("stoplist_status")):
+        message_parts.append(f"{banner}\n\n")
+    message_parts.append(
         emoji_manager.format_message(
             f"test_name <b>{t_type}: {test_data['test_code']} - {test_data['test_name']}</b>\n\n"
         )
-    ]
+    )
 
     for field, (emoji, display_name) in field_templates.items():
        
