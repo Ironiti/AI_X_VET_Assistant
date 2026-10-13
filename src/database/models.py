@@ -596,7 +596,7 @@ class Database:
         try:
             async with aiosqlite.connect(self.db_path, timeout=0.2) as db:
                 await db.execute('''
-                    INSERT INTO search_history (user_id, search_query, found_test_code, 
+                    INSERT INTO search_history (user_id, search_query, found_test_code,
                                             search_type, success, created_at)
                     VALUES (?, ?, ?, ?, ?, ?)
                 ''', (user_id, search_query, found_test_code, search_type, success, datetime.now()))
@@ -659,7 +659,7 @@ class Database:
         try:
             async with aiosqlite.connect(self.db_path, timeout=0.2) as db:
                 await db.execute('''
-                    INSERT INTO related_tests (user_id, test_code_1, test_code_2, 
+                    INSERT INTO related_tests (user_id, test_code_1, test_code_2,
                                             correlation_count, last_correlation)
                     VALUES (?, ?, ?, 1, ?)
                     ON CONFLICT(user_id, test_code_1, test_code_2) DO UPDATE SET
@@ -1854,7 +1854,7 @@ class Database:
         try:
             async with aiosqlite.connect(self.db_path, timeout=0.2) as db:
                 await db.execute('''
-                    INSERT INTO request_statistics (user_id, request_type, 
+                    INSERT INTO request_statistics (user_id, request_type,
                                                   request_text, timestamp)
                     VALUES (?, ?, ?, ?)
                 ''', (user_id, request_type, request_text, datetime.now()))

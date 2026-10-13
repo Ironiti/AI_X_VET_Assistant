@@ -608,7 +608,7 @@ async def _process_specialization_choice(message: Message, state: FSMContext, cu
 
 async def _save_specialization_choice(message: Message, state: FSMContext, data: dict, custom: bool):
     user_id = message.from_user.id
-    
+
     if not custom and message.text == "✏️ Ввести свою специализацию":
         await message.answer(
             "Введите вашу специализацию:",
@@ -616,7 +616,7 @@ async def _save_specialization_choice(message: Message, state: FSMContext, data:
         )
         await state.set_state(RegistrationStates.waiting_for_custom_specialization)
         return
-    
+
     specialization_map = {
         "Нефрология": "Нефрология",
         "Хирургия": "Хирургия",
@@ -627,7 +627,7 @@ async def _save_specialization_choice(message: Message, state: FSMContext, data:
         "Офтальмология": "Офтальмология",
         "Стоматология": "Стоматология"
     }
-    
+
     specialization = (message.text or "").strip()
     if custom and not 2 <= len(specialization) <= 100:
         await message.answer(
@@ -640,13 +640,13 @@ async def _save_specialization_choice(message: Message, state: FSMContext, data:
             reply_markup=get_specialization_kb()
         )
         return
-    
+
     if not custom:
         specialization = specialization_map[message.text]
     if data.get('user_type') == 'private_practitioner':
         await ask_practitioner_name(message, state, specialization)
         return
-    
+
     success = await db.add_client(
         telegram_id=user_id,
         name=data['name'],
@@ -672,4 +672,3 @@ async def _save_specialization_choice(message: Message, state: FSMContext, data:
         )
         return
     await state.clear()
-
