@@ -1201,6 +1201,7 @@ async def show_stats(message: Message):
         f"📊 Статистика системы:\n\n"
         f"👥 Всего пользователей: {stats['total_users']}\n"
         f"├ Клиентов: {stats['clients']}\n"
+        f"├ Частнопрактикующих врачей: {stats['private_practitioners']}\n"
         f"├ Сотрудников: {stats['employees']}\n"
         f"└ Администраторов: {stats['admins']}\n\n"
         f"📋 Обращений: {stats['total_requests']}\n"
@@ -2059,6 +2060,8 @@ async def show_users(message: Message):
         # Определяем тип пользователя
         if user_data.get('user_type') == 'client':
             user_type = "👨‍⚕️ Ветеринар"
+        elif user_data.get('user_type') == 'private_practitioner':
+            user_type = 'Частнопрактикующий врач'
         elif user_data.get('user_type') == 'employee':
             user_type = "🔬 Сотрудник"
         else:
@@ -2081,6 +2084,9 @@ async def show_users(message: Message):
             if user_data.get('region'):
                 text += f"📍 Регион: {user_data['region']}\n"
         
+        if user_data.get('user_type') == 'private_practitioner' and user_data.get('region'):
+            text += f"📍 Регион: {user_data['region']}\n"
+
         text += f"🌍 Страна: {user_data.get('country', 'BY')}\n"
         text += f"📅 {user_data['registration_date']}\n"
         text += "─" * 30 + "\n"

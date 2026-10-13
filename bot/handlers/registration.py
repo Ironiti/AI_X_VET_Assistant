@@ -32,6 +32,8 @@ class RegistrationStates(StatesGroup):
     waiting_for_client_name = State()
     waiting_for_specialization = State()
     waiting_for_custom_specialization = State()
+    waiting_for_practitioner_name = State()
+    waiting_for_practitioner_region = State()
     # Для сотрудников
     waiting_for_employee_first_name = State()  
     waiting_for_department = State()
@@ -108,7 +110,7 @@ async def cmd_start(message: Message, state: FSMContext):
             "Добро пожаловать в бот Лаборатории X-LAB VET! 🧪\n\n"
             "Зарегистрированные пользователи получают полный доступ к поиску, материалам и связи с лабораторией.\n\n"
             "Если вы впервые здесь, можно начать как гость: бот покажет один тест по коду, а затем предложит регистрацию.\n\n"
-            "Выберите удобный вариант:",
+            "👤 Выберите удобный вариант:",
             reply_markup=get_user_type_kb()
         )
         await state.set_state(RegistrationStates.waiting_for_user_type)
@@ -246,7 +248,7 @@ async def process_guest_registration_callback(callback: CallbackQuery, state: FS
     await db.mark_guest_converted(user_id)
     await callback.answer()
     await callback.message.answer(
-        "Отлично. Выберите, кто вы:",
+        "👤 Отлично. Выберите, кто вы:",
         reply_markup=get_registration_type_kb()
     )
     await state.set_state(RegistrationStates.waiting_for_user_type)
@@ -257,7 +259,7 @@ async def send_guest_limit_message(message: Message, state: FSMContext):
     await message.answer(
         "👤 <b>Гостевой запрос уже использован</b>\n\n"
         "Чтобы продолжить поиск и пользоваться всеми функциями X-LAB VET, пройдите короткую регистрацию.\n\n"
-        "Выберите, кто вы:",
+        "👤 Выберите, кто вы:",
         reply_markup=get_registration_type_kb(),
         parse_mode="HTML"
     )
@@ -277,6 +279,11 @@ async def process_user_type(message: Message, state: FSMContext):
             reply_markup=ReplyKeyboardRemove()
         )
         await state.set_state(RegistrationStates.waiting_for_client_code)
+    elif message.text in ("👨‍⚕️ Частнопрактикующий врач", "Частнопрактикующий врач"):
+        await state.update_data(user_type='private_practitioner')
+        await message.answer("Выберите вашу специализацию:", reply_markup=get_specialization_kb())
+        await state.set_state(RegistrationStates.waiting_for_specialization)
+        return
     elif message.text == "🔬 Сотрудник X-LAB VET":
         await state.update_data(user_type='employee', country='RU')
         await message.answer(
@@ -323,7 +330,7 @@ async def process_guest_registration_decision(message: Message, state: FSMContex
     user_id = message.from_user.id
     if message.text == "✅ Да, зарегистрироваться":
         await db.mark_guest_converted(user_id)
-        await message.answer("Отлично. Выберите, кто вы:", reply_markup=get_registration_type_kb())
+        await message.answer("👤 Отлично. Выберите, кто вы:", reply_markup=get_registration_type_kb())
         await state.set_state(RegistrationStates.waiting_for_user_type)
         return
     if message.text == "⏳ Позже":
@@ -413,6 +420,9 @@ async def process_specialization(message: Message, state: FSMContext):
     
     specialization = specialization_map[message.text]
     data = await state.get_data()
+    if data.get('user_type') == 'private_practitioner':
+        await ask_practitioner_name(message, state, specialization)
+        return
     
     success = await db.add_client(
         telegram_id=user_id,
@@ -442,7 +452,7 @@ async def process_specialization(message: Message, state: FSMContext):
 @registration_router.message(RegistrationStates.waiting_for_custom_specialization)
 async def process_custom_specialization(message: Message, state: FSMContext):
     user_id = message.from_user.id
-    specialization = message.text.strip()
+    specialization = (message.text or "").strip()
 
     if len(specialization) < 2 or len(specialization) > 100:
         await message.answer(
@@ -451,6 +461,9 @@ async def process_custom_specialization(message: Message, state: FSMContext):
         return
 
     data = await state.get_data()
+    if data.get('user_type') == 'private_practitioner':
+        await ask_practitioner_name(message, state, specialization)
+        return
     
     success = await db.add_client(
         telegram_id=user_id,
@@ -476,6 +489,58 @@ async def process_custom_specialization(message: Message, state: FSMContext):
         )
 
     await state.clear()
+
+def valid_practitioner_name(name: str) -> bool:
+    words = name.split()
+    return (2 <= len(words) <= 3 and len(name) <= 100
+            and all(any(c.isalpha() for c in word)
+                    and all(c.isalpha() or c in "-'’" for c in word) for word in words))
+
+async def ask_practitioner_name(message: Message, state: FSMContext, specialization: str):
+    await state.update_data(specialization=specialization)
+    await message.answer(
+        f"📋 Специализация: {specialization}\n\nВведите ваши фамилию и имя:",
+        reply_markup=ReplyKeyboardRemove(), parse_mode=None,
+    )
+    await state.set_state(RegistrationStates.waiting_for_practitioner_name)
+
+@registration_router.message(RegistrationStates.waiting_for_practitioner_name)
+async def process_practitioner_name(message: Message, state: FSMContext):
+    name = " ".join((message.text or "").split())
+    if not valid_practitioner_name(name):
+        await message.answer("❌ Введите фамилию и имя текстом, например Иванов Иван.")
+        return
+    await state.update_data(name=name)
+    await message.answer(
+        f"👤 Фамилия и имя: {name}\n\nВведите ваш регион:",
+        reply_markup=ReplyKeyboardRemove(), parse_mode=None,
+    )
+    await state.set_state(RegistrationStates.waiting_for_practitioner_region)
+
+@registration_router.message(RegistrationStates.waiting_for_practitioner_region)
+async def process_practitioner_region(message: Message, state: FSMContext):
+    region = (message.text or "").strip()
+    if not 2 <= len(region) <= 100:
+        await message.answer("❌ Регион должен содержать от 2 до 100 символов.\nПопробуйте еще раз:")
+        return
+    data = await state.get_data()
+    success = await db.add_private_practitioner(
+        telegram_id=message.from_user.id, name=data['name'],
+        specialization=data['specialization'], region=region,
+    )
+    if not success:
+        await message.answer("❌ Не удалось завершить регистрацию. Попробуйте снова через /start.")
+        return
+    await message.answer(
+        "✅ Регистрация завершена успешно!\n\n"
+        "👨‍⚕️ Частнопрактикующий врач\n"
+        f"👤 Фамилия и имя: {data['name']}\n"
+        f"📋 Специализация: {data['specialization']}\n"
+        f"📍 Регион: {region}\n\n"
+        "Теперь вы можете пользоваться всеми функциями бота!",
+        reply_markup=get_main_menu_kb(), parse_mode=None,
+    )
+    await finish_registration(message, state, 'private_practitioner')
 
 # Обработчики для сотрудников
 @registration_router.message(RegistrationStates.waiting_for_employee_first_name)
