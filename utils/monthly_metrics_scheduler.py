@@ -1,5 +1,5 @@
 """
-Scheduler для автоматической отправки метрик в последний день месяца
+Scheduler для автоматической отправки метрик в предпоследний день месяца
 """
 import asyncio
 import logging
@@ -23,9 +23,13 @@ MONTH_NAMES_RU = {
 DEFAULT_METRICS_SOURCE_NAME = "Telegram"
 
 
+def monthly_report_day(year: int, month: int) -> int:
+    return monthrange(year, month)[1] - 1
+
+
 class MonthlyMetricsScheduler:
     """
-    Планировщик для автоматической отправки метрик в последний день месяца
+    Планировщик для автоматической отправки метрик в предпоследний день месяца
     """
     
     def __init__(self):
@@ -40,8 +44,8 @@ class MonthlyMetricsScheduler:
         
     async def check_and_send_metrics(self):
         """
-        Проверяет, является ли сегодня последним днем месяца,
-        и если да - отправляет метрики на email и очищает данные
+        Проверяет, является ли сегодня предпоследним днем месяца,
+        и если да - отправляет метрики на email
         """
         try:
             now = datetime.now()
@@ -49,16 +53,16 @@ class MonthlyMetricsScheduler:
             current_month = now.month
             current_year = now.year
 
-            # Отчет отправляется в 23:55 последнего дня месяца.
-            last_day_of_month = monthrange(current_year, current_month)[1]
-            if current_day == last_day_of_month:
+            # Отчет отправляется в 23:55 предпоследнего дня месяца.
+            report_day = monthly_report_day(current_year, current_month)
+            if current_day == report_day:
                 logger.info(
-                    "[MONTHLY METRICS] Today is the last day of month: "
+                    "[MONTHLY METRICS] Today is the report day: "
                     f"{current_day}/{current_month}/{current_year}"
                 )
                 
-                # Вычисляем количество дней для отчета (весь месяц)
-                days_in_month = last_day_of_month
+                # Отчет строится по данным с начала месяца до дня отправки.
+                days_in_month = current_day
                 
                 # Формируем название месяца для отчета
                 month_name = f"{MONTH_NAMES_RU[current_month]} {current_year}"
@@ -91,10 +95,10 @@ class MonthlyMetricsScheduler:
                 logger.info(f"[MONTHLY METRICS] Monthly cycle complete. Data preserved for annual metrics.")
                 return True
             else:
-                days_until_end = last_day_of_month - current_day
+                days_until_report = report_day - current_day
                 logger.debug(
-                    f"[MONTHLY METRICS] Not the last day yet. "
-                    f"{days_until_end} days until month end"
+                    f"[MONTHLY METRICS] Not the report day. "
+                    f"{days_until_report} days until scheduled send"
                 )
                 return False
                 

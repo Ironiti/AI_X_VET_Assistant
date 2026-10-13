@@ -349,6 +349,7 @@ class ExcelExporter:
                 name as "Имя",
                 CASE user_type
                     WHEN 'client' THEN 'Клиент (ветеринар)'
+                    WHEN 'private_practitioner' THEN 'Частнопрактикующий врач'
                     WHEN 'employee' THEN 'Сотрудник'
                     ELSE 'Пользователь'
                 END as "Тип пользователя",
@@ -409,7 +410,7 @@ class ExcelExporter:
         # Добавляем колонку типа пользователя
         if not df.empty:
             df['Тип пользователя'] = df['user_type_raw'].apply(
-                lambda x: 'Клиент' if x == 'client' else ('Сотрудник' if x == 'employee' else 'Пользователь')
+                lambda x: 'Частнопрактикующий врач' if x == 'private_practitioner' else ('Клиент' if x == 'client' else ('Сотрудник' if x == 'employee' else 'Пользователь'))
             )
             df = df.drop('user_type_raw', axis=1)
         
@@ -441,7 +442,7 @@ class ExcelExporter:
             df['Телефон'] = df['Детали запроса'].str.extract(r'Телефон: ([^,]+)')
             df['Сообщение'] = df['Детали запроса'].str.extract(r'Сообщение: (.+)')
             df['Тип пользователя'] = df['user_type_raw'].apply(
-                lambda x: 'Клиент' if x == 'client' else ('Сотрудник' if x == 'employee' else 'Пользователь')
+                lambda x: 'Частнопрактикующий врач' if x == 'private_practitioner' else ('Клиент' if x == 'client' else ('Сотрудник' if x == 'employee' else 'Пользователь'))
             )
             df = df.drop(['Детали запроса', 'user_type_raw'], axis=1)
         
@@ -481,7 +482,7 @@ class ExcelExporter:
         # Добавляем тип пользователя
         if not df.empty:
             df['Тип пользователя'] = df['user_type_raw'].apply(
-                lambda x: 'Клиент' if x == 'client' else ('Сотрудник' if x == 'employee' else 'Пользователь')
+                lambda x: 'Частнопрактикующий врач' if x == 'private_practitioner' else ('Клиент' if x == 'client' else ('Сотрудник' if x == 'employee' else 'Пользователь'))
             )
             df = df.drop('user_type_raw', axis=1)
         

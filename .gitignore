@@ -43,3 +43,6 @@ data/test_chroma_4b/*
 data/test_chroma_8b/*
 data/test_data.xlsx
 data/test_workflow.xlsx
+
+# Local utility contains credentials; never publish it.
+/get_file_id.py

@@ -72,6 +72,13 @@ async def send_feedback_email(
               <li><strong>Код клиента:</strong> {user_data.get('client_code', 'Не указан')}</li>
               <li><strong>Специализация:</strong> {user_data.get('specialization', 'Не указана')}</li>
             """
+        elif user_data.get('user_type') == 'private_practitioner':
+            user_type = "Частнопрактикующий врач"
+            additional_info = f"""
+              <li><strong>Специальность:</strong> {user_data.get('specialization', 'Не указана')}</li>
+              <li><strong>Регион:</strong> {user_data.get('region', 'Не указан')}</li>
+            """
+            additional_text = f"Специальность: {user_data.get('specialization', 'Не указана')}\nРегион: {user_data.get('region', 'Не указан')}"
         elif user_data.get('user_type') == 'employee':
             user_type = "Сотрудник X-LAB VET"
             dept_map = {'laboratory': 'Лаборатория', 'sales': 'Продажи', 'support': 'Поддержка'}
@@ -187,6 +194,13 @@ async def send_callback_email(
             additional_text = f"""
         - Код клиента: {user_data.get('client_code', 'Не указан')}
         - Специализация: {user_data.get('specialization', 'Не указана')}"""
+        elif user_data.get('user_type') == 'private_practitioner':
+            user_type = "Частнопрактикующий врач"
+            additional_info = f"""
+              <li><strong>Специальность:</strong> {user_data.get('specialization', 'Не указана')}</li>
+              <li><strong>Регион:</strong> {user_data.get('region', 'Не указан')}</li>
+            """
+            additional_text = f"Специальность: {user_data.get('specialization', 'Не указана')}\nРегион: {user_data.get('region', 'Не указан')}"
         elif user_data.get('user_type') == 'employee':
             user_type = "Сотрудник X-LAB VET"
             dept_map = {'laboratory': 'Лаборатория', 'sales': 'Продажи', 'support': 'Поддержка'}

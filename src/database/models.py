@@ -942,6 +942,7 @@ class Database:
         self.test_processor.load_vector_store()
     
     async def create_tables(self):
+        await self.ensure_private_practitioner_type()
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS blank_files (
@@ -1018,7 +1019,7 @@ class Database:
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     telegram_id INTEGER PRIMARY KEY,
-                    user_type TEXT CHECK(user_type IN ('client', 'employee')),
+                    user_type TEXT CHECK(user_type IN ('client', 'employee', 'private_practitioner')),
                     
                     -- Общие поля
                     name TEXT,  -- Теперь используется и для клиентов, и для сотрудников
@@ -1505,6 +1506,75 @@ class Database:
             except aiosqlite.IntegrityError:
                 return False
     
+    async def ensure_private_practitioner_type(self):
+        """Extend the legacy users CHECK without losing rows or custom columns."""
+        async with aiosqlite.connect(self.db_path) as conn:
+            await conn.execute('PRAGMA busy_timeout=10000')
+            cursor = await conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='users'")
+            row = await cursor.fetchone()
+            if not row:
+                return
+            old_sql = row[0]
+            old_check = "CHECK(user_type IN ('client', 'employee'))"
+            new_check = "CHECK(user_type IN ('client', 'employee', 'private_practitioner'))"
+            if old_check not in old_sql:
+                if new_check in old_sql or 'CHECK' not in old_sql.upper():
+                    return
+                raise RuntimeError('Unexpected users schema; private practitioner migration was not applied')
+
+            # Keep a recoverable snapshot before rebuilding the constrained table.
+            from pathlib import Path
+            backup_dir = Path(self.db_path).parent / 'backups'
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            backup_path = backup_dir / ('users_before_cpv_' + datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '.db')
+            async with aiosqlite.connect(str(backup_path)) as backup:
+                await conn.backup(backup)
+
+            await conn.execute('PRAGMA foreign_keys=OFF')
+            await conn.execute('PRAGMA legacy_alter_table=ON')
+            await conn.execute('BEGIN IMMEDIATE')
+            try:
+                cursor = await conn.execute('PRAGMA foreign_key_check')
+                previous_violations = set(await cursor.fetchall())
+                cursor = await conn.execute("SELECT sql FROM sqlite_master WHERE tbl_name='users' AND type IN ('index', 'trigger') AND sql IS NOT NULL")
+                schema_objects = [row[0] for row in await cursor.fetchall()]
+                cursor = await conn.execute('PRAGMA table_info(users)')
+                columns = ', '.join('"' + row[1].replace('"', '""') + '"' for row in await cursor.fetchall())
+                new_sql = re.sub(r'CREATE TABLE\s+(?:IF NOT EXISTS\s+)?["`\[]?users["`\]]?', 'CREATE TABLE users_cpv_migration', old_sql, count=1, flags=re.IGNORECASE)
+                await conn.execute(new_sql.replace(old_check, new_check))
+                await conn.execute(f'INSERT INTO users_cpv_migration ({columns}) SELECT {columns} FROM users')
+                await conn.execute('DROP TABLE users')
+                await conn.execute('ALTER TABLE users_cpv_migration RENAME TO users')
+                for sql in schema_objects:
+                    await conn.execute(sql)
+                cursor = await conn.execute('PRAGMA foreign_key_check')
+                if set(await cursor.fetchall()) - previous_violations:
+                    raise RuntimeError('User references changed during the CPV migration')
+                await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
+            finally:
+                await conn.execute('PRAGMA legacy_alter_table=OFF')
+                await conn.execute('PRAGMA foreign_keys=ON')
+
+    async def add_private_practitioner(self, telegram_id: int, name: str,
+                                       specialization: str, region: str, country=None):
+        """Register a private veterinarian without a clinic code."""
+        async with aiosqlite.connect(self.db_path) as conn:
+            try:
+                await conn.execute(
+                    """INSERT INTO users (telegram_id, user_type, name, specialization,
+                                          region, country, registration_date, role)
+                       VALUES (?, 'private_practitioner', ?, ?, ?, ?, ?, 'user')""",
+                    (telegram_id, name, specialization, region, country, datetime.now()),
+                )
+                await conn.commit()
+            except aiosqlite.IntegrityError:
+                return False
+        self.clear_user_cache(telegram_id)
+        return True
+
     async def add_employee(self, telegram_id: int, name: str, region: str, department_function: str, country: str = 'BY'):
         """Добавление сотрудника только с именем (без фамилии)"""
         async with aiosqlite.connect(self.db_path) as db:
@@ -1802,13 +1872,15 @@ class Database:
             """)
             type_stats = await cursor.fetchall()
 
-            stats = {'total_users': 0, 'clients': 0, 'employees': 0, 'admins': 0}
+            stats = {'total_users': 0, 'clients': 0, 'employees': 0, 'private_practitioners': 0, 'admins': 0}
             for user_type, count in type_stats:
                 stats['total_users'] += count
                 if user_type == 'client':
                     stats['clients'] = count
                 elif user_type == 'employee':
                     stats['employees'] = count
+                elif user_type == 'private_practitioner':
+                    stats['private_practitioners'] = count
 
             # Считаем админов отдельно
             cursor = await db.execute("SELECT COUNT(*) FROM users WHERE role = 'admin'")

@@ -96,6 +96,8 @@ class PollExporter:
                             user_type = detail.get('user_type', '')
                             if user_type == 'client':
                                 role_display = 'Клиент'
+                            elif user_type == 'private_practitioner':
+                                role_display = 'Частнопрактикующий врач'
                             elif user_type == 'employee':
                                 role_display = 'Сотрудник'
                             else:
@@ -119,6 +121,8 @@ class PollExporter:
                             user_type = detail.get('user_type', '')
                             if user_type == 'client':
                                 role_display = 'Клиент'
+                            elif user_type == 'private_practitioner':
+                                role_display = 'Частнопрактикующий врач'
                             elif user_type == 'employee':
                                 role_display = 'Сотрудник'
                             else:
