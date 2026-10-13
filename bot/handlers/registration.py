@@ -1,3 +1,7 @@
+import asyncio
+import sqlite3
+from weakref import WeakValueDictionary
+
 import re
 import html
 from aiogram import F, Router
@@ -22,6 +26,7 @@ from src.data_vectorization import DataProcessor
 from src.database.db_init import db
 
 registration_router = Router()
+_specialization_locks = WeakValueDictionary()
 
 class RegistrationStates(StatesGroup):
     waiting_for_user_type = State()
@@ -390,105 +395,13 @@ async def process_client_name(message: Message, state: FSMContext):
 
 @registration_router.message(RegistrationStates.waiting_for_specialization)
 async def process_specialization(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    
-    if message.text == "✏️ Ввести свою специализацию":
-        await message.answer(
-            "Введите вашу специализацию:",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        await state.set_state(RegistrationStates.waiting_for_custom_specialization)
-        return
-    
-    specialization_map = {
-        "Нефрология": "Нефрология",
-        "Хирургия": "Хирургия",
-        "Терапия": "Терапия",
-        "Ортопедия": "Ортопедия",
-        "Онкология": "Онкология",
-        "Дерматология": "Дерматология",
-        "Офтальмология": "Офтальмология",
-        "Стоматология": "Стоматология"
-    }
-    
-    if message.text not in specialization_map:
-        await message.answer(
-            "❌ Пожалуйста, выберите специализацию из списка или введите свою",
-            reply_markup=get_specialization_kb()
-        )
-        return
-    
-    specialization = specialization_map[message.text]
-    data = await state.get_data()
-    if data.get('user_type') == 'private_practitioner':
-        await ask_practitioner_name(message, state, specialization)
-        return
-    
-    success = await db.add_client(
-        telegram_id=user_id,
-        name=data['name'],
-        client_code=data['client_code'],
-        specialization=specialization,
-        country=data.get('country', 'RU')
-    )
-
-    if success:
-        await message.answer(
-            f"✅ Регистрация завершена успешно!\n\n"
-            f"👤 Имя: {data['name']}\n"
-            f"🏥 Код клиники: {data['client_code']}\n"
-            f"📋 Специализация: {specialization}\n\n"
-            "Теперь вы можете пользоваться всеми функциями бота!",
-            reply_markup=get_main_menu_kb()
-        )
-    else:
-        await message.answer(
-            "❌ Ошибка регистрации. Возможно, вы уже зарегистрированы.\nПопробуйте еще раз: /start",
-            reply_markup=ReplyKeyboardRemove()
-        )
-
-    await state.clear()
+    async with _specialization_lock(message.from_user.id):
+        await _process_specialization_choice(message, state, custom=False)
 
 @registration_router.message(RegistrationStates.waiting_for_custom_specialization)
 async def process_custom_specialization(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    specialization = (message.text or "").strip()
-
-    if len(specialization) < 2 or len(specialization) > 100:
-        await message.answer(
-            "❌ Специализация должна содержать от 2 до 100 символов.\nПопробуйте еще раз:"
-        )
-        return
-
-    data = await state.get_data()
-    if data.get('user_type') == 'private_practitioner':
-        await ask_practitioner_name(message, state, specialization)
-        return
-    
-    success = await db.add_client(
-        telegram_id=user_id,
-        name=data['name'],
-        client_code=data['client_code'],
-        specialization=specialization,
-        country=data.get('country', 'RU')
-    )
-
-    if success:
-        await message.answer(
-            f"✅ Регистрация завершена успешно!\n\n"
-            f"👤 Имя: {data['name']}\n"
-            f"🏥 Код клиники: {data['client_code']}\n"
-            f"📋 Специализация: {specialization}\n\n"
-            "Теперь вы можете пользоваться всеми функциями бота!",
-            reply_markup=get_main_menu_kb()
-        )
-    else:
-        await message.answer(
-            "❌ Ошибка регистрации. Возможно, вы уже зарегистрированы.\nПопробуйте еще раз: /start",
-            reply_markup=ReplyKeyboardRemove()
-        )
-
-    await state.clear()
+    async with _specialization_lock(message.from_user.id):
+        await _process_specialization_choice(message, state, custom=True)
 
 def valid_practitioner_name(name: str) -> bool:
     words = name.split()
@@ -640,3 +553,123 @@ async def finish_registration(message: Message, state: FSMContext, user_type: st
         await state.clear()
 
     await state.clear()
+
+
+def _specialization_lock(user_id):
+    return _specialization_locks.setdefault(user_id, asyncio.Lock())
+
+
+async def _recover_specialization_state(message: Message, state: FSMContext):
+    """Keep late replies from overwriting a profile or using an incomplete FSM."""
+    user = await db.get_user(message.from_user.id)
+    if user:
+        await state.clear()
+        await message.answer(
+            "Вы уже зарегистрированы! 🎉\nИспользуйте меню для дальнейшей работы.",
+            reply_markup=get_admin_menu_kb() if user.get('role') == 'admin' else get_main_menu_kb(),
+        )
+        return None
+
+    data = await state.get_data()
+    if data.get('user_type') == 'private_practitioner':
+        return data
+    if data.get('user_type') != 'client':
+        await state.set_state(RegistrationStates.waiting_for_user_type)
+        await message.answer("👤 Выберите, кто вы:", reply_markup=get_registration_type_kb())
+        return None
+    if not data.get('client_code'):
+        await state.set_state(RegistrationStates.waiting_for_client_code)
+        await message.answer("Введите ваш код клиники:", reply_markup=ReplyKeyboardRemove())
+        return None
+    if not data.get('name'):
+        await state.set_state(RegistrationStates.waiting_for_client_name)
+        await message.answer("Введите ваше имя:", reply_markup=ReplyKeyboardRemove())
+        return None
+    return data
+
+
+async def _process_specialization_choice(message: Message, state: FSMContext, custom: bool):
+    """Only a saved profile completes registration; a busy DB keeps the form."""
+    try:
+        data = await _recover_specialization_state(message, state)
+        if data is not None:
+            await _save_specialization_choice(message, state, data, custom)
+    except sqlite3.OperationalError as error:
+        if not any(term in str(error).lower() for term in ('locked', 'busy')):
+            raise
+        print(f"[REGISTRATION] Database busy for user {message.from_user.id}")
+        await message.answer(
+            "Не удалось сохранить регистрацию. Ваши данные не потеряны.\n"
+            + ("Отправьте вашу специализацию ещё раз через минуту."
+               if custom else "Выберите вашу специализацию ещё раз через минуту."),
+            reply_markup=ReplyKeyboardRemove() if custom else get_specialization_kb(),
+        )
+
+
+async def _save_specialization_choice(message: Message, state: FSMContext, data: dict, custom: bool):
+    user_id = message.from_user.id
+
+    if not custom and message.text == "✏️ Ввести свою специализацию":
+        await message.answer(
+            "Введите вашу специализацию:",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        await state.set_state(RegistrationStates.waiting_for_custom_specialization)
+        return
+
+    specialization_map = {
+        "Нефрология": "Нефрология",
+        "Хирургия": "Хирургия",
+        "Терапия": "Терапия",
+        "Ортопедия": "Ортопедия",
+        "Онкология": "Онкология",
+        "Дерматология": "Дерматология",
+        "Офтальмология": "Офтальмология",
+        "Стоматология": "Стоматология"
+    }
+
+    specialization = (message.text or "").strip()
+    if custom and not 2 <= len(specialization) <= 100:
+        await message.answer(
+            "❌ Специализация должна содержать от 2 до 100 символов.\nПопробуйте еще раз:"
+        )
+        return
+    if not custom and message.text not in specialization_map:
+        await message.answer(
+            "❌ Пожалуйста, выберите специализацию из списка или введите свою",
+            reply_markup=get_specialization_kb()
+        )
+        return
+
+    if not custom:
+        specialization = specialization_map[message.text]
+    if data.get('user_type') == 'private_practitioner':
+        await ask_practitioner_name(message, state, specialization)
+        return
+
+    success = await db.add_client(
+        telegram_id=user_id,
+        name=data['name'],
+        client_code=data['client_code'],
+        specialization=specialization,
+        country=data.get('country', 'RU')
+    )
+
+    if success:
+        await message.answer(
+            f"✅ Регистрация завершена успешно!\n\n"
+            f"👤 Имя: {data['name']}\n"
+            f"🏥 Код клиники: {data['client_code']}\n"
+            f"📋 Специализация: {specialization}\n\n"
+            "Теперь вы можете пользоваться всеми функциями бота!",
+            reply_markup=get_main_menu_kb()
+        )
+    else:
+        await message.answer(
+            "❌ Не удалось сохранить регистрацию.\n"
+            + ("Отправьте вашу специализацию ещё раз." if custom else "Выберите вашу специализацию ещё раз."),
+            reply_markup=ReplyKeyboardRemove() if custom else get_specialization_kb(),
+        )
+        return
+    await state.clear()
+

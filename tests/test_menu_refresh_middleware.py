@@ -5,16 +5,25 @@ from bot.middleware.menu_refresh_middleware import MenuRefreshMiddleware
 
 
 class FakeDatabase:
-    def __init__(self, user=None, version=None):
+    def __init__(self, user=None, version=None, inactive=False):
         self.user = user
         self.version = version
+        self.inactive = inactive
         self.saved = []
+        self.touched = []
 
     async def get_user(self, _user_id):
         return self.user
 
     async def get_user_menu_version(self, _user_id):
         return self.version
+
+    async def is_user_menu_inactive(self, _user_id, _days):
+        return self.inactive
+
+    async def touch_user_menu_activity(self, user_id):
+        self.inactive = False
+        self.touched.append(user_id)
 
     async def set_user_menu_version(self, user_id, version):
         self.version = version
@@ -56,6 +65,40 @@ def test_refreshes_stale_menu_once_when_user_is_idle():
 
     asyncio.run(middleware(passthrough, message, {"state": FakeState()}))
     assert len(message.answers) == 1
+
+
+def test_refreshes_current_menu_once_after_month_of_inactivity():
+    database = FakeDatabase(user={"role": "user"}, version="2", inactive=True)
+    middleware = MenuRefreshMiddleware(
+        database=database,
+        menu_version="2",
+        inactivity_days=30,
+    )
+    message = FakeMessage("🖼️ Галерея пробирок")
+
+    asyncio.run(middleware(passthrough, message, {"state": FakeState()}))
+
+    assert message.answers[0][0] == (
+        "Вы давно не открывали бот — меню обновлено. "
+        "Все актуальные разделы уже доступны."
+    )
+    assert database.saved == [(42, "2")]
+    assert database.touched == [42]
+
+    asyncio.run(middleware(passthrough, message, {"state": FakeState()}))
+    assert len(message.answers) == 1
+
+
+def test_plain_start_after_inactivity_updates_menu_without_duplicate_notice():
+    database = FakeDatabase(user={"role": "user"}, version="2", inactive=True)
+    middleware = MenuRefreshMiddleware(database=database, menu_version="2")
+    message = FakeMessage("/start")
+
+    asyncio.run(middleware(passthrough, message, {"state": FakeState()}))
+
+    assert message.answers == []
+    assert database.saved == []
+    assert database.touched == [42]
 
 
 def test_refresh_is_sent_before_the_requested_idle_action():

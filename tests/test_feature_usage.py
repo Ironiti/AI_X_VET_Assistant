@@ -148,13 +148,13 @@ def test_client_sheet_contains_monthly_feature_chart(tmp_path):
 
     assert "👥 Клиенты" in workbook_xml
     assert "Использование функций по месяцам" in shared_strings
-    assert "Запрос по результатам" in chart_xml
+    assert "Популярность функций за весь период" in chart_xml
     assert "<c:barChart>" in chart_xml
-    assert '<c:barDir val="col"/>' in chart_xml
+    assert '<c:barDir val="bar"/>' in chart_xml
     assert "<c:lineChart>" not in chart_xml
 
 
-def test_feature_usage_sheet_contains_daily_column_chart(tmp_path):
+def test_feature_usage_sheet_contains_one_daily_total_series(tmp_path):
     db_path = tmp_path / "metrics.db"
     _create_users_table(db_path)
     tracker = FeatureUsageTracker(str(db_path))
@@ -178,6 +178,6 @@ def test_feature_usage_sheet_contains_daily_column_chart(tmp_path):
         chart_xml = archive.read("xl/charts/chart1.xml").decode("utf-8")
 
     assert "📌 Функции меню" in workbook_xml
-    assert "<c:barChart>" in chart_xml
-    assert '<c:barDir val="col"/>' in chart_xml
-    assert "<c:lineChart>" not in chart_xml
+    assert "Все нажатия по дням" in chart_xml
+    assert "<c:lineChart>" in chart_xml
+    assert "<c:barChart>" not in chart_xml

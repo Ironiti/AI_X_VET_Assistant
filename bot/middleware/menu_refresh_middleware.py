@@ -8,7 +8,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
 from bot.keyboards import get_menu_by_role
-from config import MENU_VERSION
+from config import MENU_REFRESH_INACTIVITY_DAYS, MENU_VERSION
 from src.database.db_init import db
 
 logger = logging.getLogger(__name__)
@@ -36,10 +36,16 @@ def _is_plain_start(text: str | None) -> bool:
 class MenuRefreshMiddleware(BaseMiddleware):
     """Show the current reply menu once without interrupting an active flow."""
 
-    def __init__(self, database=None, menu_version: str = MENU_VERSION):
+    def __init__(
+        self,
+        database=None,
+        menu_version: str = MENU_VERSION,
+        inactivity_days: int = MENU_REFRESH_INACTIVITY_DAYS,
+    ):
         super().__init__()
         self.database = database or db
         self.menu_version = menu_version
+        self.inactivity_days = max(1, inactivity_days)
 
     async def __call__(
         self,
@@ -59,16 +65,29 @@ class MenuRefreshMiddleware(BaseMiddleware):
                     delivered_before = await self.database.get_user_menu_version(
                         event.from_user.id
                     )
+                    inactive = await self.database.is_user_menu_inactive(
+                        event.from_user.id,
+                        self.inactivity_days,
+                    )
                     handler_will_show_menu = (
                         _is_plain_start(event.text)
                         or event.text in MAIN_MENU_RETURN_TEXTS
                     )
                     if (
-                        delivered_before != self.menu_version
+                        (
+                            delivered_before != self.menu_version
+                            or inactive
+                        )
                         and not handler_will_show_menu
                     ):
+                        text = (
+                            "Вы давно не открывали бот — меню обновлено. "
+                            "Все актуальные разделы уже доступны."
+                            if inactive
+                            else "Меню обновлено."
+                        )
                         await event.answer(
-                            "Меню обновлено.",
+                            text,
                             reply_markup=get_menu_by_role(
                                 user_before.get("role", "user")
                             ),
@@ -95,6 +114,8 @@ class MenuRefreshMiddleware(BaseMiddleware):
             user = await self.database.get_user(user_id)
             if not user:
                 return result
+
+            await self.database.touch_user_menu_activity(user_id)
 
             # A dialogue, registration, form, or upload still owns the keyboard.
             current_state = await state.get_state() if state else None

@@ -2335,6 +2335,8 @@ async def handle_system_management(message: Message, state: FSMContext):
         try:
             from src.data_vectorization import DataProcessor
             processor = DataProcessor()
+            from src.preanalytics_refresh import prepare_preanalytics
+            prepare_preanalytics(processor)
             processor.create_vector_store(reset=True)
             
             await loading_msg.delete()

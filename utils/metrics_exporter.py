@@ -236,6 +236,17 @@ class MetricsExporter:
             'valign': 'vcenter',
             'border': 1
         })
+
+        formats['total_row'] = workbook.add_format({
+            'bold': True,
+            'font_size': 10,
+            'font_color': '#0F172A',
+            'bg_color': LIGHT_BLUE,
+            'align': 'right',
+            'valign': 'vcenter',
+            'border': 1,
+            'num_format': '#,##0',
+        })
         
         return formats
     
@@ -305,24 +316,23 @@ class MetricsExporter:
 
         if daily_usage:
             worksheet.autofilter(0, 0, len(daily_usage), len(headers) - 1)
-            chart = workbook.add_chart({'type': 'column', 'subtype': 'clustered'})
-            colors = ['#1E3A8A', '#10B981', '#8B5CF6', '#F59E0B', '#EF4444', '#64748B', '#06B6D4']
+            chart = workbook.add_chart({'type': 'line'})
             last_excel_row = len(daily_usage) + 1
-            for column, ((_, label), color) in enumerate(zip(FEATURE_USAGE_COLUMNS, colors), start=1):
-                chart.add_series({
-                    'name': label,
-                    'categories': f"='📌 Функции меню'!$A$2:$A${last_excel_row}",
-                    'values': (
-                        f"='📌 Функции меню'!${xl_col_to_name(column)}$2:"
-                        f"${xl_col_to_name(column)}${last_excel_row}"
-                    ),
-                    'fill': {'color': color},
-                    'border': {'color': color},
-                })
-            chart.set_title({'name': 'Нажатия по функциям главного меню'})
+            total_column = xl_col_to_name(len(feature_keys) + 1)
+            chart.add_series({
+                'name': 'Все нажатия',
+                'categories': f"='📌 Функции меню'!$A$2:$A${last_excel_row}",
+                'values': (
+                    f"='📌 Функции меню'!${total_column}$2:"
+                    f"${total_column}${last_excel_row}"
+                ),
+                'line': {'color': '#1E3A8A', 'width': 2.5},
+                'marker': {'type': 'circle', 'size': 4},
+            })
+            chart.set_title({'name': 'Все нажатия по дням'})
             chart.set_x_axis({'name': 'Дата'})
             chart.set_y_axis({'name': 'Количество нажатий', 'min': 0})
-            chart.set_legend({'position': 'bottom'})
+            chart.set_legend({'none': True})
             chart.set_size({'width': 920, 'height': 430})
             worksheet.insert_chart(len(daily_usage) + 3, 0, chart)
     
@@ -953,6 +963,7 @@ class MetricsExporter:
                 formats['section_header'],
             )
             row += 1
+            header_row = row
             for column, header in enumerate(headers):
                 worksheet.write(row, column, header, formats['table_header'])
 
@@ -961,16 +972,18 @@ class MetricsExporter:
             worksheet.set_column(len(feature_keys) + 1, len(feature_keys) + 1, 12)
 
             row += 1
-            first_data_row = row
+            feature_totals = {feature_key: 0 for feature_key in feature_keys}
             for month_data in monthly_usage:
                 worksheet.write(row, 0, month_data.get('month', ''), formats['cell_data'])
                 for column, feature_key in enumerate(feature_keys, start=1):
+                    value = month_data.get(feature_key, 0) or 0
                     worksheet.write(
                         row,
                         column,
-                        month_data.get(feature_key, 0) or 0,
+                        value,
                         formats['cell_number'],
                     )
+                    feature_totals[feature_key] += value
                 worksheet.write(
                     row,
                     len(feature_keys) + 1,
@@ -979,26 +992,39 @@ class MetricsExporter:
                 )
                 row += 1
 
-            chart = workbook.add_chart({'type': 'column', 'subtype': 'clustered'})
-            colors = ['#1E3A8A', '#10B981', '#8B5CF6', '#F59E0B', '#EF4444', '#64748B', '#06B6D4']
-            first_excel_row = first_data_row + 1
-            last_excel_row = row
-            for column, ((_, label), color) in enumerate(zip(FEATURE_USAGE_COLUMNS, colors), start=1):
-                column_name = xl_col_to_name(column)
-                chart.add_series({
-                    'name': label,
-                    'categories': f"='👥 Клиенты'!$A${first_excel_row}:$A${last_excel_row}",
-                    'values': (
-                        f"='👥 Клиенты'!${column_name}${first_excel_row}:"
-                        f"${column_name}${last_excel_row}"
-                    ),
-                    'fill': {'color': color},
-                    'border': {'color': color},
-                })
-            chart.set_title({'name': 'Использование функций по месяцам'})
-            chart.set_x_axis({'name': 'Месяц'})
-            chart.set_y_axis({'name': 'Количество нажатий', 'min': 0})
-            chart.set_legend({'position': 'bottom'})
+            total_row = row
+            worksheet.write(total_row, 0, 'Всего', formats['total_row'])
+            for column, feature_key in enumerate(feature_keys, start=1):
+                worksheet.write(total_row, column, feature_totals[feature_key], formats['total_row'])
+            worksheet.write(
+                total_row,
+                len(feature_keys) + 1,
+                sum(feature_totals.values()),
+                formats['total_row'],
+            )
+            row += 1
+
+            first_feature_col = xl_col_to_name(1)
+            last_feature_col = xl_col_to_name(len(feature_keys))
+            chart = workbook.add_chart({'type': 'bar'})
+            chart.add_series({
+                'name': 'Нажатия',
+                'categories': (
+                    f"='👥 Клиенты'!${first_feature_col}${header_row + 1}:"
+                    f"${last_feature_col}${header_row + 1}"
+                ),
+                'values': (
+                    f"='👥 Клиенты'!${first_feature_col}${total_row + 1}:"
+                    f"${last_feature_col}${total_row + 1}"
+                ),
+                'fill': {'color': '#3B82F6'},
+                'border': {'none': True},
+                'data_labels': {'value': True},
+            })
+            chart.set_title({'name': 'Популярность функций за весь период'})
+            chart.set_x_axis({'name': 'Количество нажатий', 'min': 0})
+            chart.set_y_axis({'reverse': True, 'interval_unit': 1})
+            chart.set_legend({'none': True})
             chart.set_size({'width': 920, 'height': 430})
             worksheet.insert_chart(row + 1, 0, chart)
     
@@ -1087,7 +1113,7 @@ class MetricsExporter:
         
         if quality:
             # Общая таблица
-            headers = ['Метрика', 'Значение', 'Процент']
+            headers = ['Метрика', 'Значение', 'От всех запросов, %']
             for col, header in enumerate(headers):
                 worksheet.write(row, col, header, formats['table_header'])
             
@@ -1125,7 +1151,7 @@ class MetricsExporter:
                                 formats['section_header'])
             row += 1
             
-            headers = ['Тип запроса', 'Количество', 'Доля от общего объема']
+            headers = ['Тип запроса', 'Количество', 'От всех запросов, %']
             for col, header in enumerate(headers):
                 worksheet.write(row, col, header, formats['table_header'])
             
@@ -1144,20 +1170,25 @@ class MetricsExporter:
                 worksheet.write(row, 2, f'{pct:.0f}%', formats['metric_percent'])
                 row += 1
             
-            # Добавляем круговую диаграмму
+            # Горизонтальные столбцы проще сравнивать, чем сектора круга.
             if total > 0:
-                chart = workbook.add_chart({'type': 'pie'})
+                chart = workbook.add_chart({'type': 'bar'})
                 chart.add_series({
                     'name': 'Распределение по типам',
                     'categories': f'=\'🎯 Качество\'!$A${row-2}:$A${row}',
                     'values': f'=\'🎯 Качество\'!$B${row-2}:$B${row}',
-                    'data_labels': {'percentage': True, 'leader_lines': True}
+                    'fill': {'color': '#3B82F6'},
+                    'border': {'none': True},
+                    'data_labels': {'value': True}
                 })
                 chart.set_title({
                     'name': 'Распределение запросов по типам',
                     'name_font': {'size': 14, 'bold': True}
                 })
-                chart.set_size({'width': 500, 'height': 400})
+                chart.set_x_axis({'name': 'Количество', 'min': 0})
+                chart.set_y_axis({'reverse': True})
+                chart.set_legend({'none': True})
+                chart.set_size({'width': 600, 'height': 320})
                 worksheet.insert_chart(row + 2, 0, chart)
     
     async def _create_detailed_data_sheet(self, workbook, formats, days):
