@@ -2,7 +2,7 @@ import random
 import string
 import html
 from aiogram import Router, F
-from aiogram.types import Message, BufferedInputFile, ReplyKeyboardMarkup, KeyboardButton, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, InputMediaDocument
+from aiogram.types import Message, BufferedInputFile, ReplyKeyboardMarkup, KeyboardButton, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, InputMediaDocument, InputRichMessage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from bot.keyboards import (
@@ -12,6 +12,12 @@ from bot.keyboards import (
 from utils.excel_exporter import ExcelExporter
 from utils.csv_exporter import CSVExporter
 from utils.metrics_exporter import MetricsExporter
+from utils.rich_broadcast import (
+    build_rich_broadcast_markdown,
+    build_rich_broadcast_message,
+    decode_markdown_file,
+    is_markdown_filename,
+)
 from datetime import datetime
 import asyncio
 
@@ -37,7 +43,10 @@ class ExportStates(StatesGroup):
 class BroadcastStates(StatesGroup):
     choosing_broadcast_type = State()
     choosing_content_type = State()
+    collecting_broadcast_content = State()
+    confirming_broadcast = State()
     waiting_for_message = State()
+    waiting_for_markdown_file = State()
     waiting_for_media = State()
     waiting_for_caption = State()
     collecting_photos = State()  # Новое состояние для сбора нескольких фото
@@ -90,6 +99,8 @@ class BlanksManagementStates(StatesGroup):
     entering_description = State()
     viewing_blanks = State()
     deleting_blank = State()
+    selecting_update = State()
+    waiting_for_update_document = State()
     
 def get_container_photos_kb():
     keyboard = [
@@ -1034,12 +1045,31 @@ def get_broadcast_content_type_kb():
     from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
     keyboard = [
         [KeyboardButton(text="📝 Текстовое сообщение")],
+        [KeyboardButton(text="📑 Markdown (.md)")],
         [KeyboardButton(text="🖼️ Одно изображение")],
         [KeyboardButton(text="📸 Несколько изображений")],
         [KeyboardButton(text="📄 Документы")],
         [KeyboardButton(text="🎬 Видео")],
         [KeyboardButton(text="🎭 GIF")],
         [KeyboardButton(text="🔙 Вернуться в главное меню")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+
+
+def get_unified_broadcast_kb():
+    keyboard = [
+        [KeyboardButton(text="👁 Предпросмотр")],
+        [KeyboardButton(text="🧹 Очистить")],
+        [KeyboardButton(text="🔙 Вернуться в главное меню")],
+    ]
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+
+
+def get_broadcast_confirmation_kb():
+    keyboard = [
+        [KeyboardButton(text="✅ Отправить рассылку")],
+        [KeyboardButton(text="✏️ Вернуться к материалам")],
+        [KeyboardButton(text="🔙 Вернуться в главное меню")],
     ]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
@@ -1171,6 +1201,7 @@ async def show_stats(message: Message):
         f"📊 Статистика системы:\n\n"
         f"👥 Всего пользователей: {stats['total_users']}\n"
         f"├ Клиентов: {stats['clients']}\n"
+        f"├ Частнопрактикующих врачей: {stats['private_practitioners']}\n"
         f"├ Сотрудников: {stats['employees']}\n"
         f"└ Администраторов: {stats['admins']}\n\n"
         f"📋 Обращений: {stats['total_requests']}\n"
@@ -1323,12 +1354,205 @@ async def process_broadcast_type(message: Message, state: FSMContext):
         )
         return
     
-    await state.update_data(broadcast_type=broadcast_types[message.text])
-    await message.answer(
-        "Выберите тип контента для рассылки:",
-        reply_markup=get_broadcast_content_type_kb()
+    await state.update_data(
+        broadcast_type=broadcast_types[message.text],
+        content_type="unified",
+        markdown="",
+        media_items=[],
+        documents=[],
     )
-    await state.set_state(BroadcastStates.choosing_content_type)
+    await message.answer(
+        "Отправьте материалы для рассылки в любом порядке:\n\n"
+        "• текст с Markdown-разметкой или файл .md;\n"
+        "• фотографии, видео, аудио, голосовые сообщения, GIF и документы.\n\n"
+        "Можно отправить несколько файлов. Когда всё будет готово, "
+        "нажмите «👁 Предпросмотр».",
+        reply_markup=get_unified_broadcast_kb()
+    )
+    await state.set_state(BroadcastStates.collecting_broadcast_content)
+
+
+def _unified_broadcast_summary(data: dict) -> str:
+    media_items = data.get("media_items", [])
+    documents = data.get("documents", [])
+    counts = {
+        "photo": sum(item.get("type") == "photo" for item in media_items),
+        "video": sum(item.get("type") == "video" for item in media_items),
+        "animation": sum(item.get("type") == "animation" for item in media_items),
+        "audio": sum(item.get("type") == "audio" for item in media_items),
+        "voice": sum(item.get("type") == "voice" for item in media_items),
+    }
+    parts = []
+    if data.get("markdown", "").strip():
+        parts.append("текст добавлен")
+    if counts["photo"]:
+        parts.append(f"фото: {counts['photo']}")
+    if counts["video"]:
+        parts.append(f"видео: {counts['video']}")
+    if counts["animation"]:
+        parts.append(f"GIF: {counts['animation']}")
+    if counts["audio"]:
+        parts.append(f"аудио: {counts['audio']}")
+    if counts["voice"]:
+        parts.append(f"голосовые: {counts['voice']}")
+    if documents:
+        parts.append(f"документы: {len(documents)}")
+    return ", ".join(parts) if parts else "материалов пока нет"
+
+
+async def _append_unified_markdown(state: FSMContext, markdown: str) -> None:
+    data = await state.get_data()
+    current = data.get("markdown", "").strip()
+    updated = f"{current}\n\n{markdown.strip()}" if current else markdown.strip()
+    build_rich_broadcast_markdown(updated)
+    await state.update_data(markdown=updated)
+
+
+async def _show_unified_broadcast_preview(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    markdown = data.get("markdown", "").strip()
+    media_items = data.get("media_items", [])
+    documents = data.get("documents", [])
+    if not markdown and not media_items and not documents:
+        await message.answer(
+            "Сначала добавьте текст или файлы.",
+            reply_markup=get_unified_broadcast_kb(),
+        )
+        return
+
+    try:
+        rich_message = build_rich_broadcast_message(markdown, media_items)
+        await message.answer("Так рассылка будет выглядеть у получателя:")
+        await message.bot.send_rich_message(
+            chat_id=message.chat.id,
+            rich_message=rich_message,
+            disable_notification=True,
+        )
+        for document in documents:
+            await message.bot.send_document(
+                chat_id=message.chat.id,
+                document=document["file_id"],
+            )
+    except Exception as exc:
+        print(f"Failed to build broadcast preview: {exc}")
+        await message.answer(
+            "Не удалось сформировать предпросмотр. Проверьте Markdown-разметку и файлы.",
+            reply_markup=get_unified_broadcast_kb(),
+        )
+        return
+
+    recipients = await db.get_broadcast_recipients(data["broadcast_type"])
+    await message.answer(
+        f"Отправить эту рассылку? Получателей: {len(recipients)}.",
+        reply_markup=get_broadcast_confirmation_kb(),
+    )
+    await state.set_state(BroadcastStates.confirming_broadcast)
+
+
+@admin_router.message(BroadcastStates.collecting_broadcast_content)
+async def collect_unified_broadcast_content(message: Message, state: FSMContext):
+    if message.text == "🔙 Вернуться в главное меню":
+        await state.clear()
+        await message.answer("Операция отменена.", reply_markup=get_admin_menu_kb())
+        return
+
+    if message.text == "🧹 Очистить":
+        await state.update_data(markdown="", media_items=[], documents=[])
+        await message.answer("Материалы удалены.", reply_markup=get_unified_broadcast_kb())
+        return
+
+    if message.text == "👁 Предпросмотр":
+        await _show_unified_broadcast_preview(message, state)
+        return
+
+    data = await state.get_data()
+    media_items = data.get("media_items", [])
+    documents = data.get("documents", [])
+
+    try:
+        if message.photo:
+            if len(media_items) >= 50:
+                raise ValueError("Можно добавить не больше 50 фото и видео.")
+            media_items.append({"type": "photo", "file_id": message.photo[-1].file_id})
+            await state.update_data(media_items=media_items)
+        elif message.video:
+            if len(media_items) >= 50:
+                raise ValueError("Можно добавить не больше 50 фото и видео.")
+            media_items.append({"type": "video", "file_id": message.video.file_id})
+            await state.update_data(media_items=media_items)
+        elif message.animation:
+            if len(media_items) >= 50:
+                raise ValueError("Можно добавить не больше 50 фото и видео.")
+            media_items.append({"type": "animation", "file_id": message.animation.file_id})
+            await state.update_data(media_items=media_items)
+        elif message.audio:
+            if len(media_items) >= 50:
+                raise ValueError("Можно добавить не больше 50 медиафайлов.")
+            media_items.append({"type": "audio", "file_id": message.audio.file_id})
+            await state.update_data(media_items=media_items)
+        elif message.voice:
+            if len(media_items) >= 50:
+                raise ValueError("Можно добавить не больше 50 медиафайлов.")
+            media_items.append({"type": "voice", "file_id": message.voice.file_id})
+            await state.update_data(media_items=media_items)
+        elif message.document:
+            if is_markdown_filename(message.document.file_name):
+                downloaded = await message.bot.download(message.document)
+                if downloaded is None:
+                    raise ValueError("Не удалось скачать Markdown-файл.")
+                await _append_unified_markdown(state, decode_markdown_file(downloaded.read()))
+            else:
+                if len(documents) >= 10:
+                    raise ValueError("Можно добавить не больше 10 документов.")
+                documents.append({
+                    "type": "document",
+                    "file_id": message.document.file_id,
+                    "file_name": message.document.file_name,
+                })
+                await state.update_data(documents=documents)
+        elif message.text:
+            await _append_unified_markdown(state, message.text)
+        else:
+            raise ValueError("Этот тип сообщения пока не поддерживается в рассылке.")
+    except ValueError as exc:
+        await message.answer(str(exc), reply_markup=get_unified_broadcast_kb())
+        return
+    except Exception as exc:
+        print(f"Failed to collect broadcast content: {exc}")
+        await message.answer(
+            "Не удалось добавить материал. Отправьте его ещё раз.",
+            reply_markup=get_unified_broadcast_kb(),
+        )
+        return
+
+    updated = await state.get_data()
+    await message.answer(
+        f"Добавлено. Сейчас: {_unified_broadcast_summary(updated)}.",
+        reply_markup=get_unified_broadcast_kb(),
+    )
+
+
+@admin_router.message(BroadcastStates.confirming_broadcast)
+async def confirm_unified_broadcast(message: Message, state: FSMContext):
+    if message.text == "✅ Отправить рассылку":
+        await send_broadcast(message, state)
+        return
+    if message.text == "✏️ Вернуться к материалам":
+        await state.set_state(BroadcastStates.collecting_broadcast_content)
+        data = await state.get_data()
+        await message.answer(
+            f"Продолжайте добавлять материалы. Сейчас: {_unified_broadcast_summary(data)}.",
+            reply_markup=get_unified_broadcast_kb(),
+        )
+        return
+    if message.text == "🔙 Вернуться в главное меню":
+        await state.clear()
+        await message.answer("Операция отменена.", reply_markup=get_admin_menu_kb())
+        return
+    await message.answer(
+        "Выберите действие кнопкой ниже.",
+        reply_markup=get_broadcast_confirmation_kb(),
+    )
 
 @admin_router.message(BroadcastStates.choosing_content_type)
 async def process_content_type(message: Message, state: FSMContext):
@@ -1337,6 +1561,20 @@ async def process_content_type(message: Message, state: FSMContext):
         await message.answer("Операция отменена.", reply_markup=get_admin_menu_kb())
         return
     
+    await state.update_data(
+        content_type="unified",
+        markdown="",
+        media_items=[],
+        documents=[],
+    )
+    await message.answer(
+        "Выбор типа больше не нужен. Отправьте текст и файлы в любом порядке, "
+        "затем нажмите «👁 Предпросмотр».",
+        reply_markup=get_unified_broadcast_kb(),
+    )
+    await state.set_state(BroadcastStates.collecting_broadcast_content)
+    return
+
     if message.text == "📝 Текстовое сообщение":
         await state.update_data(content_type="text")
         await message.answer(
@@ -1348,6 +1586,16 @@ async def process_content_type(message: Message, state: FSMContext):
             reply_markup=get_back_to_menu_kb()
         )
         await state.set_state(BroadcastStates.waiting_for_message)
+
+    elif message.text == "📑 Markdown (.md)":
+        await state.update_data(content_type="rich_markdown")
+        await message.answer(
+            "📑 Отправьте один файл в формате .md.\n\n"
+            "Текст из файла будет отправлен как оформленное сообщение. "
+            "Поддерживаются заголовки, списки, таблицы, цитаты и ссылки.",
+            reply_markup=get_back_to_menu_kb()
+        )
+        await state.set_state(BroadcastStates.waiting_for_markdown_file)
     
     elif message.text == "🖼️ Одно изображение":
         await state.update_data(content_type="photo")
@@ -1459,6 +1707,44 @@ async def process_broadcast_message(message: Message, state: FSMContext):
     await state.update_data(text=message.text)
     await send_broadcast(message, state)
 
+
+@admin_router.message(BroadcastStates.waiting_for_markdown_file)
+async def process_broadcast_markdown_file(message: Message, state: FSMContext):
+    if message.text == "🔙 Вернуться в главное меню":
+        await state.clear()
+        await message.answer("Операция отменена.", reply_markup=get_admin_menu_kb())
+        return
+
+    document = message.document
+    if not document or not is_markdown_filename(document.file_name):
+        await message.answer(
+            "❌ Нужен файл с расширением .md.",
+            reply_markup=get_back_to_menu_kb()
+        )
+        return
+
+    try:
+        downloaded = await message.bot.download(document)
+        if downloaded is None:
+            raise ValueError("Не удалось скачать файл.")
+        markdown = decode_markdown_file(downloaded.read())
+    except ValueError as exc:
+        await message.answer(
+            f"❌ {exc}",
+            reply_markup=get_back_to_menu_kb()
+        )
+        return
+    except Exception as exc:
+        print(f"Failed to read Markdown broadcast file: {exc}")
+        await message.answer(
+            "❌ Не удалось прочитать файл. Отправьте его ещё раз.",
+            reply_markup=get_back_to_menu_kb()
+        )
+        return
+
+    await state.update_data(text=markdown, file_name=document.file_name)
+    await send_broadcast(message, state)
+
 async def send_broadcast(message: Message, state: FSMContext):
     data = await state.get_data()
     broadcast_type = data['broadcast_type']
@@ -1479,6 +1765,13 @@ async def send_broadcast(message: Message, state: FSMContext):
     
     if content_type == "text":
         preview_text += f"Текст сообщения:\n{data.get('text')}\n\n"
+    elif content_type == "unified":
+        preview_text = f"Начинаю отправку. Получателей: {len(recipients)}."
+    elif content_type == "rich_markdown":
+        preview_text += (
+            f"Тип контента: Markdown-сообщение\n"
+            f"Файл: {data.get('file_name')}\n\n"
+        )
     elif content_type == "photo_group":
         media_group = data.get('media_group', [])
         preview_text += f"Тип контента: Несколько изображений ({len(media_group)} шт.)\n"
@@ -1495,7 +1788,8 @@ async def send_broadcast(message: Message, state: FSMContext):
         if data.get('caption'):
             preview_text += f"Подпись: {data.get('caption')}\n\n"
     
-    preview_text += "Начинаю рассылку..."
+    if content_type != "unified":
+        preview_text += "Начинаю рассылку..."
     
     await message.answer(preview_text)
     
@@ -1505,12 +1799,33 @@ async def send_broadcast(message: Message, state: FSMContext):
     
     for recipient_id in recipients:
         try:
-            if content_type == "text":
+            if content_type == "unified":
+                await bot.send_rich_message(
+                    chat_id=recipient_id,
+                    rich_message=build_rich_broadcast_message(
+                        data.get('markdown'),
+                        data.get('media_items', []),
+                    ),
+                )
+                for document in data.get('documents', []):
+                    await bot.send_document(
+                        chat_id=recipient_id,
+                        document=document['file_id'],
+                    )
+                    await asyncio.sleep(0.05)
+            elif content_type == "text":
                 final_text = f"📢 <b>Сообщение от группы техподдержки</b>\n\n{data.get('text')}"
                 await bot.send_message(
                     recipient_id,
                     final_text,
                     parse_mode="HTML"
+                )
+            elif content_type == "rich_markdown":
+                await bot.send_rich_message(
+                    chat_id=recipient_id,
+                    rich_message=InputRichMessage(
+                        markdown=build_rich_broadcast_markdown(data.get('text', ''))
+                    )
                 )
             elif content_type == "photo":
                 caption = f"📢 <b>Сообщение от группы техподдержки</b>\n\n{data.get('caption')}" if data.get('caption') else "📢 <b>Сообщение от группы техподдержки</b>"
@@ -1745,6 +2060,8 @@ async def show_users(message: Message):
         # Определяем тип пользователя
         if user_data.get('user_type') == 'client':
             user_type = "👨‍⚕️ Ветеринар"
+        elif user_data.get('user_type') == 'private_practitioner':
+            user_type = 'Частнопрактикующий врач'
         elif user_data.get('user_type') == 'employee':
             user_type = "🔬 Сотрудник"
         else:
@@ -1767,6 +2084,9 @@ async def show_users(message: Message):
             if user_data.get('region'):
                 text += f"📍 Регион: {user_data['region']}\n"
         
+        if user_data.get('user_type') == 'private_practitioner' and user_data.get('region'):
+            text += f"📍 Регион: {user_data['region']}\n"
+
         text += f"🌍 Страна: {user_data.get('country', 'BY')}\n"
         text += f"📅 {user_data['registration_date']}\n"
         text += "─" * 30 + "\n"
@@ -2113,6 +2433,7 @@ def get_blanks_management_kb():
     """Клавиатура управления бланками"""
     keyboard = [
         [KeyboardButton(text="➕ Добавить бланк")],
+        [KeyboardButton(text="🔄 Обновить бланк")],
         [KeyboardButton(text="📋 Просмотр бланков")],
         [KeyboardButton(text="🗑️ Удалить бланк")],
         [KeyboardButton(text="🔙 Назад")]
@@ -2335,6 +2656,82 @@ async def start_add_blank(message: Message, state: FSMContext):
         reply_markup=get_back_to_menu_kb()
     )
     await state.set_state(BlanksManagementStates.entering_title)
+
+@admin_router.message(BlanksManagementStates.menu, F.text == "🔄 Обновить бланк")
+async def start_update_blank(message: Message, state: FSMContext):
+    """Выбор существующего бланка для замены файла."""
+    items = await db.get_all_blank_documents()
+    if not items:
+        await message.answer("Список бланков пока пуст.", reply_markup=get_blanks_management_kb())
+        return
+    keyboard = [
+        [KeyboardButton(text=f"🔄 {item['id']} · {item['title'][:34]}")]
+        for item in items[:20]
+    ]
+    keyboard.append([KeyboardButton(text="🔙 Отмена")])
+    await message.answer(
+        "Выберите бланк, файл которого нужно заменить:",
+        reply_markup=ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+    )
+    await state.set_state(BlanksManagementStates.selecting_update)
+
+@admin_router.message(BlanksManagementStates.selecting_update)
+async def select_blank_for_update(message: Message, state: FSMContext):
+    if message.text == "🔙 Отмена":
+        await state.set_state(BlanksManagementStates.menu)
+        await message.answer("Обновление отменено.", reply_markup=get_blanks_management_kb())
+        return
+    if not message.text or not message.text.startswith("🔄 "):
+        await message.answer("Выберите бланк кнопкой ниже.")
+        return
+    try:
+        blank_id = int(message.text[2:].split(" · ", 1)[0])
+    except (TypeError, ValueError):
+        await message.answer("Не удалось определить бланк. Выберите его кнопкой ниже.")
+        return
+    selected = await db.get_blank_document(blank_id)
+    if not selected:
+        await message.answer("Бланк не найден. Откройте список заново.")
+        return
+    await state.update_data(update_blank_id=selected['id'], update_blank_title=selected['title'])
+    await state.set_state(BlanksManagementStates.waiting_for_update_document)
+    await message.answer(
+        f"Отправьте новый файл для бланка «{html.escape(selected['title'])}».",
+        parse_mode="HTML",
+        reply_markup=get_back_to_menu_kb()
+    )
+
+@admin_router.message(BlanksManagementStates.waiting_for_update_document, F.document)
+async def update_blank_document(message: Message, state: FSMContext):
+    data = await state.get_data()
+    blank_id = data.get('update_blank_id')
+    title = data.get('update_blank_title')
+    if not blank_id or not title:
+        await state.set_state(BlanksManagementStates.menu)
+        await message.answer(
+            "Не удалось определить бланк. Начните обновление заново.",
+            reply_markup=get_blanks_management_kb()
+        )
+        return
+    success = await db.update_blank_document_file(blank_id, message.document.file_id)
+    await state.set_state(BlanksManagementStates.menu)
+    if success:
+        await message.answer(
+            f"✅ Бланк «{html.escape(title)}» обновлён.\n\n"
+            "Новый файл используется в разделе бланков и в карточках анализов.",
+            parse_mode="HTML",
+            reply_markup=get_blanks_management_kb()
+        )
+    else:
+        await message.answer("❌ Не удалось обновить бланк.", reply_markup=get_blanks_management_kb())
+
+@admin_router.message(BlanksManagementStates.waiting_for_update_document)
+async def invalid_blank_update_document(message: Message, state: FSMContext):
+    if message.text == "🔙 Вернуться в главное меню":
+        await state.set_state(BlanksManagementStates.menu)
+        await message.answer("Обновление отменено.", reply_markup=get_blanks_management_kb())
+        return
+    await message.answer("Пожалуйста, отправьте новый бланк как документ.")
 
 @admin_router.message(BlanksManagementStates.entering_title)
 async def blank_enter_title(message: Message, state: FSMContext):

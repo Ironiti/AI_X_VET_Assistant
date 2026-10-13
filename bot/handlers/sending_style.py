@@ -1,4 +1,5 @@
 from aiogram.types import Message
+from utils.document_files import blank_file_name
 from langchain.schema import Document
 import pytz
 import asyncio
@@ -22,16 +23,23 @@ BOT_USERNAME = "AI_VET_Assistant_Bot"
 BLANKS_PATH = "data/documents"
 
 async def send_blank_files_by_names(message, form_names: List[str]) -> Tuple[bool, List[int]]:
-    """Отправляет файлы бланков используя file_id и возвращает message_ids"""
+    """Отправляет актуальные бланки из админ-панели, кэша или с диска."""
     try:
         sent_files = 0
         message_ids = []
         
         for form_name in form_names:
-            file_name = f"{form_name.strip()}.pdf"
-            
-            # Пытаемся найти file_id в базе данных
-            file_data = await db.get_blank_file_id(file_name)
+            name = form_name.strip()
+            file_name = blank_file_name(name, BLANKS_PATH)
+
+            # Файл из админ-панели имеет приоритет: именно его видят и в
+            # разделе скачивания, и внутри карточки анализа.
+            blank_doc = await db.find_blank_document_by_title(name)
+            file_data = (
+                {"file_id": blank_doc["file_id"]}
+                if blank_doc and blank_doc.get("file_id")
+                else await db.get_blank_file_id(file_name)
+            )
             
             if file_data and file_data.get("file_id"):
                 # Используем существующий file_id для быстрой отправки
@@ -245,6 +253,24 @@ def get_user_first_name(user):
 
 ['primary_container_type', 'container_type', 'container_number']
 
+STOPLIST_STATUS_BANNERS = {
+    "suspended": "⏸️ <b>В ПРИОСТАНОВКЕ</b>",
+    "removed": "⛔ <b>ВЫВЕДЕНО</b>",
+}
+
+
+def normalize_stoplist_status(value) -> str:
+    """Return a supported stop-list status or an empty fallback."""
+    if value is None:
+        return ""
+    status = str(value).strip().casefold()
+    return status if status in STOPLIST_STATUS_BANNERS else ""
+
+
+def format_stoplist_status_banner(value) -> str:
+    """Build the prominent card banner for a supported status."""
+    return STOPLIST_STATUS_BANNERS.get(normalize_stoplist_status(value), "")
+
 def format_test_data(metadata: Dict) -> Dict:
     """Extract and format test metadata into standardized dictionary."""
 
@@ -252,6 +278,7 @@ def format_test_data(metadata: Dict) -> Dict:
         "type": metadata.get("type"),
         "test_code": metadata.get("test_code"),
         "test_name": metadata.get("test_name"),
+        "stoplist_status": normalize_stoplist_status(metadata.get("stoplist_status")),
         "department": metadata.get("department"),
         "term_of_execution": metadata.get("term_of_execution"),
         "important_information": metadata.get("important_information"),
@@ -288,7 +315,10 @@ def format_test_info_brief(test_data: Dict) -> str:
     test_name = html.escape(test_data.get("test_name"))
     department = html.escape(test_data.get("department"))
 
-    return emoji_manager.format_message(
+    banner = format_stoplist_status_banner(test_data.get("stoplist_status"))
+    banner_prefix = f"{banner}\n\n" if banner else ""
+
+    return banner_prefix + emoji_manager.format_message(
         f"test_name <b>{t_type}: {test_data['test_code']} - {test_name}</b>\n\n"
     ) + emoji_manager.format_message(
         f"🧬department <b>Вид исследования:</b> {department}\n"
@@ -332,11 +362,14 @@ def format_test_info(test_data: Dict) -> str:
         ),
     }
 
-    message_parts = [
+    message_parts = []
+    if banner := format_stoplist_status_banner(test_data.get("stoplist_status")):
+        message_parts.append(f"{banner}\n\n")
+    message_parts.append(
         emoji_manager.format_message(
             f"test_name <b>{t_type}: {test_data['test_code']} - {test_data['test_name']}</b>\n\n"
         )
-    ]
+    )
 
     for field, (emoji, display_name) in field_templates.items():
        

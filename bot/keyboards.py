@@ -87,6 +87,7 @@ def get_user_type_kb():
     """Клавиатура выбора типа пользователя"""
     kb = [
         [KeyboardButton(text="👨‍⚕️ Ветеринарный врач клиники-партнера")],
+        [KeyboardButton(text="👨‍⚕️ Частнопрактикующий врач")],
         [KeyboardButton(text="🔬 Сотрудник X-LAB VET")],
         [KeyboardButton(text="👤 Продолжить как гость")]
     ]
@@ -96,6 +97,7 @@ def get_registration_type_kb():
     """Клавиатура выбора роли для полной регистрации"""
     kb = [
         [KeyboardButton(text="👨‍⚕️ Ветеринарный врач клиники-партнера")],
+        [KeyboardButton(text="👨‍⚕️ Частнопрактикующий врач")],
         [KeyboardButton(text="🔬 Сотрудник X-LAB VET")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)

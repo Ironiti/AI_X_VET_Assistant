@@ -96,6 +96,7 @@ def join_pcr_data(main_file_path):
     
     # Читаем оба листа из Excel файла
     main_df = pd.read_excel(main_file_path, sheet_name='Основная таблица')
+    main_df = main_df[main_df['test_code'].fillna('').astype(str).str.strip().ne('')].copy()
     pcr_df = pd.read_excel(main_file_path, sheet_name='Справочник сокращений ПЦР')
     
     # Функция для извлечения буквенной части из кода теста
