@@ -1,5 +1,6 @@
 """Exercise CPV handlers and SQLite migrations without network or production data."""
 import ast
+import asyncio
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
@@ -9,6 +10,7 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock
+from weakref import WeakValueDictionary
 
 import aiosqlite
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -58,7 +60,8 @@ def registration_namespace(root):
     for suffix in ('user_type', 'specialization', 'custom_specialization', 'practitioner_name', 'practitioner_region', 'country', 'guest_code', 'client_code'):
         name = 'WAITING_FOR_' + suffix.upper() if vk else 'waiting_for_' + suffix
         setattr(states, name, suffix)
-    db = SimpleNamespace(add_private_practitioner=AsyncMock(return_value=True), add_client=AsyncMock(return_value=True))
+    db = SimpleNamespace(add_private_practitioner=AsyncMock(return_value=True), add_client=AsyncMock(return_value=True),
+                         get_user=AsyncMock(return_value=None))
     ns = dict(Message=object, FSMContext=object, StateManager=object, RegistrationStates=states,
               db=db, ReplyKeyboardRemove=lambda: 'remove-keyboard', _reg_sessions={},
               get_specialization_kb=lambda: 'specialties', get_main_menu_kb=lambda: 'main-menu',
@@ -70,6 +73,14 @@ def registration_namespace(root):
         names += ['_ask_practitioner_name', '_complete_client_registration']
     else:
         names += ['ask_practitioner_name']
+    source = (root / 'bot/handlers/registration.py').read_text(encoding='utf-8-sig')
+    if 'def _specialization_lock(' in source:
+        names += ['_specialization_lock', '_recover_specialization_state',
+                  '_process_specialization_choice', '_save_specialization_choice']
+        if vk:
+            names += ['_report_specialization_busy']
+        ns.update(asyncio=asyncio, sqlite3=sqlite3,
+                  _specialization_locks=WeakValueDictionary())
     return load_functions(root / 'bot/handlers/registration.py', names, ns)
 
 

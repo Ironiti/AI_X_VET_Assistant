@@ -593,26 +593,32 @@ class Database:
                            found_test_code: str = None, search_type: str = 'text', 
                            success: bool = True):
         """Добавляет запись в историю поиска"""
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute('''
-                INSERT INTO search_history (user_id, search_query, found_test_code, 
-                                        search_type, success, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (user_id, search_query, found_test_code, search_type, success, datetime.now()))
-            await db.commit()
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=0.2) as db:
+                await db.execute('''
+                    INSERT INTO search_history (user_id, search_query, found_test_code, 
+                                            search_type, success, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (user_id, search_query, found_test_code, search_type, success, datetime.now()))
+                await db.commit()
+        except aiosqlite.Error as error:
+            print(f"[WARNING] Search statistics skipped in add_search_history: {error}")
 
     async def update_user_frequent_test(self, user_id: int, test_code: str, test_name: str):
         """Обновляет частоту использования теста пользователем"""
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute('''
-                INSERT INTO user_frequent_tests (user_id, test_code, test_name, frequency, last_accessed)
-                VALUES (?, ?, ?, 1, ?)
-                ON CONFLICT(user_id, test_code) DO UPDATE SET
-                    frequency = frequency + 1,
-                    test_name = excluded.test_name,
-                    last_accessed = excluded.last_accessed
-            ''', (user_id, test_code, test_name, datetime.now()))
-            await db.commit()
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=0.2) as db:
+                await db.execute('''
+                    INSERT INTO user_frequent_tests (user_id, test_code, test_name, frequency, last_accessed)
+                    VALUES (?, ?, ?, 1, ?)
+                    ON CONFLICT(user_id, test_code) DO UPDATE SET
+                        frequency = frequency + 1,
+                        test_name = excluded.test_name,
+                        last_accessed = excluded.last_accessed
+                ''', (user_id, test_code, test_name, datetime.now()))
+                await db.commit()
+        except aiosqlite.Error as error:
+            print(f"[WARNING] Search statistics skipped in update_user_frequent_test: {error}")
 
     async def get_user_frequent_tests(self, user_id: int, limit: int = 10) -> list:
         """Получает частые тесты пользователя"""
@@ -650,16 +656,19 @@ class Database:
         if test_code_1 > test_code_2:
             test_code_1, test_code_2 = test_code_2, test_code_1
         
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute('''
-                INSERT INTO related_tests (user_id, test_code_1, test_code_2, 
-                                        correlation_count, last_correlation)
-                VALUES (?, ?, ?, 1, ?)
-                ON CONFLICT(user_id, test_code_1, test_code_2) DO UPDATE SET
-                    correlation_count = correlation_count + 1,
-                    last_correlation = excluded.last_correlation
-            ''', (user_id, test_code_1, test_code_2, datetime.now()))
-            await db.commit()
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=0.2) as db:
+                await db.execute('''
+                    INSERT INTO related_tests (user_id, test_code_1, test_code_2, 
+                                            correlation_count, last_correlation)
+                    VALUES (?, ?, ?, 1, ?)
+                    ON CONFLICT(user_id, test_code_1, test_code_2) DO UPDATE SET
+                        correlation_count = correlation_count + 1,
+                        last_correlation = excluded.last_correlation
+                ''', (user_id, test_code_1, test_code_2, datetime.now()))
+                await db.commit()
+        except aiosqlite.Error as error:
+            print(f"[WARNING] Search statistics skipped in update_related_tests: {error}")
 
     async def get_user_related_tests(self, user_id: int, test_code: str, limit: int = 5) -> list:
         """Получает тесты, которые пользователь часто ищет вместе с данным"""
@@ -1841,13 +1850,17 @@ class Database:
                 print(f"Ошибка сохранения истории FAQ: {e}")
 
     async def add_request_stat(self, user_id: int, request_type: str, request_text: str):
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute('''
-                INSERT INTO request_statistics (user_id, request_type, 
-                                              request_text, timestamp)
-                VALUES (?, ?, ?, ?)
-            ''', (user_id, request_type, request_text, datetime.now()))
-            await db.commit()
+        # Необязательная статистика не должна прерывать ответ пользователю.
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=0.2) as db:
+                await db.execute('''
+                    INSERT INTO request_statistics (user_id, request_type, 
+                                                  request_text, timestamp)
+                    VALUES (?, ?, ?, ?)
+                ''', (user_id, request_type, request_text, datetime.now()))
+                await db.commit()
+        except aiosqlite.Error as error:
+            print(f"[WARNING] Search statistics skipped in add_request_stat: {error}")
     
     async def add_feedback(self, user_id: int, feedback_type: str, message: str, 
                           media_type: str = None, media_file_id: str = None):
