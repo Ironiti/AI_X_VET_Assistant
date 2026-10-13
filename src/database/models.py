@@ -1055,6 +1055,7 @@ class Database:
                     menu_version TEXT NOT NULL,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_user_activity_at TIMESTAMP,
                     FOREIGN KEY (user_id) REFERENCES users(telegram_id)
                 )
             ''')
@@ -1065,12 +1066,10 @@ class Database:
                 await db.execute(
                     'ALTER TABLE user_menu_versions ADD COLUMN last_seen_at TIMESTAMP'
                 )
+            # Existing dates are menu dates, not proof of user activity.
+            if 'last_user_activity_at' not in menu_columns:
                 await db.execute(
-                    '''
-                    UPDATE user_menu_versions
-                    SET last_seen_at = COALESCE(updated_at, CURRENT_TIMESTAMP)
-                    WHERE last_seen_at IS NULL
-                    '''
+                    'ALTER TABLE user_menu_versions ADD COLUMN last_user_activity_at TIMESTAMP'
                 )
 
             # Таблица для жалоб и предложений с поддержкой медиа
@@ -1775,54 +1774,60 @@ class Database:
             row = await cursor.fetchone()
             return row[0] if row else None
 
-    async def is_user_menu_inactive(
-        self,
-        telegram_id: int,
-        inactivity_days: int,
-    ) -> bool:
-        """Return True when the user has not contacted the bot for N days."""
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute(
-                '''
-                SELECT 1
-                FROM user_menu_versions
-                WHERE user_id = ?
-                  AND last_seen_at IS NOT NULL
-                  AND last_seen_at <= datetime('now', ?)
-                ''',
-                (telegram_id, f'-{max(1, inactivity_days)} days'),
-            )
-            return await cursor.fetchone() is not None
+    async def is_user_menu_inactive(self, telegram_id: int, inactivity_days: int) -> bool:
+        """Only a recorded inbound interaction can establish inactivity."""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=0.2) as db:
+                cursor = await db.execute(
+                    "SELECT COALESCE(julianday(last_user_activity_at) <= julianday('now', ?), 0) "
+                    "FROM user_menu_versions WHERE user_id = ?",
+                    (f'-{max(1, inactivity_days)} days', telegram_id),
+                )
+                row = await cursor.fetchone()
+                return bool(row and row[0])
+        except aiosqlite.Error as error:
+            print(f"[WARNING] Menu activity lookup skipped: {error}")
+            return False
 
+
+    async def register_user_menu_activity(self, telegram_id: int, inactivity_days: int) -> bool:
+        """Atomically inspect previous activity and record this inbound event."""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=0.2) as db:
+                await db.execute('BEGIN IMMEDIATE')
+                cursor = await db.execute(
+                    "SELECT COALESCE(julianday(last_user_activity_at) <= julianday('now', ?), 0) "
+                    "FROM user_menu_versions WHERE user_id = ?",
+                    (f'-{max(1, inactivity_days)} days', telegram_id),
+                )
+                row = await cursor.fetchone()
+                was_inactive = bool(row and row[0])
+                await db.execute(
+                    "INSERT INTO user_menu_versions (user_id, menu_version, last_user_activity_at) "
+                    "VALUES (?, '', CURRENT_TIMESTAMP) "
+                    "ON CONFLICT(user_id) DO UPDATE SET last_user_activity_at = CURRENT_TIMESTAMP",
+                    (telegram_id,),
+                )
+                await db.commit()
+                return was_inactive
+        except aiosqlite.Error as error:
+            # No reliable check means no claim that the user was absent.
+            print(f"[WARNING] Menu activity recording skipped: {error}")
+            return False
 
     async def touch_user_menu_activity(self, telegram_id: int) -> None:
-        """Remember the latest message without changing the delivered menu version."""
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                '''
-                UPDATE user_menu_versions
-                SET last_seen_at = CURRENT_TIMESTAMP
-                WHERE user_id = ?
-                ''',
-                (telegram_id,),
-            )
-            await db.commit()
+        """Record an actual message or button press, never a menu delivery."""
+        await self.register_user_menu_activity(telegram_id, 30)
 
 
     async def set_user_menu_version(self, telegram_id: int, menu_version: str) -> None:
-        """Persist the reply-menu version after Telegram accepted the message."""
+        """Menu delivery is separate from inbound user activity."""
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
-                '''
-                INSERT INTO user_menu_versions (
-                    user_id, menu_version, updated_at, last_seen_at
-                )
-                VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                ON CONFLICT(user_id) DO UPDATE SET
-                    menu_version = excluded.menu_version,
-                    updated_at = CURRENT_TIMESTAMP,
-                    last_seen_at = CURRENT_TIMESTAMP
-                ''',
+                "INSERT INTO user_menu_versions (user_id, menu_version, updated_at) "
+                "VALUES (?, ?, CURRENT_TIMESTAMP) "
+                "ON CONFLICT(user_id) DO UPDATE SET menu_version = excluded.menu_version, "
+                "updated_at = CURRENT_TIMESTAMP",
                 (telegram_id, menu_version),
             )
             await db.commit()

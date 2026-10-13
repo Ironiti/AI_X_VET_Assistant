@@ -19,7 +19,7 @@ from bot.handlers.error_callbacks import error_callbacks_router  # ✅ НОВО�
 from bot.middleware.metrics_middleware import MetricsMiddleware
 from bot.middleware.state_recovery_middleware import StateRecoveryMiddleware
 from bot.middleware.error_middleware import ErrorHandlingMiddleware  # ✅ НОВОЕ: Обработка ошибок
-from bot.middleware.menu_refresh_middleware import MenuRefreshMiddleware
+from bot.middleware.menu_refresh_middleware import MenuRefreshMiddleware, MenuActivityMiddleware
 from bot.storage import SQLiteStorage
 from bot.telegram_proxy import select_telegram_proxy
 # from .questions import questions_router, questions_callbacks_router
@@ -65,6 +65,8 @@ dp.message.middleware(MetricsMiddleware())
 dp.callback_query.middleware(MetricsMiddleware())
 
 # Refresh an outdated reply keyboard only after a safe user interaction.
+dp.message.outer_middleware(MenuActivityMiddleware())
+dp.callback_query.outer_middleware(MenuActivityMiddleware())
 dp.message.middleware(MenuRefreshMiddleware())
 
 # Регистрация роутеров (порядок важен!)

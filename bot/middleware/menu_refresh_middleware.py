@@ -33,6 +33,34 @@ def _is_plain_start(text: str | None) -> bool:
     return command == "/start" and len(parts) == 1
 
 
+
+_MENU_ACTIVITY_KEY = "_menu_activity_was_inactive"
+
+
+class MenuActivityMiddleware(BaseMiddleware):
+    """Record inbound messages/callbacks before filters or handlers can fail."""
+
+    def __init__(self, database=None, inactivity_days=MENU_REFRESH_INACTIVITY_DAYS):
+        super().__init__()
+        self.database = database or db
+        self.inactivity_days = max(1, inactivity_days)
+
+    async def __call__(self, handler, event, data):
+        actor = getattr(event, "from_user", None)
+        if isinstance(event, Message):
+            data[_MENU_ACTIVITY_KEY] = False
+        if actor and not getattr(actor, "is_bot", False):
+            try:
+                was_inactive = await self.database.register_user_menu_activity(
+                    actor.id, self.inactivity_days
+                )
+                if isinstance(event, Message):
+                    data[_MENU_ACTIVITY_KEY] = was_inactive
+            except Exception:
+                logger.exception("[MENU_REFRESH] Could not record incoming activity")
+        return await handler(event, data)
+
+
 class MenuRefreshMiddleware(BaseMiddleware):
     """Show the current reply menu once without interrupting an active flow."""
 
@@ -57,6 +85,11 @@ class MenuRefreshMiddleware(BaseMiddleware):
         delivered_before = None
         if event.from_user is not None:
             try:
+                inactive = bool(data.get(_MENU_ACTIVITY_KEY, False))
+                if _MENU_ACTIVITY_KEY not in data:
+                    inactive = await self.database.register_user_menu_activity(
+                        event.from_user.id, self.inactivity_days
+                    )
                 user_before = await self.database.get_user(event.from_user.id)
                 state: FSMContext | None = data.get("state")
                 state_before = await state.get_state() if state else None
@@ -64,10 +97,6 @@ class MenuRefreshMiddleware(BaseMiddleware):
                 if user_before and state_before is None:
                     delivered_before = await self.database.get_user_menu_version(
                         event.from_user.id
-                    )
-                    inactive = await self.database.is_user_menu_inactive(
-                        event.from_user.id,
-                        self.inactivity_days,
                     )
                     handler_will_show_menu = (
                         _is_plain_start(event.text)
@@ -114,8 +143,6 @@ class MenuRefreshMiddleware(BaseMiddleware):
             user = await self.database.get_user(user_id)
             if not user:
                 return result
-
-            await self.database.touch_user_menu_activity(user_id)
 
             # A dialogue, registration, form, or upload still owns the keyboard.
             current_state = await state.get_state() if state else None

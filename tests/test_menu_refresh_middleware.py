@@ -21,6 +21,11 @@ class FakeDatabase:
     async def is_user_menu_inactive(self, _user_id, _days):
         return self.inactive
 
+    async def register_user_menu_activity(self, user_id, days):
+        previous = await self.is_user_menu_inactive(user_id, days)
+        await self.touch_user_menu_activity(user_id)
+        return previous
+
     async def touch_user_menu_activity(self, user_id):
         self.inactive = False
         self.touched.append(user_id)
