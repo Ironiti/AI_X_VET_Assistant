@@ -29,7 +29,10 @@ elif torch.backends.mps.is_available():
 else:
     device = torch.device('cpu')
 
-USE_POLZA_AI = True
+from models.ai_provider import (
+    USE_POLZA_AI, USE_TIMEWEB_AI, api_settings,
+    embedding_api_model_name, embedding_retry_options,
+)
 
 def retry_with_fallback(max_retries: int = 2, delay: float = 1.0):
     """Декоратор для повторных попыток с fallback"""
@@ -110,24 +113,20 @@ class QwenEmbeddings(Embeddings):
 
         # Determine remote vs local
         if use_remote is None:
-            self.use_remote = bool(POLZA_AI_API_KEY if USE_POLZA_AI else OPENROUTER_API_KEY)
+            self.use_remote = bool(api_settings()[1])
         else:
             self.use_remote = use_remote
 
 
-        if USE_POLZA_AI:
-            api_url = 'https://api.polza.ai/api/v1'
-            api_key = POLZA_AI_API_KEY
-        else:
-            api_url = 'https://openrouter.ai/api/v1'
-            api_key = OPENROUTER_API_KEY
+        api_url, api_key = api_settings()
 
         if self.use_remote:
             if not api_key:
                 raise ValueError('AI API key not set for remote embeddings')
             self.client = OpenAI(
                 api_key=api_key,
-                base_url=api_url
+                base_url=api_url,
+                **embedding_retry_options(),
             )
             print(f'[INFO] Using DeepInfra remote embeddings for model: {model_name}')
         else:
@@ -202,7 +201,7 @@ class QwenEmbeddings(Embeddings):
             for i in tqdm(range(0, len(texts), batch_size), desc=f'Remote embedding ({model.model_name})'):
                 batch_texts = texts[i:i + batch_size]
                 response = model.client.embeddings.create(
-                    model=model.model_name,
+                    model=embedding_api_model_name(model.model_name),
                     input=batch_texts,
                     encoding_format='float'
                 )
@@ -246,7 +245,7 @@ class QwenEmbeddings(Embeddings):
 
 
 
-if USE_POLZA_AI:
+if USE_POLZA_AI or USE_TIMEWEB_AI:
     pr_model = 'text-embedding-3-large'
     fa_model = 'text-embedding-3-large'
 else:

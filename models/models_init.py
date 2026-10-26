@@ -8,9 +8,13 @@ SEED = 42
 TEMPERATURE = 0
 TOP_P = 1.0
 
-USE_POLZA_AI = True
+from models.ai_provider import (
+    USE_POLZA_AI, USE_TIMEWEB_AI, api_settings, chat_model_name, chat_retry_options,
+)
 
-if USE_POLZA_AI:
+if USE_TIMEWEB_AI:
+    api_settings()  # Validate the selected key without requiring legacy credentials.
+elif USE_POLZA_AI:
     if not POLZA_AI_API_KEY:
         raise RuntimeError('POLZA_AI_API_KEY not found.')
 else:
@@ -21,12 +25,8 @@ def make_chat(model_name: str, streaming: bool = True) -> ChatOpenAI:
     """
     Helper to instantiate ChatOpenAI with correct kwargs
     """
-    if USE_POLZA_AI:
-        api_url = 'https://api.polza.ai/api/v1'
-        api_key = POLZA_AI_API_KEY
-    else:
-        api_url = 'https://openrouter.ai/api/v1'
-        api_key = OPENROUTER_API_KEY
+    api_url, api_key = api_settings()
+    model_name = chat_model_name(model_name)
 
     return ChatOpenAI(
         model=model_name,
@@ -35,6 +35,7 @@ def make_chat(model_name: str, streaming: bool = True) -> ChatOpenAI:
         temperature=TEMPERATURE,
         streaming=streaming,
         timeout=30,
+        **chat_retry_options(),
         model_kwargs={"top_p": TOP_P, "seed": SEED, "frequency_penalty": 0, "presence_penalty": 0},
     )
 
@@ -46,7 +47,7 @@ qwq_32b_instruct_free = make_chat("qwen/qwq-32b:free", streaming=False)
 deepseek_r1_instruct_free = make_chat("deepseek/deepseek-r1:free", streaming=False)
 gemini_2_5_pro_exp_free = make_chat("google/gemini-2.5-pro-exp-03-25:free", streaming=False)
 
-if USE_POLZA_AI:
+if USE_POLZA_AI or USE_TIMEWEB_AI:
     Google_Gemini_2_5_Flash_Lite = make_chat("google/gemini-2.5-flash-lite", streaming=False)
 else:
     Google_Gemini_2_5_Flash_Lite = make_chat("@preset/vet-ai-agent", streaming=False)
